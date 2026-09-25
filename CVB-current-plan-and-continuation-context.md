@@ -29,6 +29,14 @@ cvb <command> [args...]
 
 There are no `file` / `directory` subcommands. Path determines the operation.
 
+For target resolution, CVB gives existing filesystem paths precedence over
+external commands. Thus `cvb Cargo.toml` bridges the file when it exists;
+otherwise `cvb Cargo.toml` is treated as an external command. Explicit paths
+such as `./foo`, `../foo`, and `/tmp/foo` are always path targets.
+
+This is intentional CVB-specific behavior rather than a requirement to mimic
+normal shell command resolution exactly.
+
 Potential unresolved collision: commands literally named `on` or `off`.
 
 ## 3. Resident architecture
