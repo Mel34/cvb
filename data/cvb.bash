@@ -55,9 +55,14 @@ cvb() {
         return "$status"
     fi
 
-    if [[ "$1" == "off" && -n ${CVB_ACTIVE:-} ]]; then
-        cvb_control_exit
-        exit
+    if [[ "$1" == "off" ]]; then
+        if [[ -n ${CVB_ACTIVE:-} ]]; then
+            cvb_control_exit
+            exit
+        fi
+
+        printf 'CVB: not running\n' >&2
+        return 1
     fi
 
     command cvb "$@"
