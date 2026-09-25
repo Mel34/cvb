@@ -131,3 +131,6 @@ fi
 
 PROMPT_COMMAND='cvb_control_prompt'
 trap 'cvb_control_debug' DEBUG
+
+CVB_SAVED_PS1=$PS1
+PS1='\[\e[31m\]●\[\e[0m\] '"$CVB_SAVED_PS1"

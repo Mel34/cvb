@@ -1,7 +1,14 @@
 cvb() {
     if [[ "$1" == "on" ]]; then
+        if [[ -n ${CVB_ACTIVE:-} ]]; then
+            printf 'CVB: already running\n' >&2
+            return 1
+        fi
+
         local runtime_dir="${XDG_RUNTIME_DIR:-/tmp}/cvb"
         local init_file
+        local previous_cvb_active=${CVB_ACTIVE+x}
+        local previous_cvb_active_value=${CVB_ACTIVE-}
 
         mkdir -p "$runtime_dir" || return 1
 
@@ -30,11 +37,19 @@ cvb() {
             return 1
         }
 
+        export CVB_ACTIVE=1
+
         CVB_INIT_FILE="$init_file" command cvb "$@"
         local status=$?
 
         if [[ $status -ne 0 ]]; then
             rm -f "$init_file"
+        fi
+
+        if [[ -n $previous_cvb_active ]]; then
+            export CVB_ACTIVE="$previous_cvb_active_value"
+        else
+            unset CVB_ACTIVE
         fi
 
         return "$status"
