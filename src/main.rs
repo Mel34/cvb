@@ -8,7 +8,7 @@ fn main() {
     match cli::parse() {
         cli::Command::On => match shell::create_rcfile() {
             Ok(rcfile) => match pty::run(&rcfile) {
-                Ok(status) => println!("CVB child exited with status {status}"),
+                Ok(_) => {}
                 Err(error) => eprintln!("{error}"),
             },
             Err(error) => eprintln!("{error}"),

@@ -55,5 +55,10 @@ cvb() {
         return "$status"
     fi
 
+    if [[ "$1" == "off" && -n ${CVB_ACTIVE:-} ]]; then
+        cvb_control_exit
+        exit
+    fi
+
     command cvb "$@"
 }
