@@ -1,0 +1,10 @@
+[package]
+name = "cvb"
+version = "0.1.0"
+edition = "2024"
+description = "Capture, View, Bridge — terminal-to-LLM exchange utility"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+libc = "0.2"
+nix = { version = "0.30", features = ["term", "process", "poll", "ioctl", "signal"] }
