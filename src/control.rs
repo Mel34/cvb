@@ -1,6 +1,6 @@
 use std::os::fd::{AsFd, OwnedFd};
 
-use nix::unistd::{read, write};
+use nix::unistd::read;
 
 const HEADER_SIZE: usize = 4;
 const MAX_FRAME_SIZE: usize = 1024 * 1024;
@@ -33,21 +33,6 @@ impl ControlChannel {
         &self.fd
     }
 
-    pub fn send(&self, message: &ControlMessage) -> Result<(), String> {
-        let payload = encode(message)?;
-
-        let length = u32::try_from(payload.len())
-            .map_err(|_| "CVB: control message is too large".to_string())?;
-
-        let mut frame = Vec::with_capacity(HEADER_SIZE + payload.len());
-
-        frame.extend_from_slice(&length.to_be_bytes());
-        frame.extend_from_slice(&payload);
-
-        write_all(self.fd.as_fd(), &frame)
-            .map_err(|error| format!("CVB: unable to send control message: {error}"))
-    }
-
     pub fn receive(&mut self) -> Result<Vec<ControlMessage>, String> {
         let mut buffer = [0u8; 4096];
 
@@ -76,6 +61,7 @@ impl ControlChannel {
     }
 }
 
+#[cfg(test)]
 fn encode(message: &ControlMessage) -> Result<Vec<u8>, String> {
     let mut payload = Vec::new();
 
@@ -188,22 +174,6 @@ fn decode(payload: &[u8]) -> Result<ControlMessage, String> {
             "CVB: unknown control message type: 0x{message_type:02x}"
         )),
     }
-}
-
-fn write_all(fd: impl AsFd, buffer: &[u8]) -> Result<(), nix::Error> {
-    let mut written = 0;
-
-    while written < buffer.len() {
-        let count = write(fd.as_fd(), &buffer[written..])?;
-
-        if count == 0 {
-            return Err(nix::errno::Errno::EPIPE);
-        }
-
-        written += count;
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]

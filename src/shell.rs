@@ -1,7 +1,6 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn create_rcfile() -> Result<PathBuf, String> {
@@ -57,14 +56,6 @@ fn control_script() -> Result<String, String> {
             path.display()
         )
     })
-}
-
-pub fn child_command(rcfile: &Path) -> Command {
-    let mut command = Command::new("bash");
-
-    command.arg("--rcfile").arg(rcfile).arg("-i");
-
-    command
 }
 
 fn bash_quote(path: &Path) -> String {
