@@ -313,8 +313,10 @@ fn handle_control_message(
             *capturing_output = true;
         }
 
-        ControlMessage::End { id, status } => {
+        ControlMessage::End { id: _, status: _ } => {
             let processed = postprocess_output(command_output);
+
+            *capturing_output = false;
 
             let mut child = std::process::Command::new("wl-copy")
                 .stdin(std::process::Stdio::piped())
@@ -334,13 +336,9 @@ fn handle_control_message(
             if !status.success() {
                 return Err(format!("CVB: wl-copy exited with status {status}"));
             }
-
-            *capturing_output = false;
         }
 
-        ControlMessage::Exit => {
-            eprintln!("CVB control EXIT");
-        }
+        ControlMessage::Exit => {}
     }
 
     Ok(())
