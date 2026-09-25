@@ -17,7 +17,18 @@ fn main() {
         cli::Command::Help => println!("CVB — Capture → View → Bridge"),
         cli::Command::Version => println!("cvb 0.1.0"),
         cli::Command::Target(args) => {
-            println!("CVB target: {}", args.join(" "));
+            let mut command = std::process::Command::new(&args[0]);
+            command.args(&args[1..]);
+
+            match command.status() {
+                Ok(status) => {
+                    std::process::exit(status.code().unwrap_or(1));
+                }
+                Err(error) => {
+                    eprintln!("CVB: unable to execute {}: {error}", args[0]);
+                    std::process::exit(1);
+                }
+            }
         }
     }
 }
