@@ -6,5 +6,14 @@ description = "Capture, View, Bridge — terminal-to-LLM exchange utility"
 license = "GPL-3.0-or-later"
 
 [dependencies]
+ashpd = "0.12"
+futures-util = "0.3"
 libc = "0.2"
-nix = { version = "0.30", features = ["term", "process", "poll", "ioctl", "signal"] }
+evdev = "0.13"
+nix = { version = "0.30", features = ["term", "process", "poll", "ioctl", "signal", "time"] }
+reis = { version = "0.3", features = ["tokio"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+xkbcommon = "0.8"
+
+[build-dependencies]
+pkg-config = "0.3"

@@ -65,6 +65,15 @@ fn run_pty(rcfile: &Path) -> Result<i32, String> {
 
     let winsize = terminal_size()?;
 
+    let runtime = tokio::runtime::Runtime::new()
+        .map_err(|error| format!("CVB: unable to create input runtime: {error}"))?;
+
+    let input = runtime.block_on(crate::input::Input::new())
+        .map_err(|error| format!("CVB: unable to initialize input: {error}"))?;
+        
+    let mut hotkey_monitor = crate::keyboard::HotkeyMonitor::new()
+        .map_err(|error| format!("CVB: unable to initialize keyboard monitor: {error}"))?;
+
     let result = unsafe { forkpty(Some(&winsize), None) }
         .map_err(|error| format!("CVB: unable to create PTY: {error}"))?;
 
@@ -138,7 +147,14 @@ fn run_pty(rcfile: &Path) -> Result<i32, String> {
 
             let mut control = ControlChannel::new(control_parent);
 
-            let result = proxy(&master, child, &signal_read, &mut control);
+            let result = proxy(
+                &master,
+                child,
+                &signal_read,
+                &mut control,
+                &input,
+                &mut hotkey_monitor,
+            );
 
             unsafe {
                 SIGWINCH_PIPE = None;
@@ -219,6 +235,8 @@ fn proxy(
     child: Pid,
     signal_read: &OwnedFd,
     control: &mut ControlChannel,
+    input: &crate::input::Input,
+    hotkey_monitor: &mut crate::keyboard::HotkeyMonitor,
 ) -> Result<(), String> {
     let stdin = io::stdin();
     let stdout = io::stdout();
@@ -229,6 +247,18 @@ fn proxy(
     let mut capturing_output = false;
 
     loop {
+        if hotkey_monitor
+            .poll()
+            .map_err(|error| format!("CVB: keyboard monitor error: {error}"))?
+        {
+            println!("CVB: hotkey detected, injecting Ctrl+C");
+
+            input
+                .inject_ctrl_c()
+                .map_err(|error| format!("CVB: unable to inject Ctrl+C: {error}"))?;
+
+            println!("CVB: Ctrl+C injection complete");
+        }
         let mut poll_fds = [
             nix::poll::PollFd::new(stdin.as_fd(), nix::poll::PollFlags::POLLIN),
             nix::poll::PollFd::new(master.as_fd(), nix::poll::PollFlags::POLLIN),
