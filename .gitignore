@@ -1,1 +1,20 @@
-/target
+# Cargo build output
+/target/
+
+# Local packaging files
+/PKGBUILD
+/cvb.install
+
+# makepkg build output
+/pkg/
+
+# makepkg package artifacts
+/*.pkg.tar
+/*.pkg.tar.zst
+/*.pkg.tar.xz
+/*.pkg.tar.gz
+
+# makepkg source archives
+/*.tar.gz
+/*.tar.xz
+/*.tar.zst

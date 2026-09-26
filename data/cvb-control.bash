@@ -100,7 +100,8 @@ cvb_control_debug() {
     [[ -n $command ]] || return
 
     [[ $command == exit || $command == exit[[:space:]]* ]] && return
-    
+    [[ $command == cvb || $command == cvb[[:space:]]* ]] && return
+
     CVB_LAST_HISTCMD=$HISTCMD
     cvb_control_start "$command"
 }

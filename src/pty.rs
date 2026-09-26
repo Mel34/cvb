@@ -86,6 +86,24 @@ fn run_pty(rcfile: &Path) -> Result<i32, String> {
                 std::process::exit(127);
             }
 
+            unsafe {
+                libc::setenv(
+                    b"PAGER\0".as_ptr() as *const libc::c_char,
+                    b"cat\0".as_ptr() as *const libc::c_char,
+                    1,
+                );
+                libc::setenv(
+                    b"GIT_PAGER\0".as_ptr() as *const libc::c_char,
+                    b"cat\0".as_ptr() as *const libc::c_char,
+                    1,
+                );
+                libc::setenv(
+                    b"SYSTEMD_PAGER\0".as_ptr() as *const libc::c_char,
+                    b"cat\0".as_ptr() as *const libc::c_char,
+                    1,
+                );
+            }
+
             let bash = CString::new("bash").unwrap();
 
             let rcfile_arg = match CString::new(rcfile.to_string_lossy().as_bytes()) {
