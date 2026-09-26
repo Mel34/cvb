@@ -10,6 +10,7 @@ ashpd = "0.12"
 futures-util = "0.3"
 libc = "0.2"
 evdev = "0.13"
+glob = "0.3"
 nix = { version = "0.30", features = ["term", "process", "poll", "ioctl", "signal", "time"] }
 reis = { version = "0.3", features = ["tokio"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

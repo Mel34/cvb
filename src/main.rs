@@ -52,17 +52,28 @@ fn main() {
 }
 
 fn target_paths(args: &[String]) -> Option<Vec<std::path::PathBuf>> {
-    let paths = args
-        .iter()
-        .map(std::path::Path::new)
-        .map(|path| {
-            if path.exists() {
-                Some(path.to_path_buf())
-            } else {
-                None
+    let mut paths = Vec::new();
+
+    for arg in args {
+        if let Ok(matches) = glob::glob(arg) {
+            let matches = matches
+                .filter_map(Result::ok)
+                .collect::<Vec<_>>();
+
+            if !matches.is_empty() {
+                paths.extend(matches);
+                continue;
             }
-        })
-        .collect::<Option<Vec<_>>>()?;
+        }
+
+        let path = std::path::Path::new(arg);
+
+        if path.exists() {
+            paths.push(path.to_path_buf());
+        } else {
+            return None;
+        }
+    }
 
     Some(paths)
 }
