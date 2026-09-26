@@ -1,0 +1,144 @@
+.TH CVB 1 "September 2026" "CVB 0.1.0" "User Commands"
+.SH NAME
+cvb \- terminal-to-LLM exchange utility
+.SH SYNOPSIS
+.B cvb
+.RI [ COMMAND ]
+.br
+.B cvb on
+.br
+.B cvb off
+.br
+.B cvb
+.I path
+.br
+.B cvb
+.I command
+.RI [ args... ]
+.SH DESCRIPTION
+.B CVB
+(Capture \(-> View \(-> Bridge) is a terminal utility for reliable exchange between a human, the terminal, the clipboard, and an LLM.
+
+CVB can capture commands and their terminal output in a resident Bash session, bridge files to the clipboard, recursively inventory directories as TSV, and execute external commands.
+
+CVB is not a shell replacement, terminal logger, terminal database, or AI agent.
+.SH COMMANDS
+.TP
+.B on
+Start a resident CVB Bash session.
+
+Commands entered in the session are captured when they complete. The combined terminal output of each command is copied to the Wayland clipboard.
+
+The active session is indicated by a red dot in the shell prompt.
+.TP
+.B off
+End the active CVB Bash session.
+
+When used outside an active session, CVB reports that no session is running.
+.TP
+.B --help, -h
+Display command-line help.
+.TP
+.B --version, -V
+Display the CVB version.
+.TP
+.I path
+If the argument names an existing filesystem path, bridge it according to its type.
+
+Regular files are copied to the clipboard unchanged. Directories are recursively represented as TSV.
+.TP
+.I command
+If the first argument does not name an existing filesystem path, execute it as an external command with the remaining arguments.
+.SH RESIDENT CAPTURE
+The resident mode is normally started through the Bash wrapper supplied with CVB.
+
+Source the wrapper into the parent Bash shell before using
+.B cvb on.
+.PP
+The wrapper creates a temporary shell-state file and starts a child Bash session. Useful parent-shell state is transferred to the child, including aliases, functions, shell options, shopt settings, and inherited environment variables.
+.PP
+CVB owns the capture-related prompt and shell hooks while the session is active. The parent shell is restored when the child session exits.
+.SH FILE BRIDGING
+An existing filesystem path takes precedence over an external command.
+.PP
+For example:
+.PP
+.EX
+cvb /path/to/file.txt
+.EE
+.PP
+copies the complete contents of the file to the Wayland clipboard.
+.SH DIRECTORY BRIDGING
+Directories are recursively represented as tab-separated values.
+.PP
+The output has the following form:
+.PP
+.EX
+path	type	size
+one.txt	file	4
+subdir	dir	-
+subdir/two.txt	file	4
+.EE
+.PP
+Paths are relative to the selected directory. Regular files report their byte size and directories use
+.BR \- .
+Symlinks and other filesystem object types are skipped.
+.SH CLIPBOARD
+CVB uses
+.B wl-copy
+for Wayland clipboard integration.
+.PP
+When a captured command produces no terminal output, CVB copies the marker
+.BR "[CVB: no output]"
+followed by a newline.
+.SH TARGET RESOLUTION
+Existing filesystem paths take precedence over external commands.
+.PP
+For example, if
+.B Cargo.toml
+exists in the current directory,
+.B cvb Cargo.toml
+bridges the file rather than attempting to execute a command named
+.BR Cargo.toml .
+.PP
+If the path does not exist, the arguments are treated as an external command.
+.SH FILES
+.TP
+.I /usr/bin/cvb
+The CVB executable when installed system-wide.
+.TP
+.I /usr/share/cvb/cvb.bash
+Bash wrapper providing the
+.B cvb on
+and
+.B cvb off
+commands.
+.TP
+.I $XDG_RUNTIME_DIR/cvb/
+Temporary CVB shell-state and Bash initialization files.
+.SH REQUIREMENTS
+CVB requires:
+.IP \(bu 2
+Linux
+.IP \(bu 2
+Bash
+.IP \(bu 2
+Wayland
+.IP \(bu 2
+wl-clipboard
+.SH EXIT STATUS
+.TP
+.B 0
+The requested operation completed successfully.
+.TP
+.B non-zero
+The operation failed, or an executed external command returned a non-zero status.
+.SH SEE ALSO
+.BR bash (1),
+.BR wl-copy (1)
+.SH AUTHOR
+Petar Margetić
+.br
+chadgpt
+.SH LICENSE
+CVB is free software licensed under the GNU General Public License, version 3 or later.

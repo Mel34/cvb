@@ -48,14 +48,7 @@ pub fn create_rcfile() -> Result<PathBuf, String> {
 }
 
 fn control_script() -> Result<String, String> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/cvb-control.bash");
-
-    fs::read_to_string(&path).map_err(|error| {
-        format!(
-            "CVB: unable to read control script {}: {error}",
-            path.display()
-        )
-    })
+    Ok(include_str!("../data/cvb-control.bash").to_string())
 }
 
 fn bash_quote(path: &Path) -> String {
