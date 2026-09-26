@@ -1,4 +1,4 @@
-.TH CVB 1 "September 2026" "CVB 0.1.0" "User Commands"
+.TH CVB 1 "September 2026" "CVB 0.2.0" "User Commands"
 .SH NAME
 cvb \- terminal-to-LLM exchange utility
 .SH SYNOPSIS
@@ -48,7 +48,7 @@ If the argument names an existing filesystem path, bridge it according to its ty
 Regular files are copied to the clipboard unchanged. Directories are recursively represented as TSV.
 .TP
 .I command
-If the first argument does not name an existing filesystem path, execute it as an external command with the remaining arguments.
+If the first argument does not name an existing filesystem path, execute it as an external command with the remaining arguments. Common terminal pagers are disabled while executing commands so their output can be captured directly.
 .SH RESIDENT CAPTURE
 The resident mode is normally started through the Bash wrapper supplied with CVB.
 
@@ -57,7 +57,7 @@ Source the wrapper into the parent Bash shell before using
 .PP
 The wrapper creates a temporary shell-state file and starts a child Bash session. Useful parent-shell state is transferred to the child, including aliases, functions, shell options, shopt settings, and inherited environment variables.
 .PP
-CVB owns the capture-related prompt and shell hooks while the session is active. The parent shell is restored when the child session exits.
+CVB owns the capture-related prompt and shell hooks while the session is active. The parent shell is restored when the child session exits. Commands entered during the session are added to the parent shell's history.
 .SH FILE BRIDGING
 An existing filesystem path takes precedence over an external command.
 .PP
@@ -83,6 +83,37 @@ subdir/two.txt	file	4
 Paths are relative to the selected directory. Regular files report their byte size and directories use
 .BR \- .
 Symlinks and other filesystem object types are skipped.
+.SH IGNORE LIST
+CVB creates
+.I ~/.config/cvb/ignore
+on first directory inventory. If
+.B XDG_CONFIG_HOME
+is set, the file is instead located at
+.IR $XDG_CONFIG_HOME/cvb/ignore .
+.PP
+The file contains one directory name per line. Blank lines and lines beginning with
+.B #
+are ignored. A directory name is excluded wherever it occurs in the directory tree.
+.PP
+The initial file excludes common version-control directories:
+.PP
+.EX
+.git
+.hg
+.svn
+.bzr
+.jj
+.EE
+.PP
+The file is the complete source of truth: remove an entry to include that directory, or add entries such as
+.B target
+or
+.B node_modules
+to exclude them.
+.PP
+CVB does not interpret glob patterns, regular expressions, or
+.BR .gitignore
+syntax.
 .SH CLIPBOARD
 CVB uses
 .B wl-copy
@@ -116,6 +147,12 @@ commands.
 .TP
 .I $XDG_RUNTIME_DIR/cvb/
 Temporary CVB shell-state and Bash initialization files.
+.TP
+.I ~/.config/cvb/ignore
+Directory names excluded from directory inventories. If
+.B XDG_CONFIG_HOME
+is set, the file is located at
+.IR $XDG_CONFIG_HOME/cvb/ignore .
 .SH REQUIREMENTS
 CVB requires:
 .IP \(bu 2

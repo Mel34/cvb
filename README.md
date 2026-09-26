@@ -61,7 +61,7 @@ To end the session:
 cvb off
 ```
 
-The parent shell is left running normally after the CVB child session exits.
+The parent shell is left running normally after the CVB child session exits. Commands entered during the session are added to the parent shell's history.
 
 ### Shell state
 
@@ -112,6 +112,26 @@ cvb ~/Projects/cvb
 
 copies the resulting inventory to the clipboard.
 
+### Ignore list
+
+CVB creates `~/.config/cvb/ignore` on first directory inventory. If `XDG_CONFIG_HOME` is set, the file is instead located at `$XDG_CONFIG_HOME/cvb/ignore`.
+
+The file contains one directory name per line. Blank lines and lines beginning with `#` are ignored. A directory name is excluded wherever it occurs in the directory tree.
+
+The initial file excludes common version-control directories:
+
+```
+.git
+.hg
+.svn
+.bzr
+.jj
+```
+
+The file is the complete source of truth: remove an entry to include that directory, or add entries such as `target` or `node_modules` to exclude them.
+
+CVB does not interpret glob patterns, regular expressions, or `.gitignore` syntax.
+
 ## External commands
 
 When the target is not an existing filesystem path, CVB executes it as an external command:
@@ -121,6 +141,7 @@ cvb cargo test
 ```
 
 CVB does not attempt to reimplement Bash parsing. Shell syntax that requires Bash remains the responsibility of Bash.
+Common terminal pagers are disabled while executing commands so their output can be captured directly.
 
 ## Target resolution
 
