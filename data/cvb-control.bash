@@ -14,6 +14,12 @@ HISTFILESIZE=1000
 HISTCONTROL=
 HISTIGNORE=
 HISTTIMEFORMAT=
+
+if [[ -n ${CVB_HISTORY_FILE:-} ]]; then
+    HISTFILE=$CVB_HISTORY_FILE
+    : >"$HISTFILE"
+fi
+
 set -o history
 shopt -s cmdhist
 shopt -s lithist
@@ -77,6 +83,7 @@ cvb_control_end() {
 
 cvb_control_exit() {
     CVB_EXITING=1
+    history -a
     cvb_control_write_u32 00000001
     cvb_control_write_byte 03
 }

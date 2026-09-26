@@ -7,12 +7,15 @@ cvb() {
 
         local runtime_dir="${XDG_RUNTIME_DIR:-/tmp}/cvb"
         local init_file
+        local history_file
         local previous_cvb_active=${CVB_ACTIVE+x}
         local previous_cvb_active_value=${CVB_ACTIVE-}
+        local previous_cvb_history_file=${CVB_HISTORY_FILE-}
 
         mkdir -p "$runtime_dir" || return 1
 
         init_file="$runtime_dir/init-$$-$RANDOM"
+        history_file="$runtime_dir/history-$$-$RANDOM"
 
         umask 077
 
@@ -38,9 +41,14 @@ cvb() {
         }
 
         export CVB_ACTIVE=1
-
+        export CVB_HISTORY_FILE="$history_file"
         CVB_INIT_FILE="$init_file" command cvb "$@"
         local status=$?
+
+        if [[ -f $history_file ]]; then
+            history -r "$history_file"
+            rm -f "$history_file"
+        fi
 
         if [[ $status -ne 0 ]]; then
             rm -f "$init_file"
@@ -50,6 +58,12 @@ cvb() {
             export CVB_ACTIVE="$previous_cvb_active_value"
         else
             unset CVB_ACTIVE
+        fi
+
+        if [[ -n $previous_cvb_history_file ]]; then
+            export CVB_HISTORY_FILE="$previous_cvb_history_file"
+        else
+            unset CVB_HISTORY_FILE
         fi
 
         return "$status"
