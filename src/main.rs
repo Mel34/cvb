@@ -5,7 +5,6 @@ mod cli;
 mod control;
 mod pty;
 mod shell;
-mod shell_state;
 
 fn main() {
     match cli::parse() {

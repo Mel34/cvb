@@ -308,7 +308,7 @@ fn handle_control_message(
     capturing_output: &mut bool,
 ) -> Result<(), String> {
     match message {
-        ControlMessage::Start { id, command } => {
+        ControlMessage::Start { id: _, command: _ } => {
             command_output.clear();
             *capturing_output = true;
         }
