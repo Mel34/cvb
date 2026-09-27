@@ -7,9 +7,8 @@ pub fn create_rcfile() -> Result<PathBuf, String> {
     let parent_init =
         env::var_os("CVB_INIT_FILE").ok_or_else(|| "CVB: CVB_INIT_FILE is not set".to_string())?;
 
-    let parent_history = env::var_os("CVB_PARENT_HISTORY_FILE").ok_or_else(|| {
-        "CVB: CVB_PARENT_HISTORY_FILE is not set".to_string()
-    })?;
+    let parent_history = env::var_os("CVB_PARENT_HISTORY_FILE")
+        .ok_or_else(|| "CVB: CVB_PARENT_HISTORY_FILE is not set".to_string())?;
 
     env::var_os("CVB_HISTORY_FILE")
         .ok_or_else(|| "CVB: CVB_HISTORY_FILE is not set".to_string())?;

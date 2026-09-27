@@ -171,27 +171,16 @@ impl Input {
                             }?
                             .ok_or("CVB: EIS keyboard keymap is invalid")?;
 
-                            let ctrl_keycode = find_keycode(
-                                &xkb_keymap,
-                                xkb::Keysym::Control_L,
-                            )
-                            .ok_or("CVB: unable to find Control_L in XKB keymap")?;
+                            let ctrl_keycode = find_keycode(&xkb_keymap, xkb::Keysym::Control_L)
+                                .ok_or("CVB: unable to find Control_L in XKB keymap")?;
 
                             let c_keycode = find_keycode(&xkb_keymap, xkb::Keysym::C)
                                 .ok_or("CVB: unable to find C in XKB keymap")?;
 
-                            let escape_keycode = find_keycode(
-                                &xkb_keymap,
-                                xkb::Keysym::Escape,
-                            )
-                            .ok_or("CVB: unable to find Escape in XKB keymap")?;
+                            let escape_keycode = find_keycode(&xkb_keymap, xkb::Keysym::Escape)
+                                .ok_or("CVB: unable to find Escape in XKB keymap")?;
 
-                            keymap = Some((
-                                xkb_keymap,
-                                ctrl_keycode,
-                                c_keycode,
-                                escape_keycode,
-                            ));
+                            keymap = Some((xkb_keymap, ctrl_keycode, c_keycode, escape_keycode));
                         }
                     }
 
@@ -238,9 +227,7 @@ impl Input {
 
         let timestamp = || {
             let time = nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC)?;
-            Ok::<u64, nix::Error>(
-                time.tv_sec() as u64 * 1_000_000 + time.tv_nsec() as u64 / 1_000,
-            )
+            Ok::<u64, nix::Error>(time.tv_sec() as u64 * 1_000_000 + time.tv_nsec() as u64 / 1_000)
         };
 
         keyboard.key(self.ctrl_keycode, ei::keyboard::KeyState::Press);
@@ -275,9 +262,7 @@ impl Input {
 
         let timestamp = || {
             let time = nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC)?;
-            Ok::<u64, nix::Error>(
-                time.tv_sec() as u64 * 1_000_000 + time.tv_nsec() as u64 / 1_000,
-            )
+            Ok::<u64, nix::Error>(time.tv_sec() as u64 * 1_000_000 + time.tv_nsec() as u64 / 1_000)
         };
 
         keyboard.key(self.escape_keycode, ei::keyboard::KeyState::Press);

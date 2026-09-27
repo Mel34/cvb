@@ -16,7 +16,10 @@ pub enum ControlMessage {
         command: String,
         copy: bool,
     },
-    End { id: u64, status: i32 },
+    End {
+        id: u64,
+        status: i32,
+    },
     Exit,
 }
 

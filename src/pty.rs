@@ -5,11 +5,11 @@ use std::path::Path;
 
 use nix::ioctl_read_bad;
 use nix::ioctl_write_ptr_bad;
-use nix::pty::{forkpty, ForkptyResult, Winsize};
+use nix::pty::{ForkptyResult, Winsize, forkpty};
 use nix::sys::signal::{self, SigHandler, Signal};
 use nix::sys::termios::{self, SetArg, Termios};
-use nix::sys::wait::{waitpid, WaitStatus};
-use nix::unistd::{pipe, read, write, Pid};
+use nix::sys::wait::{WaitStatus, waitpid};
+use nix::unistd::{Pid, pipe, read, write};
 
 use crate::clipboard::ClipboardWatcher;
 use crate::control::{ControlChannel, ControlMessage};
@@ -185,8 +185,7 @@ fn run_pty(rcfile: &Path) -> Result<i32, String> {
 fn control_socketpair() -> Result<(OwnedFd, OwnedFd), String> {
     let mut fds = [0; 2];
 
-    let result =
-        unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+    let result = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
 
     if result == -1 {
         return Err(format!(
@@ -211,8 +210,7 @@ fn set_nonblocking(fd: &OwnedFd) -> Result<(), String> {
         ));
     }
 
-    let result =
-        unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    let result = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) };
 
     if result == -1 {
         return Err(format!(
@@ -280,14 +278,8 @@ fn proxy(
             nix::poll::PollFd::new(master.as_fd(), nix::poll::PollFlags::POLLIN),
             nix::poll::PollFd::new(signal_read.as_fd(), nix::poll::PollFlags::POLLIN),
             nix::poll::PollFd::new(control.fd().as_fd(), nix::poll::PollFlags::POLLIN),
-            nix::poll::PollFd::new(
-                clipboard.wayland_fd(),
-                nix::poll::PollFlags::POLLIN,
-            ),
-            nix::poll::PollFd::new(
-                hotkey_monitor.fd(),
-                nix::poll::PollFlags::POLLIN,
-            ),
+            nix::poll::PollFd::new(clipboard.wayland_fd(), nix::poll::PollFlags::POLLIN),
+            nix::poll::PollFd::new(hotkey_monitor.fd(), nix::poll::PollFlags::POLLIN),
         ];
 
         match nix::poll::poll(&mut poll_fds, None::<u16>) {
@@ -524,6 +516,13 @@ fn postprocess_output(output: &[u8]) -> Vec<u8> {
                     continue;
                 }
 
+                b'(' | b')' => {
+                    if index + 2 < output.len() {
+                        index += 3;
+                        continue;
+                    }
+                }
+
                 _ => {}
             }
         }
@@ -611,6 +610,14 @@ mod tests {
     #[test]
     fn strips_csi_sequences() {
         assert_eq!(postprocess_output(b"\x1b[31mred\x1b[0m\r\n"), b"red\r\n");
+    }
+
+    #[test]
+    fn strips_character_set_sequences() {
+        assert_eq!(
+            postprocess_output(b"hello\x1b(Bworld\x1b(B\r\n"),
+            b"helloworld\r\n"
+        );
     }
 
     #[test]

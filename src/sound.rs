@@ -12,10 +12,7 @@ type CaProplist = c_void;
 unsafe extern "C" {
     fn ca_context_create(context: *mut *mut CaContext) -> c_int;
     fn ca_context_destroy(context: *mut CaContext) -> c_int;
-    fn ca_context_change_props_full(
-        context: *mut CaContext,
-        proplist: *mut CaProplist,
-    ) -> c_int;
+    fn ca_context_change_props_full(context: *mut CaContext, proplist: *mut CaProplist) -> c_int;
 
     fn ca_proplist_create(proplist: *mut *mut CaProplist) -> c_int;
     fn ca_proplist_destroy(proplist: *mut CaProplist) -> c_int;
@@ -29,12 +26,7 @@ unsafe extern "C" {
         context: *mut CaContext,
         id: c_uint,
         proplist: *mut CaProplist,
-        cb: Option<unsafe extern "C" fn(
-            *mut CaContext,
-            c_uint,
-            c_int,
-            *mut c_void,
-        )>,
+        cb: Option<unsafe extern "C" fn(*mut CaContext, c_uint, c_int, *mut c_void)>,
         userdata: *mut c_void,
     ) -> c_int;
 }
@@ -85,23 +77,11 @@ impl SoundPlayer {
             return;
         }
 
-        let result = unsafe {
-            ca_proplist_sets(
-                proplist,
-                key.as_ptr(),
-                value.as_ptr(),
-            )
-        };
+        let result = unsafe { ca_proplist_sets(proplist, key.as_ptr(), value.as_ptr()) };
 
         if result >= 0 {
             unsafe {
-                ca_context_play_full(
-                    self.context,
-                    0,
-                    proplist,
-                    None,
-                    std::ptr::null_mut(),
-                );
+                ca_context_play_full(self.context, 0, proplist, None, std::ptr::null_mut());
             }
         }
 
@@ -121,11 +101,7 @@ impl Drop for SoundPlayer {
 
 fn configured_theme() -> Option<String> {
     let output = Command::new("gsettings")
-        .args([
-            "get",
-            "org.gnome.desktop.sound",
-            "theme-name",
-        ])
+        .args(["get", "org.gnome.desktop.sound", "theme-name"])
         .output()
         .ok()?;
 
@@ -165,13 +141,7 @@ fn set_theme(context: *mut CaContext, theme: &str) -> bool {
         return false;
     }
 
-    let result = unsafe {
-        ca_proplist_sets(
-            proplist,
-            key.as_ptr(),
-            value.as_ptr(),
-        )
-    };
+    let result = unsafe { ca_proplist_sets(proplist, key.as_ptr(), value.as_ptr()) };
 
     if result < 0 {
         unsafe {
@@ -181,9 +151,7 @@ fn set_theme(context: *mut CaContext, theme: &str) -> bool {
         return false;
     }
 
-    let result = unsafe {
-        ca_context_change_props_full(context, proplist)
-    };
+    let result = unsafe { ca_context_change_props_full(context, proplist) };
 
     unsafe {
         ca_proplist_destroy(proplist);

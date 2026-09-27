@@ -1,12 +1,12 @@
 use std::os::fd::{AsFd, BorrowedFd};
 
 use wayland_client::backend::ReadEventsGuard;
-use wayland_client::globals::{registry_queue_init, GlobalListContents};
+use wayland_client::globals::{GlobalListContents, registry_queue_init};
 use wayland_client::protocol::{
     wl_registry,
     wl_seat::{self, WlSeat},
 };
-use wayland_client::{event_created_child, Connection, Dispatch, QueueHandle};
+use wayland_client::{Connection, Dispatch, QueueHandle, event_created_child};
 use wayland_protocols::ext::data_control::v1::client::{
     ext_data_control_device_v1::{self, ExtDataControlDeviceV1},
     ext_data_control_manager_v1::{self, ExtDataControlManagerV1},
@@ -58,9 +58,7 @@ impl ClipboardWatcher {
         let manager = globals
             .bind::<ExtDataControlManagerV1, _, _>(&qh, 1..=1, ())
             .map_err(|error| {
-                format!(
-                    "CVB: compositor does not provide ext-data-control-v1: {error}"
-                )
+                format!("CVB: compositor does not provide ext-data-control-v1: {error}")
             })?;
 
         let _device = manager.get_data_device(&seat, &qh, ());
@@ -104,10 +102,7 @@ impl ClipboardWatcher {
         self.event_queue.prepare_read()
     }
 
-    pub fn read_events(
-        &mut self,
-        guard: ReadEventsGuard,
-    ) -> Result<(), String> {
+    pub fn read_events(&mut self, guard: ReadEventsGuard) -> Result<(), String> {
         guard
             .read()
             .map_err(|error| format!("CVB: unable to read Wayland events: {error}"))?;
