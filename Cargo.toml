@@ -16,6 +16,8 @@ reis = { version = "0.3", features = ["tokio"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 vt100 = "0.16"
 xkbcommon = "0.8"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 
 [build-dependencies]
 pkg-config = "0.3"
