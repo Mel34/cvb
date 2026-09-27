@@ -1,5 +1,5 @@
 use evdev::{Device, EventType};
-use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
+use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use std::os::fd::AsFd;
 
 pub struct HotkeyMonitor {

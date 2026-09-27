@@ -56,9 +56,7 @@ fn target_paths(args: &[String]) -> Option<Vec<std::path::PathBuf>> {
 
     for arg in args {
         if let Ok(matches) = glob::glob(arg) {
-            let matches = matches
-                .filter_map(Result::ok)
-                .collect::<Vec<_>>();
+            let matches = matches.filter_map(Result::ok).collect::<Vec<_>>();
 
             if !matches.is_empty() {
                 paths.extend(matches);
@@ -107,9 +105,8 @@ fn build_paths_output(paths: &[std::path::PathBuf]) -> Result<String, String> {
             writeln!(output, "--- {} ---", path.display())
                 .map_err(|error| format!("CVB: unable to build file output: {error}"))?;
 
-            let contents = std::fs::read(path).map_err(|error| {
-                format!("CVB: unable to read {}: {error}", path.display())
-            })?;
+            let contents = std::fs::read(path)
+                .map_err(|error| format!("CVB: unable to read {}: {error}", path.display()))?;
 
             output.push_str(&String::from_utf8_lossy(&contents));
         } else if path.is_dir() {
@@ -127,9 +124,8 @@ fn build_paths_output(paths: &[std::path::PathBuf]) -> Result<String, String> {
 }
 
 fn bridge_file(path: &Path) -> Result<(), String> {
-    let contents = std::fs::read(path).map_err(|error| {
-        format!("CVB: unable to read {}: {error}", path.display())
-    })?;
+    let contents = std::fs::read(path)
+        .map_err(|error| format!("CVB: unable to read {}: {error}", path.display()))?;
 
     copy_to_clipboard(&contents)
 }
@@ -251,21 +247,27 @@ fn append_directory_entries(
 
         let relative_path = relative_path.to_string_lossy();
 
-    if entry_path.is_dir() {
-        let name = entry.file_name().to_string_lossy().into_owned();
+        if entry_path.is_dir() {
+            let name = entry.file_name().to_string_lossy().into_owned();
 
-        if ignore.iter().any(|ignored| ignored == &name) {
-            continue;
-        }
+            if ignore.iter().any(|ignored| ignored == &name) {
+                continue;
+            }
 
-        writeln!(output, "{relative_path}\tdir\t-")
+            writeln!(output, "{relative_path}\tdir\t-")
                 .map_err(|error| format!("CVB: unable to build directory inventory: {error}"))?;
 
             append_directory_entries(root, &entry_path, output, ignore)?;
         } else if entry_path.is_file() {
-            let size = entry.metadata().map_err(|error| {
-                format!("CVB: unable to read metadata for {}: {error}", entry_path.display())
-            })?.len();
+            let size = entry
+                .metadata()
+                .map_err(|error| {
+                    format!(
+                        "CVB: unable to read metadata for {}: {error}",
+                        entry_path.display()
+                    )
+                })?
+                .len();
 
             writeln!(output, "{relative_path}\tfile\t{size}")
                 .map_err(|error| format!("CVB: unable to build directory inventory: {error}"))?;
@@ -281,10 +283,7 @@ mod tests {
     use std::fs;
 
     fn test_directory(name: &str) -> std::path::PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "cvb-test-{name}-{}",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir().join(format!("cvb-test-{name}-{}", std::process::id()));
 
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
@@ -302,10 +301,7 @@ mod tests {
     # another comment
     ";
 
-        assert_eq!(
-            parse_ignore_list(contents),
-            vec![".git", "target"]
-        );
+        assert_eq!(parse_ignore_list(contents), vec![".git", "target"]);
     }
 
     #[test]
@@ -359,13 +355,8 @@ mod tests {
         fs::write(included.join("main.rs"), "included").unwrap();
 
         let mut output = String::new();
-        append_directory_entries(
-            &directory,
-            &directory,
-            &mut output,
-            &[".git".to_string()],
-        )
-        .unwrap();
+        append_directory_entries(&directory, &directory, &mut output, &[".git".to_string()])
+            .unwrap();
 
         assert!(!output.contains(".git"));
         assert!(output.contains("src\tdir\t-"));

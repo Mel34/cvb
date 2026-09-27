@@ -1,10 +1,11 @@
 use ashpd::desktop::{
-    remote_desktop::{DeviceType, RemoteDesktop},
     PersistMode,
+    remote_desktop::{DeviceType, RemoteDesktop},
 };
-use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
-use reis::ei::{self, Context};
+use ashpd::register_host_app;
+use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use reis::PendingRequestResult;
+use reis::ei::{self, Context};
 use std::os::fd::AsFd;
 use xkbcommon::xkb;
 
@@ -15,10 +16,13 @@ pub struct Input {
     last_serial: u32,
     ctrl_keycode: u32,
     c_keycode: u32,
+    escape_keycode: u32,
 }
 
 impl Input {
     pub async fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        register_host_app("io.github.mel34.cvb".parse()?).await?;
+
         let remote_desktop = RemoteDesktop::new().await?;
 
         let session = remote_desktop.create_session().await?;
@@ -33,10 +37,7 @@ impl Input {
             .await?
             .response()?;
 
-        remote_desktop
-            .start(&session, None)
-            .await?
-            .response()?;
+        remote_desktop.start(&session, None).await?.response()?;
 
         let eis_fd = remote_desktop.connect_to_eis(&session).await?;
         let eis_socket = std::os::unix::net::UnixStream::from(eis_fd);
@@ -170,13 +171,27 @@ impl Input {
                             }?
                             .ok_or("CVB: EIS keyboard keymap is invalid")?;
 
-                            let ctrl_keycode = find_keycode(&xkb_keymap, xkb::Keysym::Control_L)
-                                .ok_or("CVB: unable to find Control_L in XKB keymap")?;
+                            let ctrl_keycode = find_keycode(
+                                &xkb_keymap,
+                                xkb::Keysym::Control_L,
+                            )
+                            .ok_or("CVB: unable to find Control_L in XKB keymap")?;
 
                             let c_keycode = find_keycode(&xkb_keymap, xkb::Keysym::C)
                                 .ok_or("CVB: unable to find C in XKB keymap")?;
 
-                            keymap = Some((xkb_keymap, ctrl_keycode, c_keycode));
+                            let escape_keycode = find_keycode(
+                                &xkb_keymap,
+                                xkb::Keysym::Escape,
+                            )
+                            .ok_or("CVB: unable to find Escape in XKB keymap")?;
+
+                            keymap = Some((
+                                xkb_keymap,
+                                ctrl_keycode,
+                                c_keycode,
+                                escape_keycode,
+                            ));
                         }
                     }
 
@@ -196,7 +211,8 @@ impl Input {
 
         context.flush()?;
 
-        let (_, ctrl_keycode, c_keycode) = keymap.ok_or("CVB: EIS keyboard keymap is not available")?;
+        let (_, ctrl_keycode, c_keycode, escape_keycode) =
+            keymap.ok_or("CVB: EIS keyboard keymap is not available")?;
 
         Ok(Self {
             context,
@@ -205,6 +221,7 @@ impl Input {
             last_serial,
             ctrl_keycode,
             c_keycode,
+            escape_keycode,
         })
     }
 
@@ -239,6 +256,35 @@ impl Input {
         self.context.flush()?;
 
         keyboard.key(self.ctrl_keycode, ei::keyboard::KeyState::Released);
+        device.frame(self.last_serial, timestamp()?);
+        self.context.flush()?;
+
+        Ok(())
+    }
+
+    pub fn inject_escape(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let device = self
+            .device
+            .as_ref()
+            .ok_or("CVB: EIS device is not available")?;
+
+        let keyboard = self
+            .keyboard
+            .as_ref()
+            .ok_or("CVB: keyboard interface is not available")?;
+
+        let timestamp = || {
+            let time = nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC)?;
+            Ok::<u64, nix::Error>(
+                time.tv_sec() as u64 * 1_000_000 + time.tv_nsec() as u64 / 1_000,
+            )
+        };
+
+        keyboard.key(self.escape_keycode, ei::keyboard::KeyState::Press);
+        device.frame(self.last_serial, timestamp()?);
+        self.context.flush()?;
+
+        keyboard.key(self.escape_keycode, ei::keyboard::KeyState::Released);
         device.frame(self.last_serial, timestamp()?);
         self.context.flush()?;
 

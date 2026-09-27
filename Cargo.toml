@@ -14,6 +14,7 @@ glob = "0.3"
 nix = { version = "0.30", features = ["term", "process", "poll", "ioctl", "signal", "time"] }
 reis = { version = "0.3", features = ["tokio"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+vt100 = "0.16"
 xkbcommon = "0.8"
 
 [build-dependencies]

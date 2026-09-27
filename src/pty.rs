@@ -5,11 +5,11 @@ use std::path::Path;
 
 use nix::ioctl_read_bad;
 use nix::ioctl_write_ptr_bad;
-use nix::pty::{ForkptyResult, Winsize, forkpty};
+use nix::pty::{forkpty, ForkptyResult, Winsize};
 use nix::sys::signal::{self, SigHandler, Signal};
 use nix::sys::termios::{self, SetArg, Termios};
-use nix::sys::wait::{WaitStatus, waitpid};
-use nix::unistd::{Pid, pipe, read, write};
+use nix::sys::wait::{waitpid, WaitStatus};
+use nix::unistd::{pipe, read, write, Pid};
 
 use crate::control::{ControlChannel, ControlMessage};
 
@@ -68,9 +68,10 @@ fn run_pty(rcfile: &Path) -> Result<i32, String> {
     let runtime = tokio::runtime::Runtime::new()
         .map_err(|error| format!("CVB: unable to create input runtime: {error}"))?;
 
-    let input = runtime.block_on(crate::input::Input::new())
+    let input = runtime
+        .block_on(crate::input::Input::new())
         .map_err(|error| format!("CVB: unable to initialize input: {error}"))?;
-        
+
     let mut hotkey_monitor = crate::keyboard::HotkeyMonitor::new()
         .map_err(|error| format!("CVB: unable to initialize keyboard monitor: {error}"))?;
 
@@ -154,6 +155,8 @@ fn run_pty(rcfile: &Path) -> Result<i32, String> {
                 &mut control,
                 &input,
                 &mut hotkey_monitor,
+                winsize.ws_row,
+                winsize.ws_col,
             );
 
             unsafe {
@@ -176,7 +179,8 @@ fn run_pty(rcfile: &Path) -> Result<i32, String> {
 fn control_socketpair() -> Result<(OwnedFd, OwnedFd), String> {
     let mut fds = [0; 2];
 
-    let result = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+    let result =
+        unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
 
     if result == -1 {
         return Err(format!(
@@ -201,7 +205,8 @@ fn set_nonblocking(fd: &OwnedFd) -> Result<(), String> {
         ));
     }
 
-    let result = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    let result =
+        unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) };
 
     if result == -1 {
         return Err(format!(
@@ -237,6 +242,8 @@ fn proxy(
     control: &mut ControlChannel,
     input: &crate::input::Input,
     hotkey_monitor: &mut crate::keyboard::HotkeyMonitor,
+    rows: u16,
+    cols: u16,
 ) -> Result<(), String> {
     let stdin = io::stdin();
     let stdout = io::stdout();
@@ -244,21 +251,29 @@ fn proxy(
     let mut buffer = [0u8; 8192];
     let mut signal_buffer = [0u8; 64];
     let mut command_output = Vec::new();
+    let mut terminal = vt100::Parser::new(rows, cols, 0);
     let mut capturing_output = false;
 
     loop {
-        if hotkey_monitor
-            .poll()
-            .map_err(|error| format!("CVB: keyboard monitor error: {error}"))?
-        {
-            println!("CVB: hotkey detected, injecting Ctrl+C");
+        if hotkey_monitor.poll()? {
+            capturing_output = false;
+            command_output.clear();
+
+            std::thread::sleep(std::time::Duration::from_millis(100));
 
             input
                 .inject_ctrl_c()
                 .map_err(|error| format!("CVB: unable to inject Ctrl+C: {error}"))?;
 
-            println!("CVB: Ctrl+C injection complete");
+            std::thread::sleep(std::time::Duration::from_millis(100));
+
+            input
+                .inject_escape()
+                .map_err(|error| format!("CVB: unable to inject Escape: {error}"))?;
+
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
+
         let mut poll_fds = [
             nix::poll::PollFd::new(stdin.as_fd(), nix::poll::PollFlags::POLLIN),
             nix::poll::PollFd::new(master.as_fd(), nix::poll::PollFlags::POLLIN),
@@ -331,6 +346,9 @@ fn proxy(
             if count == 0 {
                 break;
             }
+
+            terminal.process(&buffer[..count]);
+
             if capturing_output {
                 command_output.extend_from_slice(&buffer[..count]);
             }
@@ -362,9 +380,9 @@ fn handle_control_message(
         }
 
         ControlMessage::End { id: _, status: _ } => {
-            let processed = postprocess_output(command_output);
-
             *capturing_output = false;
+
+            let processed = postprocess_output(command_output);
 
             let mut child = std::process::Command::new("wl-copy")
                 .stdin(std::process::Stdio::piped())
@@ -494,16 +512,14 @@ fn status_to_code(status: WaitStatus) -> i32 {
         _ => 1,
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::postprocess_output;
 
     #[test]
     fn preserves_plain_output() {
-        assert_eq!(
-            postprocess_output(b"hello\r\n"),
-            b"hello\r\n"
-        );
+        assert_eq!(postprocess_output(b"hello\r\n"), b"hello\r\n");
     }
 
     #[test]
@@ -516,42 +532,28 @@ mod tests {
 
     #[test]
     fn strips_csi_sequences() {
-        assert_eq!(
-            postprocess_output(b"\x1b[31mred\x1b[0m\r\n"),
-            b"red\r\n"
-        );
+        assert_eq!(postprocess_output(b"\x1b[31mred\x1b[0m\r\n"), b"red\r\n");
     }
 
     #[test]
     fn preserves_carriage_returns() {
-        assert_eq!(
-            postprocess_output(b"hello\rworld\r\n"),
-            b"hello\rworld\r\n"
-        );
+        assert_eq!(postprocess_output(b"hello\rworld\r\n"), b"hello\rworld\r\n");
     }
 
     #[test]
     fn preserves_backspaces() {
-        assert_eq!(
-            postprocess_output(b"hellp\x08\r\n"),
-            b"hellp\x08\r\n"
-        );
+        assert_eq!(postprocess_output(b"hellp\x08\r\n"), b"hellp\x08\r\n");
     }
 
     #[test]
     fn returns_marker_for_empty_output() {
-        assert_eq!(
-            postprocess_output(b""),
-            b"[CVB: no output]\n"
-        );
+        assert_eq!(postprocess_output(b""), b"[CVB: no output]\n");
     }
 
     #[test]
     fn processes_mixed_output() {
         assert_eq!(
-            postprocess_output(
-                b"\x1b]0;title\x07\x1b[32mhello\x1b[0m\r\n"
-            ),
+            postprocess_output(b"\x1b]0;title\x07\x1b[32mhello\x1b[0m\r\n"),
             b"hello\r\n"
         );
     }

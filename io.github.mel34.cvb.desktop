@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=CVB
+Comment=Capture, View, and Bridge terminal content
+Exec=cvb
+Terminal=true
+NoDisplay=true
+X-GNOME-UsesNotifications=false
