@@ -17,6 +17,24 @@ struct State {
     selection_changed: bool,
 }
 
+impl State {
+    fn new() -> Self {
+        Self {
+            selection_changed: false,
+        }
+    }
+
+    fn handle_selection(&mut self, has_selection: bool) {
+        if has_selection {
+            self.selection_changed = true;
+        }
+    }
+
+    fn clear_selection_event(&mut self) {
+        self.selection_changed = false;
+    }
+}
+
 pub struct ClipboardWatcher {
     connection: Connection,
     event_queue: wayland_client::EventQueue<State>,
@@ -48,15 +66,13 @@ impl ClipboardWatcher {
 
         let device = manager.get_data_device(&seat, &qh, ());
 
-        let mut state = State {
-            selection_changed: false,
-        };
+        let mut state = State::new();
 
         event_queue
             .roundtrip(&mut state)
             .map_err(|error| format!("CVB: unable to initialize clipboard watcher: {error}"))?;
 
-        state.selection_changed = false;
+        state.clear_selection_event();
 
         Ok(Self {
             connection,
@@ -67,7 +83,7 @@ impl ClipboardWatcher {
     }
 
     pub fn clear_selection_event(&mut self) {
-        self.state.selection_changed = false;
+        self.state.clear_selection_event();
     }
 
     pub fn selection_changed(&self) -> bool {
@@ -116,7 +132,7 @@ impl ClipboardWatcher {
     }
 
     pub fn wait_for_selection(&mut self) -> Result<(), String> {
-        self.state.selection_changed = false;
+        self.state.clear_selection_event();
 
         loop {
             self.event_queue
@@ -181,8 +197,8 @@ impl Dispatch<ExtDataControlDeviceV1, ()> for State {
         _connection: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
-        if let ext_data_control_device_v1::Event::Selection { id: Some(_) } = event {
-            state.selection_changed = true;
+        if let ext_data_control_device_v1::Event::Selection { id } = event {
+            state.handle_selection(id.is_some());
         }
     }
 
@@ -201,5 +217,56 @@ impl Dispatch<ExtDataControlOfferV1, ()> for State {
         _connection: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::State;
+
+    #[test]
+    fn selection_starts_unchanged() {
+        let state = State::new();
+
+        assert!(!state.selection_changed);
+    }
+
+    #[test]
+    fn selection_event_marks_selection_changed() {
+        let mut state = State::new();
+
+        state.handle_selection(true);
+
+        assert!(state.selection_changed);
+    }
+
+    #[test]
+    fn selection_without_offer_does_not_mark_changed() {
+        let mut state = State::new();
+
+        state.handle_selection(false);
+
+        assert!(!state.selection_changed);
+    }
+
+    #[test]
+    fn clearing_selection_event_resets_state() {
+        let mut state = State::new();
+
+        state.handle_selection(true);
+        assert!(state.selection_changed);
+
+        state.clear_selection_event();
+
+        assert!(!state.selection_changed);
+    }
+
+    #[test]
+    fn clearing_unchanged_state_is_safe() {
+        let mut state = State::new();
+
+        state.clear_selection_event();
+
+        assert!(!state.selection_changed);
     }
 }
