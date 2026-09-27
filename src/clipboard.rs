@@ -39,7 +39,6 @@ pub struct ClipboardWatcher {
     connection: Connection,
     event_queue: wayland_client::EventQueue<State>,
     state: State,
-    device: ExtDataControlDeviceV1,
 }
 
 impl ClipboardWatcher {
@@ -64,7 +63,7 @@ impl ClipboardWatcher {
                 )
             })?;
 
-        let device = manager.get_data_device(&seat, &qh, ());
+        let _device = manager.get_data_device(&seat, &qh, ());
 
         let mut state = State::new();
 
@@ -78,7 +77,6 @@ impl ClipboardWatcher {
             connection,
             event_queue,
             state,
-            device,
         })
     }
 
@@ -121,34 +119,8 @@ impl ClipboardWatcher {
         Ok(())
     }
 
-    pub fn flush(&self) -> Result<(), String> {
-        self.event_queue
-            .flush()
-            .map_err(|error| format!("CVB: unable to flush Wayland connection: {error}"))
-    }
-
     pub fn wayland_fd(&self) -> BorrowedFd<'_> {
         self.event_queue.as_fd()
-    }
-
-    pub fn wait_for_selection(&mut self) -> Result<(), String> {
-        self.state.clear_selection_event();
-
-        loop {
-            self.event_queue
-                .blocking_dispatch(&mut self.state)
-                .map_err(|error| {
-                    format!("CVB: clipboard event dispatch failed: {error}")
-                })?;
-
-            if self.state.selection_changed {
-                return Ok(());
-            }
-        }
-    }
-
-    pub fn device(&self) -> &ExtDataControlDeviceV1 {
-        &self.device
     }
 }
 
