@@ -7,6 +7,13 @@ pub fn create_rcfile() -> Result<PathBuf, String> {
     let parent_init =
         env::var_os("CVB_INIT_FILE").ok_or_else(|| "CVB: CVB_INIT_FILE is not set".to_string())?;
 
+    let parent_history = env::var_os("CVB_PARENT_HISTORY_FILE").ok_or_else(|| {
+        "CVB: CVB_PARENT_HISTORY_FILE is not set".to_string()
+    })?;
+
+    env::var_os("CVB_HISTORY_FILE")
+        .ok_or_else(|| "CVB: CVB_HISTORY_FILE is not set".to_string())?;
+
     let runtime_dir = env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .ok_or_else(|| "CVB: XDG_RUNTIME_DIR is not set".to_string())?;
@@ -31,10 +38,23 @@ pub fn create_rcfile() -> Result<PathBuf, String> {
     let control_script = control_script()?;
 
     let content = format!(
-        "if [[ -f {bashrc} ]]; then\n    source {bashrc}\nfi\n\nsource {parent_init}\n\n{control_script}\n",
+        "set +o history\n\
+         \n\
+         if [[ -f {bashrc} ]]; then\n\
+             source {bashrc}\n\
+         fi\n\
+         \n\
+         source {parent_init}\n\
+         {control_script}\n\
+         \n\
+         history -c\n\
+         history -r {parent_history}\n\
+         \n\
+         set -o history\n",
         bashrc = bash_quote(&bashrc),
         parent_init = bash_quote(Path::new(&parent_init)),
         control_script = control_script,
+        parent_history = bash_quote(Path::new(&parent_history)),
     );
 
     fs::write(&rcfile, content).map_err(|error| {
