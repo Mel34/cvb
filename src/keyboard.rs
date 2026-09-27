@@ -1,6 +1,6 @@
 use evdev::{Device, EventType};
-use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
-use std::os::fd::AsFd;
+use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
+use std::os::fd::{AsFd, BorrowedFd};
 
 pub struct HotkeyMonitor {
     device: Device,
@@ -18,6 +18,10 @@ impl HotkeyMonitor {
             ctrl: false,
             shift: false,
         })
+    }
+
+    pub fn fd(&self) -> BorrowedFd<'_> {
+        self.device.as_fd()
     }
 
     pub fn poll(&mut self) -> Result<bool, String> {

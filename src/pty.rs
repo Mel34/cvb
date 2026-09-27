@@ -259,27 +259,9 @@ fn proxy(
     let mut terminal = vt100::Parser::new(rows, cols, 0);
     let mut capturing_output = false;
     let mut copy_output = false;
+    let mut waiting_for_clipboard = false;
 
     loop {
-        if hotkey_monitor.poll()? {
-            capturing_output = false;
-            command_output.clear();
-
-            std::thread::sleep(std::time::Duration::from_millis(100));
-
-            input
-                .inject_ctrl_c()
-                .map_err(|error| format!("CVB: unable to inject Ctrl+C: {error}"))?;
-
-            std::thread::sleep(std::time::Duration::from_millis(100));
-
-            input
-                .inject_escape()
-                .map_err(|error| format!("CVB: unable to inject Escape: {error}"))?;
-
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-
         clipboard.dispatch_pending()?;
 
         let clipboard_guard = loop {
@@ -297,6 +279,10 @@ fn proxy(
             nix::poll::PollFd::new(control.fd().as_fd(), nix::poll::PollFlags::POLLIN),
             nix::poll::PollFd::new(
                 clipboard.wayland_fd(),
+                nix::poll::PollFlags::POLLIN,
+            ),
+            nix::poll::PollFd::new(
+                hotkey_monitor.fd(),
                 nix::poll::PollFlags::POLLIN,
             ),
         ];
@@ -333,14 +319,44 @@ fn proxy(
             .revents()
             .unwrap_or(nix::poll::PollFlags::empty());
 
+        let keyboard_events = poll_fds[5]
+            .revents()
+            .unwrap_or(nix::poll::PollFlags::empty());
+
         if clipboard_events.intersects(
             nix::poll::PollFlags::POLLIN
                 | nix::poll::PollFlags::POLLHUP
                 | nix::poll::PollFlags::POLLERR,
         ) {
             clipboard.read_events(clipboard_guard)?;
+
+            if waiting_for_clipboard && clipboard.selection_changed() {
+                waiting_for_clipboard = false;
+
+                input
+                    .inject_escape()
+                    .map_err(|error| format!("CVB: unable to inject Escape: {error}"))?;
+            }
         } else {
             drop(clipboard_guard);
+        }
+
+        if keyboard_events.intersects(
+            nix::poll::PollFlags::POLLIN
+                | nix::poll::PollFlags::POLLHUP
+                | nix::poll::PollFlags::POLLERR,
+        ) {
+            if hotkey_monitor.poll()? && !waiting_for_clipboard {
+                capturing_output = false;
+                command_output.clear();
+
+                clipboard.clear_selection_event();
+                waiting_for_clipboard = true;
+
+                input
+                    .inject_ctrl_c()
+                    .map_err(|error| format!("CVB: unable to inject Ctrl+C: {error}"))?;
+            }
         }
 
         if signal_events.contains(nix::poll::PollFlags::POLLIN) {
