@@ -11,7 +11,11 @@ const EXIT: u8 = 0x03;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ControlMessage {
-    Start { id: u64, command: String },
+    Start {
+        id: u64,
+        command: String,
+        copy: bool,
+    },
     End { id: u64, status: i32 },
     Exit,
 }
@@ -66,12 +70,11 @@ fn encode(message: &ControlMessage) -> Result<Vec<u8>, String> {
     let mut payload = Vec::new();
 
     match message {
-        ControlMessage::Start { id, command } => {
-            let command = command.as_bytes();
-
+        ControlMessage::Start { id, command, copy } => {
             payload.push(START);
+            payload.push(u8::from(*copy));
             payload.extend_from_slice(&id.to_be_bytes());
-            payload.extend_from_slice(command);
+            payload.extend_from_slice(command.as_bytes());
         }
 
         ControlMessage::End { id, status } => {
@@ -125,21 +128,27 @@ fn decode(payload: &[u8]) -> Result<ControlMessage, String> {
 
     match message_type {
         START => {
-            if payload.len() < 9 {
+            if payload.len() < 10 {
                 return Err("CVB: malformed START message".to_string());
             }
 
+            let copy = match payload[1] {
+                0 => false,
+                1 => true,
+                _ => return Err("CVB: malformed START message".to_string()),
+            };
+
             let id = u64::from_be_bytes(
-                payload[1..9]
+                payload[2..10]
                     .try_into()
                     .map_err(|_| "CVB: malformed START message".to_string())?,
             );
 
-            let command = std::str::from_utf8(&payload[9..])
+            let command = std::str::from_utf8(&payload[10..])
                 .map_err(|_| "CVB: START command is not valid UTF-8".to_string())?
                 .to_string();
 
-            Ok(ControlMessage::Start { id, command })
+            Ok(ControlMessage::Start { id, command, copy })
         }
 
         END => {
@@ -185,6 +194,20 @@ mod tests {
         let message = ControlMessage::Start {
             id: 42,
             command: "cargo build --release".to_string(),
+            copy: true,
+        };
+
+        let payload = encode(&message).unwrap();
+
+        assert_eq!(decode(&payload).unwrap(), message);
+    }
+
+    #[test]
+    fn encodes_and_decodes_start_without_copy() {
+        let message = ControlMessage::Start {
+            id: 42,
+            command: " echo ignored".to_string(),
+            copy: false,
         };
 
         let payload = encode(&message).unwrap();
@@ -215,6 +238,7 @@ mod tests {
         let first = encode(&ControlMessage::Start {
             id: 1,
             command: "echo one".to_string(),
+            copy: true,
         })
         .unwrap();
 
@@ -235,6 +259,7 @@ mod tests {
                 ControlMessage::Start {
                     id: 1,
                     command: "echo one".to_string(),
+                    copy: true,
                 },
                 ControlMessage::End { id: 1, status: 0 },
             ]

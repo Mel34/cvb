@@ -253,6 +253,7 @@ fn proxy(
     let mut command_output = Vec::new();
     let mut terminal = vt100::Parser::new(rows, cols, 0);
     let mut capturing_output = false;
+    let mut copy_output = false;
 
     loop {
         if hotkey_monitor.poll()? {
@@ -315,7 +316,12 @@ fn proxy(
                 | nix::poll::PollFlags::POLLERR,
         ) {
             for message in control.receive()? {
-                handle_control_message(message, &mut command_output, &mut capturing_output)?;
+                handle_control_message(
+                    message,
+                    &mut command_output,
+                    &mut capturing_output,
+                    &mut copy_output,
+                )?;
             }
         }
 
@@ -372,15 +378,25 @@ fn handle_control_message(
     message: ControlMessage,
     command_output: &mut Vec<u8>,
     capturing_output: &mut bool,
+    copy_output: &mut bool,
 ) -> Result<(), String> {
     match message {
-        ControlMessage::Start { id: _, command: _ } => {
+        ControlMessage::Start {
+            id: _,
+            command: _,
+            copy,
+        } => {
             command_output.clear();
-            *capturing_output = true;
+            *copy_output = copy;
+            *capturing_output = copy;
         }
 
         ControlMessage::End { id: _, status: _ } => {
             *capturing_output = false;
+
+            if !*copy_output {
+                return Ok(());
+            }
 
             let processed = postprocess_output(command_output);
 

@@ -52,15 +52,17 @@ cvb_control_write_u64() {
 
 cvb_control_start() {
     local command=$1
+    local copy=$2
     local payload_length
 
     ((CVB_COMMAND_ID++))
     CVB_COMMAND_ACTIVE=1
 
-    payload_length=$(printf '%08x' $((9 + ${#command})))
+    payload_length=$(printf '%08x' $((10 + ${#command})))
 
     cvb_control_write_u32 "$payload_length"
     cvb_control_write_byte 01
+    cvb_control_write_byte "$copy"
     cvb_control_write_u64 "$(printf '%016x' "$CVB_COMMAND_ID")"
     printf '%s' "$command" >&"$CVB_CONTROL_FD"
 }
@@ -92,6 +94,8 @@ cvb_control_debug() {
     ((CVB_EXITING)) && return
     local history_line
     local command
+    local normalized_command
+    local copy=1
 
     ((CVB_COMMAND_ACTIVE)) && return
     [[ ${BASH_COMMAND} == cvb_control_* ]] && return
@@ -99,18 +103,19 @@ cvb_control_debug() {
     ((HISTCMD == CVB_LAST_HISTCMD)) && return
 
     history_line=$(history 1)
-
     history_line="${history_line#"${history_line%%[![:space:]]*}"}"
     command="${history_line#*[[:space:]]}"
-    command="${command#"${command%%[![:space:]]*}"}"
-    
-    [[ -n $command ]] || return
+    normalized_command="${command#"${command%%[![:space:]]*}"}"
 
-    [[ $command == exit || $command == exit[[:space:]]* ]] && return
-    [[ $command == cvb || $command == cvb[[:space:]]* ]] && return
+    [[ -n $normalized_command ]] || return
+
+    [[ ${history_line} =~ ^[0-9]+[[:space:]]{3} ]] && copy=0
+
+    [[ $normalized_command == exit || $normalized_command == exit[[:space:]]* ]] && return
+    [[ $normalized_command == cvb || $normalized_command == cvb[[:space:]]* ]] && return
 
     CVB_LAST_HISTCMD=$HISTCMD
-    cvb_control_start "$command"
+    cvb_control_start "$command" "$copy"
 }
 
 cvb_control_prompt() {
