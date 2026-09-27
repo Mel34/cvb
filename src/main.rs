@@ -8,6 +8,7 @@ mod input;
 mod keyboard;
 mod pty;
 mod shell;
+mod sound;
 
 fn main() {
     match cli::parse() {

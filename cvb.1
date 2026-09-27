@@ -1,6 +1,6 @@
-.TH CVB 1 "September 2026" "CVB 0.2.0" "User Commands"
+.TH CVB 1 "September 2026" "CVB 0.3.0" "User Commands"
 .SH NAME
-cvb \- terminal-to-LLM exchange utility
+cvb - terminal-to-LLM exchange utility
 .SH SYNOPSIS
 .B cvb
 .RI [ COMMAND ]
@@ -17,9 +17,9 @@ cvb \- terminal-to-LLM exchange utility
 .RI [ args... ]
 .SH DESCRIPTION
 .B CVB
-(Capture \(-> View \(-> Bridge) is a terminal utility for reliable exchange between a human, the terminal, the clipboard, and an LLM.
+(Capture (-> View (-> Bridge) is a terminal utility for reliable exchange between a human, the terminal, the clipboard, and an LLM.
 
-CVB can capture commands and their terminal output in a resident Bash session, bridge files to the clipboard, recursively inventory directories as TSV, and execute external commands.
+CVB can capture commands and their terminal output in a resident Bash session, capture the visible terminal contents, bridge files to the clipboard, recursively inventory directories as TSV, and execute external commands.
 
 CVB is not a shell replacement, terminal logger, terminal database, or AI agent.
 .SH COMMANDS
@@ -58,14 +58,28 @@ Source the wrapper into the parent Bash shell before using
 The wrapper creates a temporary shell-state file and starts a child Bash session. Useful parent-shell state is transferred to the child, including aliases, functions, shell options, shopt settings, and inherited environment variables.
 .PP
 CVB owns the capture-related prompt and shell hooks while the session is active. The parent shell is restored when the child session exits. Commands entered during the session are added to the parent shell's history.
+.SH TERMINAL SNAPSHOT
+During a resident capture session, pressing
+.B Ctrl+Shift+A
+captures the currently visible terminal contents.
+.PP
+CVB does not create a graphical screenshot. It detects the shortcut through the Wayland Input Capture portal, temporarily pauses capture, and injects
+.B Ctrl+C .
+The terminal emulator then creates a textual representation of the visible terminal and places it on the Wayland clipboard.
+.PP
+CVB detects the resulting Wayland clipboard selection event, plays the configured
+.B screen-capture
+sound, and resumes capture.
+.PP
+The terminal snapshot feature requires a compositor and terminal emulator supporting the corresponding input-capture and clipboard protocols.
 .SH FILE BRIDGING
 An existing filesystem path takes precedence over an external command.
 .PP
 For example:
 .PP
-.EX
+XXX
 cvb /path/to/file.txt
-.EE
+XXX
 .PP
 copies the complete contents of the file to the Wayland clipboard.
 .SH DIRECTORY BRIDGING
@@ -73,15 +87,15 @@ Directories are recursively represented as tab-separated values.
 .PP
 The output has the following form:
 .PP
-.EX
+XXX
 path	type	size
 one.txt	file	4
 subdir	dir	-
 subdir/two.txt	file	4
-.EE
+XXX
 .PP
 Paths are relative to the selected directory. Regular files report their byte size and directories use
-.BR \- .
+.BR - .
 Symlinks and other filesystem object types are skipped.
 .SH IGNORE LIST
 CVB creates
@@ -97,13 +111,13 @@ are ignored. A directory name is excluded wherever it occurs in the directory tr
 .PP
 The initial file excludes common version-control directories:
 .PP
-.EX
+XXX
 .git
 .hg
 .svn
 .bzr
 .jj
-.EE
+XXX
 .PP
 The file is the complete source of truth: remove an entry to include that directory, or add entries such as
 .B target
@@ -117,11 +131,15 @@ syntax.
 .SH CLIPBOARD
 CVB uses
 .B wl-copy
-for Wayland clipboard integration.
+for normal Wayland clipboard output.
 .PP
 When a captured command produces no terminal output, CVB copies the marker
 .BR "[CVB: no output]"
 followed by a newline.
+.PP
+For terminal snapshots, CVB uses the Wayland
+.B ext-data-control-v1
+protocol to detect the clipboard selection created by the terminal emulator.
 .SH TARGET RESOLUTION
 Existing filesystem paths take precedence over external commands.
 .PP
@@ -155,14 +173,16 @@ is set, the file is located at
 .IR $XDG_CONFIG_HOME/cvb/ignore .
 .SH REQUIREMENTS
 CVB requires:
-.IP \(bu 2
+.IP (bu 2
 Linux
-.IP \(bu 2
+.IP (bu 2
 Bash
-.IP \(bu 2
+.IP (bu 2
 Wayland
-.IP \(bu 2
+.IP (bu 2
 wl-clipboard
+.IP (bu 2
+libcanberra
 .SH EXIT STATUS
 .TP
 .B 0

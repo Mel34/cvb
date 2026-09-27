@@ -6,32 +6,34 @@ CVB is a small terminal utility for reliable exchange between a human, the termi
 
 It can:
 
-- run a resident Bash session that captures command output and copies each completed command to the Wayland clipboard;
-- bridge a file directly to the clipboard;
-- recursively inventory a directory as TSV and copy the result to the clipboard;
-- execute external commands through the normal command-line interface.
+* run a resident Bash session that captures command output and copies each completed command to the Wayland clipboard;
+* capture the currently visible terminal contents with **Ctrl+Shift+A**;
+* bridge a file directly to the clipboard;
+* recursively inventory a directory as TSV and copy the result to the clipboard;
+* execute external commands through the normal command-line interface.
 
 CVB is designed around simple, predictable mechanisms. It is not an AI agent, shell replacement, terminal logger, or general-purpose terminal emulator.
 
 ## Requirements
 
-- Linux
-- Bash
-- Wayland
-- `wl-clipboard`
-- Rust/Cargo when building from source
+* Linux
+* Bash
+* Wayland
+* `wl-clipboard`
+* `libcanberra`
+* Rust/Cargo when building from source
 
 ## Building
 
 Clone the repository and build with Cargo:
 
-```text
+```
 cargo build --release
 ```
 
 The resulting binary is:
 
-```text
+```
 target/release/cvb
 ```
 
@@ -41,13 +43,13 @@ The `cvb on` mode starts an interactive child Bash session.
 
 Source the CVB Bash wrapper first:
 
-```text
+```
 source data/cvb.bash
 ```
 
 Then:
 
-```text
+```
 cvb on
 ```
 
@@ -57,21 +59,37 @@ Commands entered inside the session are captured when they complete. The combine
 
 To end the session:
 
-```text
+```
 cvb off
 ```
 
 The parent shell is left running normally after the CVB child session exits. Commands entered during the session are added to the parent shell's history.
 
+### Terminal snapshot
+
+While a resident capture session is active, **Ctrl+Shift+A** captures the currently visible terminal contents.
+
+CVB does not take a graphical screenshot. Instead, it coordinates with the terminal emulator to obtain its textual representation of the visible terminal:
+
+1. CVB detects Ctrl+Shift+A through the Wayland Input Capture portal.
+2. CVB temporarily pauses command-output capture and injects Ctrl+C.
+3. The terminal emulator creates its textual terminal snapshot and places it on the Wayland clipboard.
+4. CVB detects the resulting Wayland clipboard selection event.
+5. CVB plays the configured `screen-capture` sound, then resumes capture.
+
+This preserves terminal text, including formatting represented by the terminal emulator, rather than producing an image.
+
+The terminal snapshot feature requires a compositor and terminal emulator that support the corresponding input-capture and clipboard protocols.
+
 ### Shell state
 
 When a session starts, CVB transfers useful parent-shell state into the child Bash session, including:
 
-- aliases
-- shell functions
-- shell options
-- `shopt` settings
-- inherited environment variables
+* aliases
+* shell functions
+* shell options
+* `shopt` settings
+* inherited environment variables
 
 CVB does not attempt to clone transient shell internals such as arbitrary traps.
 
@@ -81,7 +99,7 @@ An existing filesystem path takes precedence over an external command.
 
 For example:
 
-```text
+```
 cvb /path/to/file.txt
 ```
 
@@ -93,7 +111,7 @@ Relative and absolute paths are supported.
 
 A directory is recursively represented as TSV:
 
-```text
+```
 path	type	size
 one.txt	file	4
 subdir	dir	-
@@ -106,7 +124,7 @@ Symlinks and other filesystem object types are currently skipped.
 
 For example:
 
-```text
+```
 cvb ~/Projects/cvb
 ```
 
@@ -136,11 +154,12 @@ CVB does not interpret glob patterns, regular expressions, or `.gitignore` synta
 
 When the target is not an existing filesystem path, CVB executes it as an external command:
 
-```text
+```
 cvb cargo test
 ```
 
 CVB does not attempt to reimplement Bash parsing. Shell syntax that requires Bash remains the responsibility of Bash.
+
 Common terminal pagers are disabled while executing commands so their output can be captured directly.
 
 ## Target resolution
@@ -149,7 +168,7 @@ CVB intentionally gives existing filesystem paths precedence over external comma
 
 Thus, if `Cargo.toml` exists in the current directory:
 
-```text
+```
 cvb Cargo.toml
 ```
 
@@ -161,19 +180,21 @@ Explicit paths such as `./foo`, `../foo`, and `/tmp/foo` are path targets.
 
 ## Clipboard
 
-CVB uses `wl-copy` for clipboard integration.
+CVB uses `wl-copy` for normal clipboard output.
 
 For a captured command that produces no terminal output, CVB copies:
 
-```text
+```
 [CVB: no output]
 ```
 
 followed by a newline.
 
+For terminal snapshots, CVB uses the Wayland `ext-data-control-v1` protocol to detect the clipboard selection created by the terminal emulator.
+
 ## CLI
 
-```text
+```
 cvb on
 cvb off
 cvb --help

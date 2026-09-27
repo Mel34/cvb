@@ -150,6 +150,7 @@ fn run_pty(rcfile: &Path) -> Result<i32, String> {
             let mut control = ControlChannel::new(control_parent);
 
             let mut clipboard = ClipboardWatcher::new()?;
+            let sound = crate::sound::SoundPlayer::new();
 
             let result = proxy(
                 &master,
@@ -159,6 +160,7 @@ fn run_pty(rcfile: &Path) -> Result<i32, String> {
                 &input,
                 &mut hotkey_monitor,
                 &mut clipboard,
+                sound.as_ref(),
                 winsize.ws_row,
                 winsize.ws_col,
             );
@@ -247,6 +249,7 @@ fn proxy(
     input: &crate::input::Input,
     hotkey_monitor: &mut crate::keyboard::HotkeyMonitor,
     clipboard: &mut ClipboardWatcher,
+    sound: Option<&crate::sound::SoundPlayer>,
     rows: u16,
     cols: u16,
 ) -> Result<(), String> {
@@ -332,6 +335,10 @@ fn proxy(
 
             if waiting_for_clipboard && clipboard.selection_changed() {
                 waiting_for_clipboard = false;
+
+                if let Some(sound) = sound {
+                    sound.play("screen-capture");
+                }
 
                 input
                     .inject_escape()
