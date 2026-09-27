@@ -11,6 +11,7 @@ use nix::sys::termios::{self, SetArg, Termios};
 use nix::sys::wait::{waitpid, WaitStatus};
 use nix::unistd::{pipe, read, write, Pid};
 
+use crate::clipboard::ClipboardWatcher;
 use crate::control::{ControlChannel, ControlMessage};
 
 ioctl_read_bad!(tiocgwinsz, libc::TIOCGWINSZ, Winsize);
@@ -148,6 +149,8 @@ fn run_pty(rcfile: &Path) -> Result<i32, String> {
 
             let mut control = ControlChannel::new(control_parent);
 
+            let mut clipboard = ClipboardWatcher::new()?;
+
             let result = proxy(
                 &master,
                 child,
@@ -155,6 +158,7 @@ fn run_pty(rcfile: &Path) -> Result<i32, String> {
                 &mut control,
                 &input,
                 &mut hotkey_monitor,
+                &mut clipboard,
                 winsize.ws_row,
                 winsize.ws_col,
             );
@@ -242,6 +246,7 @@ fn proxy(
     control: &mut ControlChannel,
     input: &crate::input::Input,
     hotkey_monitor: &mut crate::keyboard::HotkeyMonitor,
+    clipboard: &mut ClipboardWatcher,
     rows: u16,
     cols: u16,
 ) -> Result<(), String> {
@@ -275,17 +280,37 @@ fn proxy(
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
 
+        clipboard.dispatch_pending()?;
+
+        let clipboard_guard = loop {
+            if let Some(guard) = clipboard.prepare_read() {
+                break guard;
+            }
+
+            clipboard.dispatch_pending()?;
+        };
+
         let mut poll_fds = [
             nix::poll::PollFd::new(stdin.as_fd(), nix::poll::PollFlags::POLLIN),
             nix::poll::PollFd::new(master.as_fd(), nix::poll::PollFlags::POLLIN),
             nix::poll::PollFd::new(signal_read.as_fd(), nix::poll::PollFlags::POLLIN),
             nix::poll::PollFd::new(control.fd().as_fd(), nix::poll::PollFlags::POLLIN),
+            nix::poll::PollFd::new(
+                clipboard.wayland_fd(),
+                nix::poll::PollFlags::POLLIN,
+            ),
         ];
 
         match nix::poll::poll(&mut poll_fds, None::<u16>) {
             Ok(_) => {}
-            Err(nix::errno::Errno::EINTR) => continue,
-            Err(error) => return Err(format!("CVB: PTY poll failed: {error}")),
+            Err(nix::errno::Errno::EINTR) => {
+                drop(clipboard_guard);
+                continue;
+            }
+            Err(error) => {
+                drop(clipboard_guard);
+                return Err(format!("CVB: PTY poll failed: {error}"));
+            }
         }
 
         let stdin_events = poll_fds[0]
@@ -303,6 +328,20 @@ fn proxy(
         let control_events = poll_fds[3]
             .revents()
             .unwrap_or(nix::poll::PollFlags::empty());
+
+        let clipboard_events = poll_fds[4]
+            .revents()
+            .unwrap_or(nix::poll::PollFlags::empty());
+
+        if clipboard_events.intersects(
+            nix::poll::PollFlags::POLLIN
+                | nix::poll::PollFlags::POLLHUP
+                | nix::poll::PollFlags::POLLERR,
+        ) {
+            clipboard.read_events(clipboard_guard)?;
+        } else {
+            drop(clipboard_guard);
+        }
 
         if signal_events.contains(nix::poll::PollFlags::POLLIN) {
             let _ = read(signal_read.as_fd(), &mut signal_buffer);
