@@ -1,3 +1,6 @@
+use std::os::fd::{AsFd, BorrowedFd};
+
+use wayland_client::backend::ReadEventsGuard;
 use wayland_client::globals::{registry_queue_init, GlobalListContents};
 use wayland_client::protocol::{
     wl_registry,
@@ -81,6 +84,35 @@ impl ClipboardWatcher {
             .map_err(|error| format!("CVB: unable to flush Wayland connection: {error}"))?;
 
         Ok(())
+    }
+
+    pub fn prepare_read(&self) -> Option<ReadEventsGuard> {
+        self.event_queue.prepare_read()
+    }
+
+    pub fn read_events(
+        &mut self,
+        guard: ReadEventsGuard,
+    ) -> Result<(), String> {
+        guard
+            .read()
+            .map_err(|error| format!("CVB: unable to read Wayland events: {error}"))?;
+
+        self.event_queue
+            .dispatch_pending(&mut self.state)
+            .map_err(|error| format!("CVB: clipboard event dispatch failed: {error}"))?;
+
+        Ok(())
+    }
+
+    pub fn flush(&self) -> Result<(), String> {
+        self.event_queue
+            .flush()
+            .map_err(|error| format!("CVB: unable to flush Wayland connection: {error}"))
+    }
+
+    pub fn wayland_fd(&self) -> BorrowedFd<'_> {
+        self.event_queue.as_fd()
     }
 
     pub fn wait_for_selection(&mut self) -> Result<(), String> {
