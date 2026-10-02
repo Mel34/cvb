@@ -46,6 +46,8 @@ const KEY_LEFTSHIFT: u32 = 42;
 const KEY_RIGHTSHIFT: u32 = 54;
 
 unsafe extern "C" {
+    fn cvb_libinput_silence(libinput: *mut LibinputRaw);
+    
     fn udev_new() -> *mut Udev;
     fn udev_unref(udev: *mut Udev) -> *mut Udev;
 
@@ -119,6 +121,10 @@ impl Libinput {
 
         if context.is_null() {
             return Err("CVB: unable to create libinput context".to_string());
+        }
+
+        unsafe {
+            cvb_libinput_silence(context);
         }
 
         let assigned = unsafe { libinput_udev_assign_seat(context, seat.as_ptr()) };
