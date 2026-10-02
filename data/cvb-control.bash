@@ -52,12 +52,14 @@ cvb_control_write_u64() {
 
 cvb_control_start() {
     local command=$1
+    local command_length
     local payload_length
 
     ((CVB_COMMAND_ID++))
     CVB_COMMAND_ACTIVE=1
 
-    payload_length=$(printf '%08x' $((9 + ${#command})))
+    command_length=$(printf '%s' "$command" | wc -c)
+    payload_length=$(printf '%08x' $((9 + command_length)))
 
     cvb_control_write_u32 "$payload_length"
     cvb_control_write_byte 01
