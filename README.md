@@ -6,20 +6,21 @@ CVB is a small terminal utility for reliable exchange between a human, the termi
 
 It can:
 
-- run a resident Bash session that captures command output and copies each completed command to the Wayland clipboard;
-- bridge a file directly to the clipboard;
-- recursively inventory a directory as TSV and copy the result to the clipboard;
-- execute external commands through the normal command-line interface.
+* run a resident Bash session that captures completed command output;
+* capture the currently visible terminal screen with a configurable hotkey;
+* bridge a file directly to the clipboard;
+* recursively inventory a directory as TSV and copy the result to the clipboard;
+* execute external commands through the normal command-line interface.
 
 CVB is designed around simple, predictable mechanisms. It is not an AI agent, shell replacement, terminal logger, or general-purpose terminal emulator.
 
 ## Requirements
 
-- Linux
-- Bash
-- Wayland
-- `wl-clipboard`
-- Rust/Cargo when building from source
+* Linux
+* Bash
+* Wayland
+* `wl-clipboard`
+* Rust/Cargo when building from source
 
 ## Building
 
@@ -53,7 +54,7 @@ cvb on
 
 The active CVB session is indicated by a red dot in the prompt.
 
-Commands entered inside the session are captured when they complete. The combined terminal output of each command is copied to the Wayland clipboard.
+Commands entered inside the session are captured when they complete. Their visible terminal output is copied to the Wayland clipboard.
 
 To end the session:
 
@@ -67,13 +68,102 @@ The parent shell is left running normally after the CVB child session exits. Com
 
 When a session starts, CVB transfers useful parent-shell state into the child Bash session, including:
 
-- aliases
-- shell functions
-- shell options
-- `shopt` settings
-- inherited environment variables
+* aliases
+* shell functions
+* shell options
+* `shopt` settings
+* inherited environment variables
 
 CVB does not attempt to clone transient shell internals such as arbitrary traps.
+
+## Screen capture
+
+While a resident CVB session is running, CVB maintains a representation of the terminal screen as it is displayed.
+
+Press the configured screen-capture hotkey to copy the currently visible terminal screen to the Wayland clipboard.
+
+The default binding is:
+
+```text
+Ctrl+Shift+B
+```
+
+Screen capture works for both ordinary shell sessions and full-screen interactive terminal applications such as `htop` and `micro`.
+
+The captured text represents the terminal's current visible screen rather than command history or terminal scrollback.
+
+### Keybind configuration
+
+CVB reads screen-capture bindings from:
+
+```text
+~/.config/cvb/keybind
+```
+
+If `XDG_CONFIG_HOME` is set, the file is instead located at:
+
+```text
+$XDG_CONFIG_HOME/cvb/keybind
+```
+
+If the file does not exist, CVB creates it with the default binding.
+
+Each non-empty, non-comment line defines one screen-capture binding. Multiple bindings are allowed.
+
+For example:
+
+```text
+Ctrl+Shift+B
+Ctrl+Shift+N
+```
+
+Supported modifiers are:
+
+* `Ctrl`
+* `Shift`
+* `Alt`
+* `Super`
+
+The key is separated from modifiers with `+`.
+
+Named special keys include:
+
+* `Enter`
+* `Escape`
+* `Tab`
+* `Space`
+* `Backspace`
+* `Delete`
+* `Insert`
+* `Home`
+* `End`
+* `PageUp`
+* `PageDown`
+* `Left`
+* `Right`
+* `Up`
+* `Down`
+* `F1` through `F24`
+
+The following punctuation keys can be named explicitly:
+
+* `Plus`
+* `Minus`
+* `Comma`
+* `Period`
+* `Slash`
+* `Backslash`
+* `Semicolon`
+* `Apostrophe`
+* `LeftBracket`
+* `RightBracket`
+* `Backtick`
+
+Blank lines and lines beginning with `#` are ignored.
+
+The configuration is watched while CVB is running. Changes take effect without restarting the resident session.
+
+CVB observes the configured key combinations but does not consume the underlying keyboard events. The terminal or application may therefore also receive the key combination.
 
 ## File bridging
 
@@ -120,7 +210,7 @@ The file contains one directory name per line. Blank lines and lines beginning w
 
 The initial file excludes common version-control directories:
 
-```
+```text
 .git
 .hg
 .svn
@@ -141,6 +231,7 @@ cvb cargo test
 ```
 
 CVB does not attempt to reimplement Bash parsing. Shell syntax that requires Bash remains the responsibility of Bash.
+
 Common terminal pagers are disabled while executing commands so their output can be captured directly.
 
 ## Target resolution
@@ -163,13 +254,13 @@ Explicit paths such as `./foo`, `../foo`, and `/tmp/foo` are path targets.
 
 CVB uses `wl-copy` for clipboard integration.
 
-For a captured command that produces no terminal output, CVB copies:
+When a captured command produces no visible terminal output, CVB copies:
 
 ```text
-[CVB: no output]
+[NO_VISIBLE_OUTPUT]
 ```
 
-followed by a newline.
+Screen captures copy the textual contents of the currently visible terminal screen.
 
 ## CLI
 

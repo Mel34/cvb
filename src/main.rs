@@ -35,7 +35,7 @@ fn main() {
         },
         cli::Command::Off => println!("CVB off"),
         cli::Command::Help => println!("CVB — Capture → View → Bridge"),
-        cli::Command::Version => println!("cvb 0.1.0"),
+        cli::Command::Version => println!("cvb {}", env!("CARGO_PKG_VERSION")),
         cli::Command::Target(args) => {
             if let Some(paths) = target_paths(&args) {
                 match bridge_paths(&paths) {
