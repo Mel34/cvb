@@ -5,6 +5,7 @@ use std::path::Path;
 mod cli;
 mod control;
 mod keyboard;
+mod keybind;
 mod pty;
 mod shell;
 mod sound;
