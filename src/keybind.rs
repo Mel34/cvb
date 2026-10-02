@@ -39,7 +39,23 @@ pub fn load() -> Result<Vec<KeyBinding>, String> {
     let path = config_path()?;
 
     if !path.exists() {
-        return Ok(vec![parse(DEFAULT_KEYBIND)?]);
+        let parent = path
+            .parent()
+            .ok_or_else(|| "CVB: unable to determine keybind directory".to_string())?;
+
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "CVB: unable to create keybind directory {}: {error}",
+                parent.display()
+            )
+        })?;
+
+        fs::write(&path, format!("{DEFAULT_KEYBIND}\n")).map_err(|error| {
+            format!(
+                "CVB: unable to create keybind file {}: {error}",
+                path.display()
+            )
+        })?;
     }
 
     let contents = fs::read_to_string(&path).map_err(|error| {
@@ -75,7 +91,6 @@ pub fn load() -> Result<Vec<KeyBinding>, String> {
 
     Ok(bindings)
 }
-
 fn config_path() -> Result<PathBuf, String> {
     let config_dir = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -89,7 +104,7 @@ fn config_path() -> Result<PathBuf, String> {
     Ok(config_dir.join("cvb").join("keybind"))
 }
 
-fn parse(value: &str) -> Result<KeyBinding, String> {
+pub fn parse(value: &str) -> Result<KeyBinding, String> {
     let parts = value.split('+').collect::<Vec<_>>();
 
     if parts.is_empty() || parts.iter().any(|part| part.is_empty()) {
@@ -153,6 +168,159 @@ fn parse_key(value: &str) -> Result<Key, String> {
         }
         value if value.chars().count() == 1 => Ok(Key::Character(value.chars().next().unwrap())),
         _ => Err(format!("unknown key '{value}'")),
+    }
+}
+
+pub struct KeybindWatcher {
+    fd: std::os::fd::RawFd,
+    watch_descriptor: libc::c_int,
+}
+
+impl KeybindWatcher {
+    pub fn new() -> Result<Self, String> {
+        let path = config_path()?;
+
+        let parent = path
+            .parent()
+            .ok_or_else(|| "CVB: unable to determine keybind directory".to_string())?;
+
+        std::fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "CVB: unable to create keybind directory {}: {error}",
+                parent.display()
+            )
+        })?;
+
+        let fd = unsafe {
+            libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC)
+        };
+
+        if fd < 0 {
+            return Err(format!(
+                "CVB: unable to create keybind file watcher: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        let parent_c = std::ffi::CString::new(parent.as_os_str().as_encoded_bytes())
+            .map_err(|_| "CVB: keybind directory contains an invalid path".to_string())?;
+
+        let watch_descriptor = unsafe {
+            libc::inotify_add_watch(
+                fd,
+                parent_c.as_ptr(),
+                libc::IN_CLOSE_WRITE
+                    | libc::IN_MOVED_TO
+                    | libc::IN_CREATE
+                    | libc::IN_DELETE,
+            )
+        };
+
+        if watch_descriptor < 0 {
+            let error = std::io::Error::last_os_error();
+            unsafe {
+                libc::close(fd);
+            }
+            return Err(format!(
+                "CVB: unable to watch keybind directory {}: {error}",
+                parent.display()
+            ));
+        }
+
+        Ok(Self {
+            fd,
+            watch_descriptor,
+        })
+    }
+
+    pub fn fd(&self) -> std::os::fd::RawFd {
+        self.fd
+    }
+
+
+    pub fn changed(&self) -> Result<bool, String> {
+        let mut buffer = [0u8; 4096];
+        let mut changed = false;
+
+        loop {
+            let result = unsafe {
+                libc::read(
+                    self.fd,
+                    buffer.as_mut_ptr().cast(),
+                    buffer.len(),
+                )
+            };
+
+            if result < 0 {
+                let error = std::io::Error::last_os_error();
+
+                if error.kind() == std::io::ErrorKind::WouldBlock {
+                    break;
+                }
+
+                return Err(format!(
+                    "CVB: unable to read keybind file watcher: {error}"
+                ));
+            }
+
+            if result == 0 {
+                break;
+            }
+
+            let mut offset = 0usize;
+            let length = result as usize;
+
+            while offset < length {
+                let event = unsafe {
+                    &*(buffer.as_ptr().add(offset) as *const libc::inotify_event)
+                };
+
+                if event.len > 0 {
+                    let name_offset =
+                        offset + std::mem::size_of::<libc::inotify_event>();
+                    let name_length = event.len as usize;
+
+                    if name_offset + name_length <= length {
+                        let name = &buffer[name_offset..name_offset + name_length];
+                        let name_length = name
+                            .iter()
+                            .position(|byte| *byte == 0)
+                            .unwrap_or(name.len());
+
+                        if name[..name_length] == b"keybind"[..] {
+                            changed = true;
+                        }
+                    }
+                }
+
+                let event_size = std::mem::size_of::<libc::inotify_event>()
+                    + event.len as usize;
+
+                if event_size == 0 {
+                    break;
+                }
+
+                offset += event_size;
+            }
+        }
+
+        Ok(changed)
+    }
+}
+
+impl Drop for KeybindWatcher {
+    fn drop(&mut self) {
+        if self.watch_descriptor >= 0 {
+            unsafe {
+                libc::inotify_rm_watch(self.fd, self.watch_descriptor);
+            }
+        }
+
+        if self.fd >= 0 {
+            unsafe {
+                libc::close(self.fd);
+            }
+        }
     }
 }
 

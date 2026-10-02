@@ -13,6 +13,7 @@ use nix::unistd::{Pid, pipe, read, write};
 
 use crate::control::{ControlChannel, ControlMessage};
 use crate::keyboard::HotkeyMonitor;
+use crate::keybind::{self, KeybindWatcher};
 use crate::sound::SoundPlayer;
 
 ioctl_read_bad!(tiocgwinsz, libc::TIOCGWINSZ, Winsize);
@@ -262,13 +263,17 @@ fn proxy(
     let mut buffer = [0u8; 8192];
     let mut signal_buffer = [0u8; 64];
     let mut terminal = vt100::Parser::new(rows, cols, 0);
-    let mut keyboard = HotkeyMonitor::new()?;
+    let bindings = keybind::load()?;
+    let mut keyboard = HotkeyMonitor::new(bindings)?;
+    let keybind_watcher = KeybindWatcher::new()?;
     let mut capture_state: Option<CaptureState> = None;
     let mut pending_end = false;
 
     loop {
-        let keyboard_fd =
+                let keyboard_fd =
             unsafe { std::os::fd::BorrowedFd::borrow_raw(keyboard.fd()) };
+        let keybind_fd =
+            unsafe { std::os::fd::BorrowedFd::borrow_raw(keybind_watcher.fd()) };
 
         let mut poll_fds = [
             nix::poll::PollFd::new(stdin.as_fd(), nix::poll::PollFlags::POLLIN),
@@ -280,6 +285,10 @@ fn proxy(
             ),
             nix::poll::PollFd::new(
                 keyboard_fd,
+                nix::poll::PollFlags::POLLIN,
+            ),
+            nix::poll::PollFd::new(
+                keybind_fd,
                 nix::poll::PollFlags::POLLIN,
             ),
         ];
@@ -309,6 +318,24 @@ fn proxy(
         let keyboard_events = poll_fds[4]
             .revents()
             .unwrap_or(nix::poll::PollFlags::empty());
+
+        let keybind_events = poll_fds[5]
+            .revents()
+            .unwrap_or(nix::poll::PollFlags::empty());
+
+        if keybind_events.contains(nix::poll::PollFlags::POLLIN) {
+            match keybind_watcher.changed()? {
+                true => match keybind::load() {
+                    Ok(bindings) => {
+                        keyboard.set_bindings(bindings);
+                    }
+                    Err(error) => {
+                        eprintln!("{error}");
+                    }
+                },
+                false => {}
+            }
+        }
 
         if signal_events.contains(nix::poll::PollFlags::POLLIN) {
             let _ = read(signal_read.as_fd(), &mut signal_buffer);

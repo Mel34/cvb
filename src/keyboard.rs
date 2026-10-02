@@ -1,3 +1,4 @@
+use crate::keybind::{Key, KeyBinding};
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_void};
 
@@ -39,7 +40,7 @@ const LIBINPUT_KEY_STATE_RELEASED: c_int = 0;
 const LIBINPUT_KEY_STATE_PRESSED: c_int = 1;
 const LIBINPUT_KEY_STATE_KEY_REPEAT: c_int = 2;
 
-const KEY_A: u32 = 30;
+const KEY_B: u32 = 48;
 const KEY_LEFTCTRL: u32 = 29;
 const KEY_RIGHTCTRL: u32 = 97;
 const KEY_LEFTSHIFT: u32 = 42;
@@ -171,25 +172,35 @@ impl Drop for Libinput {
 
 pub struct HotkeyMonitor {
     libinput: Libinput,
+    bindings: Vec<KeyBinding>,
     ctrl: bool,
     shift: bool,
+    alt: bool,
+    super_key: bool,
 }
 
 impl HotkeyMonitor {
-    pub fn new() -> Result<Self, String> {
+    pub fn new(bindings: Vec<KeyBinding>) -> Result<Self, String> {
         let libinput = Libinput::new()?;
 
         Ok(Self {
             libinput,
+            bindings,
             ctrl: false,
             shift: false,
+            alt: false,
+            super_key: false,
         })
     }
 
     pub fn fd(&self) -> c_int {
         self.libinput.fd()
     }
-
+    
+    pub fn set_bindings(&mut self, bindings: Vec<KeyBinding>) {
+        self.bindings = bindings;
+    }
+    
     pub fn poll(&mut self) -> Result<bool, String> {
         self.libinput.dispatch()?;
 
@@ -204,24 +215,27 @@ impl HotkeyMonitor {
                 if !keyboard_event.is_null() {
                     let key = unsafe { libinput_event_keyboard_get_key(keyboard_event) };
 
-                    let state = unsafe { libinput_event_keyboard_get_key_state(keyboard_event).0 };
+                    let state =
+                        unsafe { libinput_event_keyboard_get_key_state(keyboard_event).0 };
 
                     match state {
-                        LIBINPUT_KEY_STATE_PRESSED => match key {
-                            KEY_LEFTCTRL | KEY_RIGHTCTRL => {
-                                self.ctrl = true;
+                        LIBINPUT_KEY_STATE_PRESSED => {
+                            match key {
+                                KEY_LEFTCTRL | KEY_RIGHTCTRL => {
+                                    self.ctrl = true;
+                                }
+
+                                KEY_LEFTSHIFT | KEY_RIGHTSHIFT => {
+                                    self.shift = true;
+                                }
+
+                                _ => {}
                             }
 
-                            KEY_LEFTSHIFT | KEY_RIGHTSHIFT => {
-                                self.shift = true;
-                            }
-
-                            KEY_A if self.ctrl && self.shift => {
+                            if self.matches_binding(key) {
                                 detected = true;
                             }
-
-                            _ => {}
-                        },
+                        }
 
                         LIBINPUT_KEY_STATE_RELEASED => match key {
                             KEY_LEFTCTRL | KEY_RIGHTCTRL => {
@@ -248,5 +262,98 @@ impl HotkeyMonitor {
         }
 
         Ok(detected)
+    }
+
+    fn matches_binding(&self, key: u32) -> bool {
+        self.bindings.iter().any(|binding| {
+            self.ctrl == binding.ctrl
+                && self.shift == binding.shift
+                && self.alt == binding.alt
+                && self.super_key == binding.super_key
+                && key_matches(binding.key, key)
+        })
+    }
+}
+
+fn key_matches(key: Key, code: u32) -> bool {
+    match key {
+        Key::Character(character) => match character.to_ascii_uppercase() {
+            'A' => code == 30,
+            'B' => code == 48,
+            'C' => code == 46,
+            'D' => code == 32,
+            'E' => code == 18,
+            'F' => code == 33,
+            'G' => code == 34,
+            'H' => code == 35,
+            'I' => code == 23,
+            'J' => code == 36,
+            'K' => code == 37,
+            'L' => code == 38,
+            'M' => code == 50,
+            'N' => code == 49,
+            'O' => code == 24,
+            'P' => code == 25,
+            'Q' => code == 16,
+            'R' => code == 19,
+            'S' => code == 31,
+            'T' => code == 20,
+            'U' => code == 22,
+            'V' => code == 47,
+            'W' => code == 17,
+            'X' => code == 45,
+            'Y' => code == 21,
+            'Z' => code == 44,
+            _ => false,
+        },
+
+        Key::Enter => code == 28,
+        Key::Escape => code == 1,
+        Key::Tab => code == 15,
+        Key::Space => code == 57,
+        Key::Backspace => code == 14,
+        Key::Delete => code == 111,
+        Key::Insert => code == 110,
+        Key::Home => code == 102,
+        Key::End => code == 107,
+        Key::PageUp => code == 104,
+        Key::PageDown => code == 109,
+        Key::Left => code == 105,
+        Key::Right => code == 106,
+        Key::Up => code == 103,
+        Key::Down => code == 108,
+        Key::F(number) => code == function_key_code(number),
+        Key::Plus => code == 13,
+        Key::Minus => code == 12,
+    }
+}
+
+fn function_key_code(number: u8) -> u32 {
+    match number {
+        1 => 59,
+        2 => 60,
+        3 => 61,
+        4 => 62,
+        5 => 63,
+        6 => 64,
+        7 => 65,
+        8 => 66,
+        9 => 67,
+        10 => 68,
+        11 => 87,
+        12 => 88,
+        13 => 183,
+        14 => 184,
+        15 => 185,
+        16 => 186,
+        17 => 187,
+        18 => 188,
+        19 => 189,
+        20 => 190,
+        21 => 191,
+        22 => 192,
+        23 => 193,
+        24 => 194,
+        _ => 0,
     }
 }
