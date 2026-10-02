@@ -3,6 +3,7 @@ use std::io::Write as IoWrite;
 use std::path::Path;
 mod cli;
 mod control;
+mod keyboard;
 mod pty;
 mod shell;
 

@@ -5,13 +5,14 @@ use std::path::Path;
 
 use nix::ioctl_read_bad;
 use nix::ioctl_write_ptr_bad;
-use nix::pty::{forkpty, ForkptyResult, Winsize};
+use nix::pty::{ForkptyResult, Winsize, forkpty};
 use nix::sys::signal::{self, SigHandler, Signal};
 use nix::sys::termios::{self, SetArg, Termios};
-use nix::sys::wait::{waitpid, WaitStatus};
-use nix::unistd::{pipe, read, write, Pid};
+use nix::sys::wait::{WaitStatus, waitpid};
+use nix::unistd::{Pid, pipe, read, write};
 
 use crate::control::{ControlChannel, ControlMessage};
+use crate::keyboard::HotkeyMonitor;
 
 ioctl_read_bad!(tiocgwinsz, libc::TIOCGWINSZ, Winsize);
 ioctl_write_ptr_bad!(tiocswinsz, libc::TIOCSWINSZ, Winsize);
@@ -23,11 +24,7 @@ static mut SIGWINCH_PIPE: Option<i32> = None;
 extern "C" fn handle_sigwinch(_: libc::c_int) {
     unsafe {
         if let Some(fd) = SIGWINCH_PIPE {
-            let _ = libc::write(
-                fd,
-                &[1u8] as *const u8 as *const libc::c_void,
-                1,
-            );
+            let _ = libc::write(fd, &[1u8] as *const u8 as *const libc::c_void, 1);
         }
     }
 }
@@ -171,8 +168,7 @@ fn run_pty(rcfile: &Path) -> Result<i32, String> {
 fn control_socketpair() -> Result<(OwnedFd, OwnedFd), String> {
     let mut fds = [0; 2];
 
-    let result =
-        unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+    let result = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
 
     if result == -1 {
         return Err(format!(
@@ -197,8 +193,7 @@ fn set_nonblocking(fd: &OwnedFd) -> Result<(), String> {
         ));
     }
 
-    let result =
-        unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    let result = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) };
 
     if result == -1 {
         return Err(format!(
@@ -241,13 +236,17 @@ fn proxy(
     let mut buffer = [0u8; 8192];
     let mut signal_buffer = [0u8; 64];
     let mut terminal = vt100::Parser::new(rows, cols, 0);
+    let mut keyboard = HotkeyMonitor::new()?;
 
     loop {
+        let keyboard_fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(keyboard.fd()) };
+
         let mut poll_fds = [
             nix::poll::PollFd::new(stdin.as_fd(), nix::poll::PollFlags::POLLIN),
             nix::poll::PollFd::new(master.as_fd(), nix::poll::PollFlags::POLLIN),
             nix::poll::PollFd::new(signal_read.as_fd(), nix::poll::PollFlags::POLLIN),
             nix::poll::PollFd::new(control.fd().as_fd(), nix::poll::PollFlags::POLLIN),
+            nix::poll::PollFd::new(keyboard_fd, nix::poll::PollFlags::POLLIN),
         ];
 
         match nix::poll::poll(&mut poll_fds, None::<u16>) {
@@ -272,6 +271,10 @@ fn proxy(
             .revents()
             .unwrap_or(nix::poll::PollFlags::empty());
 
+        let keyboard_events = poll_fds[4]
+            .revents()
+            .unwrap_or(nix::poll::PollFlags::empty());
+
         if signal_events.contains(nix::poll::PollFlags::POLLIN) {
             let _ = read(signal_read.as_fd(), &mut signal_buffer);
 
@@ -284,12 +287,13 @@ fn proxy(
                 | nix::poll::PollFlags::POLLERR,
         ) {
             for message in control.receive()? {
-                handle_control_message(
-                    message,
-                    &mut terminal,
-                    rows,
-                    cols,
-                )?;
+                handle_control_message(message, &mut terminal, rows, cols)?;
+            }
+        }
+
+        if keyboard_events.contains(nix::poll::PollFlags::POLLIN) {
+            if keyboard.poll()? {
+                capture_screen(&mut terminal, rows, cols)?;
             }
         }
 
@@ -357,11 +361,7 @@ fn handle_control_message(
     Ok(())
 }
 
-fn capture_screen(
-    terminal: &mut vt100::Parser,
-    rows: u16,
-    cols: u16,
-) -> Result<(), String> {
+fn capture_screen(terminal: &mut vt100::Parser, rows: u16, cols: u16) -> Result<(), String> {
     let processed = screen_to_text(terminal);
 
     let mut clipboard = std::process::Command::new("wl-copy")
