@@ -5,11 +5,11 @@ use std::path::Path;
 
 use nix::ioctl_read_bad;
 use nix::ioctl_write_ptr_bad;
-use nix::pty::{ForkptyResult, Winsize, forkpty};
+use nix::pty::{forkpty, ForkptyResult, Winsize};
 use nix::sys::signal::{self, SigHandler, Signal};
 use nix::sys::termios::{self, SetArg, Termios};
-use nix::sys::wait::{WaitStatus, waitpid};
-use nix::unistd::{Pid, pipe, read, write};
+use nix::sys::wait::{waitpid, WaitStatus};
+use nix::unistd::{pipe, read, write, Pid};
 
 use crate::control::{ControlChannel, ControlMessage};
 
@@ -23,7 +23,11 @@ static mut SIGWINCH_PIPE: Option<i32> = None;
 extern "C" fn handle_sigwinch(_: libc::c_int) {
     unsafe {
         if let Some(fd) = SIGWINCH_PIPE {
-            let _ = libc::write(fd, &[1u8] as *const u8 as *const libc::c_void, 1);
+            let _ = libc::write(
+                fd,
+                &[1u8] as *const u8 as *const libc::c_void,
+                1,
+            );
         }
     }
 }
@@ -167,7 +171,8 @@ fn run_pty(rcfile: &Path) -> Result<i32, String> {
 fn control_socketpair() -> Result<(OwnedFd, OwnedFd), String> {
     let mut fds = [0; 2];
 
-    let result = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+    let result =
+        unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
 
     if result == -1 {
         return Err(format!(
@@ -192,7 +197,8 @@ fn set_nonblocking(fd: &OwnedFd) -> Result<(), String> {
         ));
     }
 
-    let result = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    let result =
+        unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) };
 
     if result == -1 {
         return Err(format!(
@@ -234,9 +240,7 @@ fn proxy(
 
     let mut buffer = [0u8; 8192];
     let mut signal_buffer = [0u8; 64];
-    let mut command_output = Vec::new();
     let mut terminal = vt100::Parser::new(rows, cols, 0);
-    let mut capturing_output = false;
 
     loop {
         let mut poll_fds = [
@@ -282,8 +286,6 @@ fn proxy(
             for message in control.receive()? {
                 handle_control_message(
                     message,
-                    &mut command_output,
-                    &mut capturing_output,
                     &mut terminal,
                     rows,
                     cols,
@@ -321,10 +323,6 @@ fn proxy(
 
             terminal.process(&buffer[..count]);
 
-            if capturing_output {
-                command_output.extend_from_slice(&buffer[..count]);
-            }
-
             let mut stdout = stdout.lock();
 
             stdout
@@ -342,22 +340,15 @@ fn proxy(
 
 fn handle_control_message(
     message: ControlMessage,
-    command_output: &mut Vec<u8>,
-    capturing_output: &mut bool,
     terminal: &mut vt100::Parser,
     rows: u16,
     cols: u16,
 ) -> Result<(), String> {
     match message {
-        ControlMessage::Start { id: _, command: _ } => {
-            command_output.clear();
-            *capturing_output = true;
-        }
+        ControlMessage::Start { id: _, command: _ } => {}
 
         ControlMessage::End { id: _, status: _ } => {
             let processed = screen_to_text(terminal);
-
-            *capturing_output = false;
 
             let mut child = std::process::Command::new("wl-copy")
                 .stdin(std::process::Stdio::piped())
@@ -389,57 +380,6 @@ fn handle_control_message(
 
 fn screen_to_text(terminal: &vt100::Parser) -> String {
     terminal.screen().contents()
-}
-
-fn postprocess_output(output: &[u8]) -> Vec<u8> {
-    let mut result = Vec::with_capacity(output.len());
-    let mut index = 0;
-
-    while index < output.len() {
-        if output[index] == 0x1b && index + 1 < output.len() {
-            match output[index + 1] {
-                b']' => {
-                    index += 2;
-
-                    while index < output.len() && output[index] != 0x07 {
-                        index += 1;
-                    }
-
-                    if index < output.len() {
-                        index += 1;
-                    }
-
-                    continue;
-                }
-
-                b'[' => {
-                    index += 2;
-
-                    while index < output.len() {
-                        let byte = output[index];
-                        index += 1;
-
-                        if (0x40..=0x7e).contains(&byte) {
-                            break;
-                        }
-                    }
-
-                    continue;
-                }
-
-                _ => {}
-            }
-        }
-
-        result.push(output[index]);
-        index += 1;
-    }
-
-    if result.is_empty() {
-        b"[CVB: no output]\n".to_vec()
-    } else {
-        result
-    }
 }
 
 fn make_raw(original: &Termios) -> Termios {
@@ -496,7 +436,7 @@ fn status_to_code(status: WaitStatus) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{postprocess_output, screen_to_text};
+    use super::screen_to_text;
 
     #[test]
     fn screen_to_text_extracts_visible_content() {
@@ -549,46 +489,6 @@ mod tests {
         assert_eq!(screen_to_text(&terminal), "world");
     }
 
-    #[test]
-    fn preserves_plain_output() {
-        assert_eq!(postprocess_output(b"hello\r\n"), b"hello\r\n");
-    }
-
-    #[test]
-    fn strips_osc_sequence() {
-        assert_eq!(
-            postprocess_output(b"hello\x1b]0;title\x07world\r\n"),
-            b"helloworld\r\n"
-        );
-    }
-
-    #[test]
-    fn strips_csi_sequences() {
-        assert_eq!(postprocess_output(b"\x1b[31mred\x1b[0m\r\n"), b"red\r\n");
-    }
-
-    #[test]
-    fn preserves_carriage_returns() {
-        assert_eq!(postprocess_output(b"hello\rworld\r\n"), b"hello\rworld\r\n");
-    }
-
-    #[test]
-    fn preserves_backspaces() {
-        assert_eq!(postprocess_output(b"hellp\x08\r\n"), b"hellp\x08\r\n");
-    }
-
-    #[test]
-    fn returns_marker_for_empty_output() {
-        assert_eq!(postprocess_output(b""), b"[CVB: no output]\n");
-    }
-
-    #[test]
-    fn processes_mixed_output() {
-        assert_eq!(
-            postprocess_output(b"\x1b]0;title\x07\x1b[32mhello\x1b[0m\r\n"),
-            b"hello\r\n"
-        );
-    }
     #[test]
     fn screen_to_text_ignores_ansi_color_sequences() {
         let mut terminal = vt100::Parser::new(4, 20, 0);
