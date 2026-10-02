@@ -13,6 +13,7 @@ use nix::unistd::{Pid, pipe, read, write};
 
 use crate::control::{ControlChannel, ControlMessage};
 use crate::keyboard::HotkeyMonitor;
+use crate::sound::SoundPlayer;
 
 ioctl_read_bad!(tiocgwinsz, libc::TIOCGWINSZ, Winsize);
 ioctl_write_ptr_bad!(tiocswinsz, libc::TIOCSWINSZ, Winsize);
@@ -139,6 +140,7 @@ fn run_pty(rcfile: &Path) -> Result<i32, String> {
             drop(control_child);
 
             let mut control = ControlChannel::new(control_parent);
+            let sound = SoundPlayer::new();
 
             let result = proxy(
                 &master,
@@ -147,6 +149,7 @@ fn run_pty(rcfile: &Path) -> Result<i32, String> {
                 &mut control,
                 winsize.ws_row,
                 winsize.ws_col,
+                sound.as_ref(),
             );
 
             unsafe {
@@ -250,6 +253,7 @@ fn proxy(
     control: &mut ControlChannel,
     rows: u16,
     cols: u16,
+    sound: Option<&SoundPlayer>,
 ) -> Result<(), String> {
     let stdin = io::stdin();
     let stdout = io::stdout();
@@ -329,6 +333,10 @@ fn proxy(
         if keyboard_events.contains(nix::poll::PollFlags::POLLIN) {
             if keyboard.poll()? {
                 capture_screen(&mut terminal, rows, cols)?;
+
+                if let Some(sound) = sound {
+                    sound.play("screen-capture");
+                }
             }
         }
 

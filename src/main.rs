@@ -7,6 +7,7 @@ mod control;
 mod keyboard;
 mod pty;
 mod shell;
+mod sound;
 
 const DEFAULT_IGNORE_LIST: &str = "\
 # This file contains directory names that CVB excludes from directory inventories.
