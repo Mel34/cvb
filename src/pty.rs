@@ -167,7 +167,8 @@ fn run_pty(rcfile: &Path) -> Result<i32, String> {
 fn control_socketpair() -> Result<(OwnedFd, OwnedFd), String> {
     let mut fds = [0; 2];
 
-    let result = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+    let result =
+        unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
 
     if result == -1 {
         return Err(format!(
@@ -192,7 +193,8 @@ fn set_nonblocking(fd: &OwnedFd) -> Result<(), String> {
         ));
     }
 
-    let result = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    let result =
+        unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) };
 
     if result == -1 {
         return Err(format!(
@@ -280,7 +282,12 @@ fn proxy(
                 | nix::poll::PollFlags::POLLERR,
         ) {
             for message in control.receive()? {
-                handle_control_message(message, &mut command_output, &mut capturing_output)?;
+                handle_control_message(
+                    message,
+                    &mut command_output,
+                    &mut capturing_output,
+                    &terminal,
+                )?;
             }
         }
 
@@ -337,6 +344,7 @@ fn handle_control_message(
     message: ControlMessage,
     command_output: &mut Vec<u8>,
     capturing_output: &mut bool,
+    terminal: &vt100::Parser,
 ) -> Result<(), String> {
     match message {
         ControlMessage::Start { id: _, command: _ } => {
@@ -345,9 +353,11 @@ fn handle_control_message(
         }
 
         ControlMessage::End { id: _, status: _ } => {
-            let processed = postprocess_output(command_output);
+            let _screen = terminal.screen();
 
             *capturing_output = false;
+
+            let processed = postprocess_output(command_output);
 
             let mut child = std::process::Command::new("wl-copy")
                 .stdin(std::process::Stdio::piped())
@@ -373,6 +383,10 @@ fn handle_control_message(
     }
 
     Ok(())
+}
+
+fn screen_to_text(terminal: &vt100::Parser) -> String {
+    terminal.screen().contents()
 }
 
 fn postprocess_output(output: &[u8]) -> Vec<u8> {
@@ -480,7 +494,16 @@ fn status_to_code(status: WaitStatus) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::postprocess_output;
+    use super::{postprocess_output, screen_to_text};
+
+    #[test]
+    fn screen_to_text_extracts_visible_content() {
+        let mut terminal = vt100::Parser::new(4, 20, 0);
+
+        terminal.process(b"hello\r\nworld");
+
+        assert_eq!(screen_to_text(&terminal), "hello\nworld");
+    }
 
     #[test]
     fn preserves_plain_output() {
