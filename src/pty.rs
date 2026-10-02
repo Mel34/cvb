@@ -361,7 +361,7 @@ fn proxy(
 
         if keyboard_events.contains(nix::poll::PollFlags::POLLIN) {
             if keyboard.poll()? {
-                capture_screen(&mut screen_terminal, rows, cols)?;
+                capture_screen(&mut screen_terminal)?;
 
                 if let Some(sound) = sound {
                     sound.play("screen-capture");
@@ -505,8 +505,6 @@ fn capture_command_output(
 
 fn capture_screen(
     terminal: &mut vt100::Parser,
-    rows: u16,
-    cols: u16,
 ) -> Result<(), String> {
     let text = screen_to_text(terminal);
 
@@ -517,8 +515,6 @@ fn capture_screen(
     };
 
     copy_to_clipboard(&processed)?;
-
-    *terminal = vt100::Parser::new(rows, cols, 0);
 
     Ok(())
 }
