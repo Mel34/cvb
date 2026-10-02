@@ -86,16 +86,52 @@ fn bridge_paths(paths: &[std::path::PathBuf]) -> Result<(), String> {
         let path = &paths[0];
 
         if path.is_file() {
-            return bridge_file(path);
+            bridge_file(path)?;
+            let size = std::fs::metadata(path)
+                .map_err(|error| {
+                    format!(
+                        "CVB: unable to read metadata for '{}': {error}",
+                        path.display()
+                    )
+                })?
+                .len();
+
+            eprintln!(
+                "CVB: captured file '{}' ({} bytes)",
+                path.display(),
+                size
+            );
+
+            return Ok(());
         }
 
         if path.is_dir() {
-            return bridge_directory(path);
+            let ignore = load_ignore_list()?;
+            let mut output = String::from(INVENTORY_HEADER);
+
+            append_directory_entries(path, path, &mut output, &ignore)?;
+
+            let entry_count = output.lines().skip(1).count();
+
+            copy_to_clipboard(output.as_bytes())?;
+
+            eprintln!(
+                "CVB: captured directory inventory '{}' ({} {})",
+                path.display(),
+                entry_count,
+                if entry_count == 1 { "entry" } else { "entries" }
+            );
+
+            return Ok(());
         }
     }
 
     let output = build_paths_output(paths)?;
-    copy_to_clipboard(output.as_bytes())
+    copy_to_clipboard(output.as_bytes())?;
+
+    eprintln!("CVB: captured {} paths", paths.len());
+
+    Ok(())
 }
 
 fn build_paths_output(paths: &[std::path::PathBuf]) -> Result<String, String> {
@@ -206,15 +242,6 @@ fn load_ignore_list() -> Result<Vec<String>, String> {
     })?;
 
     Ok(parse_ignore_list(&contents))
-}
-
-fn bridge_directory(path: &Path) -> Result<(), String> {
-    let ignore = load_ignore_list()?;
-    let mut output = String::from(INVENTORY_HEADER);
-
-    append_directory_entries(path, path, &mut output, &ignore)?;
-
-    copy_to_clipboard(output.as_bytes())
 }
 
 fn append_directory_entries(
