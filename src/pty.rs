@@ -138,7 +138,14 @@ fn run_pty(rcfile: &Path) -> Result<i32, String> {
 
             let mut control = ControlChannel::new(control_parent);
 
-            let result = proxy(&master, child, &signal_read, &mut control);
+            let result = proxy(
+                &master,
+                child,
+                &signal_read,
+                &mut control,
+                winsize.ws_row,
+                winsize.ws_col,
+            );
 
             unsafe {
                 SIGWINCH_PIPE = None;
@@ -219,6 +226,8 @@ fn proxy(
     child: Pid,
     signal_read: &OwnedFd,
     control: &mut ControlChannel,
+    rows: u16,
+    cols: u16,
 ) -> Result<(), String> {
     let stdin = io::stdin();
     let stdout = io::stdout();
@@ -226,6 +235,7 @@ fn proxy(
     let mut buffer = [0u8; 8192];
     let mut signal_buffer = [0u8; 64];
     let mut command_output = Vec::new();
+    let mut terminal = vt100::Parser::new(rows, cols, 0);
     let mut capturing_output = false;
 
     loop {
@@ -301,6 +311,9 @@ fn proxy(
             if count == 0 {
                 break;
             }
+
+            terminal.process(&buffer[..count]);
+
             if capturing_output {
                 command_output.extend_from_slice(&buffer[..count]);
             }
@@ -464,6 +477,7 @@ fn status_to_code(status: WaitStatus) -> i32 {
         _ => 1,
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::postprocess_output;
