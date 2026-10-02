@@ -92,20 +92,26 @@ cvb_control_exit() {
 
 cvb_control_debug() {
     ((CVB_EXITING)) && return
+    ((CVB_COMMAND_ACTIVE)) && return
+
     local history_line
+    local history_number
     local command
 
-    ((CVB_COMMAND_ACTIVE)) && return
     [[ ${BASH_COMMAND} == cvb_control_* ]] && return
-    ((HISTCMD > 0)) || return
-    ((HISTCMD == CVB_LAST_HISTCMD)) && return
+    [[ -n ${BASH_COMMAND} ]] || return
 
     history_line=$(history 1)
 
     history_line="${history_line#"${history_line%%[![:space:]]*}"}"
+    history_number="${history_line%%[[:space:]]*}"
+
+    [[ $history_number == "$HISTCMD" ]] || return
+    [[ $history_number != "$CVB_LAST_HISTCMD" ]] || return
+
     command="${history_line#*[[:space:]]}"
     command="${command#"${command%%[![:space:]]*}"}"
-    
+
     [[ -n $command ]] || return
 
     [[ $command == exit || $command == exit[[:space:]]* ]] && return
@@ -140,7 +146,8 @@ if declare -p PROMPT_COMMAND &>/dev/null; then
 fi
 
 PROMPT_COMMAND='cvb_control_prompt'
-trap 'cvb_control_debug' DEBUG
 
 CVB_SAVED_PS1=$PS1
 PS1='\[\e[31m\]●\[\e[0m\] '"$CVB_SAVED_PS1"
+
+trap 'cvb_control_debug' DEBUG

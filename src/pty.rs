@@ -18,6 +18,7 @@ ioctl_read_bad!(tiocgwinsz, libc::TIOCGWINSZ, Winsize);
 ioctl_write_ptr_bad!(tiocswinsz, libc::TIOCSWINSZ, Winsize);
 
 const CONTROL_FD: i32 = 3;
+const NO_OUTPUT: &str = "[NO_VISIBLE_OUTPUT]";
 
 static mut SIGWINCH_PIPE: Option<i32> = None;
 
@@ -168,7 +169,14 @@ fn run_pty(rcfile: &Path) -> Result<i32, String> {
 fn control_socketpair() -> Result<(OwnedFd, OwnedFd), String> {
     let mut fds = [0; 2];
 
-    let result = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+    let result = unsafe {
+        libc::socketpair(
+            libc::AF_UNIX,
+            libc::SOCK_STREAM,
+            0,
+            fds.as_mut_ptr(),
+        )
+    };
 
     if result == -1 {
         return Err(format!(
@@ -193,7 +201,13 @@ fn set_nonblocking(fd: &OwnedFd) -> Result<(), String> {
         ));
     }
 
-    let result = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    let result = unsafe {
+        libc::fcntl(
+            fd.as_raw_fd(),
+            libc::F_SETFL,
+            flags | libc::O_NONBLOCK,
+        )
+    };
 
     if result == -1 {
         return Err(format!(
@@ -222,6 +236,13 @@ fn install_control_fd(control: OwnedFd) -> Result<(), String> {
     Ok(())
 }
 
+struct CaptureState {
+    cursor_row: u16,
+    cursor_col: u16,
+    prompt: String,
+    command: String,
+}
+
 fn proxy(
     master: &OwnedFd,
     child: Pid,
@@ -237,16 +258,25 @@ fn proxy(
     let mut signal_buffer = [0u8; 64];
     let mut terminal = vt100::Parser::new(rows, cols, 0);
     let mut keyboard = HotkeyMonitor::new()?;
+    let mut capture_state: Option<CaptureState> = None;
+    let mut pending_end = false;
 
     loop {
-        let keyboard_fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(keyboard.fd()) };
+        let keyboard_fd =
+            unsafe { std::os::fd::BorrowedFd::borrow_raw(keyboard.fd()) };
 
         let mut poll_fds = [
             nix::poll::PollFd::new(stdin.as_fd(), nix::poll::PollFlags::POLLIN),
             nix::poll::PollFd::new(master.as_fd(), nix::poll::PollFlags::POLLIN),
             nix::poll::PollFd::new(signal_read.as_fd(), nix::poll::PollFlags::POLLIN),
-            nix::poll::PollFd::new(control.fd().as_fd(), nix::poll::PollFlags::POLLIN),
-            nix::poll::PollFd::new(keyboard_fd, nix::poll::PollFlags::POLLIN),
+            nix::poll::PollFd::new(
+                control.fd().as_fd(),
+                nix::poll::PollFlags::POLLIN,
+            ),
+            nix::poll::PollFd::new(
+                keyboard_fd,
+                nix::poll::PollFlags::POLLIN,
+            ),
         ];
 
         match nix::poll::poll(&mut poll_fds, None::<u16>) {
@@ -287,7 +317,12 @@ fn proxy(
                 | nix::poll::PollFlags::POLLERR,
         ) {
             for message in control.receive()? {
-                handle_control_message(message, &mut terminal, rows, cols)?;
+                handle_control_message(
+                    message,
+                    &terminal,
+                    &mut capture_state,
+                    &mut pending_end,
+                )?;
             }
         }
 
@@ -337,6 +372,14 @@ fn proxy(
                 .flush()
                 .map_err(|error| format!("CVB: stdout flush failed: {error}"))?;
         }
+
+        if pending_end {
+            if let Some(state) = capture_state.take() {
+                capture_command_output(&mut terminal, rows, cols, &state)?;
+            }
+
+            pending_end = false;
+        }
     }
 
     Ok(())
@@ -344,15 +387,34 @@ fn proxy(
 
 fn handle_control_message(
     message: ControlMessage,
-    terminal: &mut vt100::Parser,
-    rows: u16,
-    cols: u16,
+    terminal: &vt100::Parser,
+    capture_state: &mut Option<CaptureState>,
+    pending_end: &mut bool,
 ) -> Result<(), String> {
     match message {
-        ControlMessage::Start { .. } => {}
+        ControlMessage::Start { command, .. } => {
+            let screen = terminal.screen();
+            let (cursor_row, cursor_col) = screen.cursor_position();
+
+            let prompt = screen.contents_between(
+                cursor_row,
+                0,
+                cursor_row,
+                cursor_col,
+            );
+
+            *capture_state = Some(CaptureState {
+                cursor_row,
+                cursor_col,
+                prompt,
+                command,
+            });
+
+            *pending_end = false;
+        }
 
         ControlMessage::End { .. } => {
-            capture_screen(terminal, rows, cols)?;
+            *pending_end = true;
         }
 
         ControlMessage::Exit => {}
@@ -361,9 +423,62 @@ fn handle_control_message(
     Ok(())
 }
 
-fn capture_screen(terminal: &mut vt100::Parser, rows: u16, cols: u16) -> Result<(), String> {
-    let processed = screen_to_text(terminal);
+fn capture_command_output(
+    terminal: &mut vt100::Parser,
+    rows: u16,
+    cols: u16,
+    state: &CaptureState,
+) -> Result<(), String> {
+    let end_cursor = terminal.screen().cursor_position();
 
+    let region = terminal.screen().contents_between(
+        state.cursor_row,
+        state.cursor_col,
+        end_cursor.0,
+        end_cursor.1,
+    );
+
+    let region = region.strip_prefix(&state.command).unwrap_or(&region);
+
+    let output = region
+        .strip_suffix(&state.prompt)
+        .unwrap_or(region)
+        .trim_matches('\n');
+
+    let processed = if output.is_empty() {
+        NO_OUTPUT.to_string()
+    } else {
+        output.to_string()
+    };
+
+    copy_to_clipboard(&processed)?;
+
+    *terminal = vt100::Parser::new(rows, cols, 0);
+
+    Ok(())
+}
+
+fn capture_screen(
+    terminal: &mut vt100::Parser,
+    rows: u16,
+    cols: u16,
+) -> Result<(), String> {
+    let text = screen_to_text(terminal);
+
+    let processed = if text.is_empty() {
+        NO_OUTPUT.to_string()
+    } else {
+        text
+    };
+
+    copy_to_clipboard(&processed)?;
+
+    *terminal = vt100::Parser::new(rows, cols, 0);
+
+    Ok(())
+}
+
+fn copy_to_clipboard(text: &str) -> Result<(), String> {
     let mut clipboard = std::process::Command::new("wl-copy")
         .stdin(std::process::Stdio::piped())
         .spawn()
@@ -373,8 +488,8 @@ fn capture_screen(terminal: &mut vt100::Parser, rows: u16, cols: u16) -> Result<
         .stdin
         .take()
         .ok_or_else(|| "CVB: unable to open wl-copy stdin".to_string())?
-        .write_all(processed.as_bytes())
-        .map_err(|error| format!("CVB: unable to write clipboard data: {error}"))?;
+        .write_all(text.as_bytes())
+        .map_err(|error| format!("CVB: unable to write to wl-copy: {error}"))?;
 
     let status = clipboard
         .wait()
@@ -383,8 +498,6 @@ fn capture_screen(terminal: &mut vt100::Parser, rows: u16, cols: u16) -> Result<
     if !status.success() {
         return Err("CVB: wl-copy failed".to_string());
     }
-
-    *terminal = vt100::Parser::new(rows, cols, 0);
 
     Ok(())
 }
