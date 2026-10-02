@@ -263,6 +263,7 @@ fn proxy(
     let mut buffer = [0u8; 8192];
     let mut signal_buffer = [0u8; 64];
     let mut terminal = vt100::Parser::new(rows, cols, 0);
+    let mut screen_terminal = vt100::Parser::new(rows, cols, 0);
     let bindings = keybind::load()?;
     let mut keyboard = HotkeyMonitor::new(bindings)?;
     let keybind_watcher = KeybindWatcher::new()?;
@@ -360,7 +361,7 @@ fn proxy(
 
         if keyboard_events.contains(nix::poll::PollFlags::POLLIN) {
             if keyboard.poll()? {
-                capture_screen(&mut terminal, rows, cols)?;
+                capture_screen(&mut screen_terminal, rows, cols)?;
 
                 if let Some(sound) = sound {
                     sound.play("screen-capture");
@@ -397,6 +398,7 @@ fn proxy(
             }
 
             terminal.process(&buffer[..count]);
+            screen_terminal.process(&buffer[..count]);
 
             let mut stdout = stdout.lock();
 
