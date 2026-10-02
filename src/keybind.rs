@@ -155,6 +155,15 @@ fn parse_key(value: &str) -> Result<Key, String> {
         "Down" => Ok(Key::Down),
         "Plus" => Ok(Key::Plus),
         "Minus" => Ok(Key::Minus),
+        "Comma" => Ok(Key::Character(',')),
+        "Period" => Ok(Key::Character('.')),
+        "Slash" => Ok(Key::Character('/')),
+        "Backslash" => Ok(Key::Character('\\')),
+        "Semicolon" => Ok(Key::Character(';')),
+        "Apostrophe" => Ok(Key::Character('\'')),
+        "LeftBracket" => Ok(Key::Character('[')),
+        "RightBracket" => Ok(Key::Character(']')),
+        "Backtick" => Ok(Key::Character('`')),
         value if value.starts_with('F') => {
             let number = value[1..]
                 .parse::<u8>()
@@ -362,6 +371,33 @@ mod tests {
         assert_eq!(parse("Ctrl+Plus").unwrap().key, Key::Plus);
         assert_eq!(parse("Ctrl+Minus").unwrap().key, Key::Minus);
         assert_eq!(parse("Alt+F12").unwrap().key, Key::F(12));
+        assert_eq!(parse("Ctrl+Comma").unwrap().key, Key::Character(','));
+        assert_eq!(parse("Ctrl+Period").unwrap().key, Key::Character('.'));
+        assert_eq!(parse("Ctrl+Slash").unwrap().key, Key::Character('/'));
+        assert_eq!(
+            parse("Ctrl+Backslash").unwrap().key,
+            Key::Character('\\')
+        );
+        assert_eq!(
+            parse("Ctrl+Semicolon").unwrap().key,
+            Key::Character(';')
+        );
+        assert_eq!(
+            parse("Ctrl+Apostrophe").unwrap().key,
+            Key::Character('\'')
+        );
+        assert_eq!(
+            parse("Ctrl+LeftBracket").unwrap().key,
+            Key::Character('[')
+        );
+        assert_eq!(
+            parse("Ctrl+RightBracket").unwrap().key,
+            Key::Character(']')
+        );
+        assert_eq!(
+            parse("Ctrl+Backtick").unwrap().key,
+            Key::Character('`')
+        );
     }
 
     #[test]

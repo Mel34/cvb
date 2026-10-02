@@ -40,7 +40,6 @@ const LIBINPUT_KEY_STATE_RELEASED: c_int = 0;
 const LIBINPUT_KEY_STATE_PRESSED: c_int = 1;
 const LIBINPUT_KEY_STATE_KEY_REPEAT: c_int = 2;
 
-const KEY_B: u32 = 48;
 const KEY_LEFTCTRL: u32 = 29;
 const KEY_RIGHTCTRL: u32 = 97;
 const KEY_LEFTSHIFT: u32 = 42;
@@ -304,6 +303,15 @@ fn key_matches(key: Key, code: u32) -> bool {
             'X' => code == 45,
             'Y' => code == 21,
             'Z' => code == 44,
+            ',' => code == 51,
+            '.' => code == 52,
+            '/' => code == 53,
+            '\\' => code == 43,
+            ';' => code == 39,
+            '\'' => code == 40,
+            '[' => code == 26,
+            ']' => code == 27,
+            '`' => code == 41,
             _ => false,
         },
 
@@ -355,5 +363,36 @@ fn function_key_code(number: u8) -> u32 {
         23 => 193,
         24 => 194,
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn punctuation_keys_match_physical_codes() {
+        assert!(key_matches(Key::Character(','), 51));
+        assert!(key_matches(Key::Character('.'), 52));
+        assert!(key_matches(Key::Character('/'), 53));
+        assert!(key_matches(Key::Character('\\'), 43));
+        assert!(key_matches(Key::Character(';'), 39));
+        assert!(key_matches(Key::Character('\''), 40));
+        assert!(key_matches(Key::Character('['), 26));
+        assert!(key_matches(Key::Character(']'), 27));
+        assert!(key_matches(Key::Character('`'), 41));
+    }
+
+    #[test]
+    fn punctuation_keys_reject_wrong_codes() {
+        assert!(!key_matches(Key::Character(','), 52));
+        assert!(!key_matches(Key::Character('.'), 53));
+        assert!(!key_matches(Key::Character('/'), 51));
+        assert!(!key_matches(Key::Character('\\'), 40));
+        assert!(!key_matches(Key::Character(';'), 41));
+        assert!(!key_matches(Key::Character('\''), 39));
+        assert!(!key_matches(Key::Character('['), 27));
+        assert!(!key_matches(Key::Character(']'), 26));
+        assert!(!key_matches(Key::Character('`'), 43));
     }
 }
