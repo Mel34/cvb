@@ -44,6 +44,10 @@ const KEY_LEFTCTRL: u32 = 29;
 const KEY_RIGHTCTRL: u32 = 97;
 const KEY_LEFTSHIFT: u32 = 42;
 const KEY_RIGHTSHIFT: u32 = 54;
+const KEY_LEFTALT: u32 = 56;
+const KEY_RIGHTALT: u32 = 100;
+const KEY_LEFTSUPER: u32 = 125;
+const KEY_RIGHTSUPER: u32 = 126;
 
 unsafe extern "C" {
     fn cvb_libinput_silence(libinput: *mut LibinputRaw);
@@ -217,7 +221,7 @@ impl HotkeyMonitor {
                     let state =
                         unsafe { libinput_event_keyboard_get_key_state(keyboard_event).0 };
 
-                    match state {
+                                        match state {
                         LIBINPUT_KEY_STATE_PRESSED => {
                             match key {
                                 KEY_LEFTCTRL | KEY_RIGHTCTRL => {
@@ -226,6 +230,14 @@ impl HotkeyMonitor {
 
                                 KEY_LEFTSHIFT | KEY_RIGHTSHIFT => {
                                     self.shift = true;
+                                }
+
+                                KEY_LEFTALT | KEY_RIGHTALT => {
+                                    self.alt = true;
+                                }
+
+                                KEY_LEFTSUPER | KEY_RIGHTSUPER => {
+                                    self.super_key = true;
                                 }
 
                                 _ => {}
@@ -243,6 +255,14 @@ impl HotkeyMonitor {
 
                             KEY_LEFTSHIFT | KEY_RIGHTSHIFT => {
                                 self.shift = false;
+                            }
+
+                            KEY_LEFTALT | KEY_RIGHTALT => {
+                                self.alt = false;
+                            }
+
+                            KEY_LEFTSUPER | KEY_RIGHTSUPER => {
+                                self.super_key = false;
                             }
 
                             _ => {}
@@ -264,14 +284,32 @@ impl HotkeyMonitor {
     }
 
     fn matches_binding(&self, key: u32) -> bool {
-        self.bindings.iter().any(|binding| {
-            self.ctrl == binding.ctrl
-                && self.shift == binding.shift
-                && self.alt == binding.alt
-                && self.super_key == binding.super_key
-                && key_matches(binding.key, key)
-        })
+        binding_matches(
+            &self.bindings,
+            self.ctrl,
+            self.shift,
+            self.alt,
+            self.super_key,
+            key,
+        )
     }
+}
+
+fn binding_matches(
+    bindings: &[KeyBinding],
+    ctrl: bool,
+    shift: bool,
+    alt: bool,
+    super_key: bool,
+    key: u32,
+) -> bool {
+    bindings.iter().any(|binding| {
+        ctrl == binding.ctrl
+            && shift == binding.shift
+            && alt == binding.alt
+            && super_key == binding.super_key
+            && key_matches(binding.key, key)
+    })
 }
 
 fn key_matches(key: Key, code: u32) -> bool {
@@ -394,5 +432,25 @@ mod tests {
         assert!(!key_matches(Key::Character('['), 27));
         assert!(!key_matches(Key::Character(']'), 26));
         assert!(!key_matches(Key::Character('`'), 43));
+    }
+    
+    #[test]
+    fn binding_matches_modifiers() {
+        let binding = KeyBinding {
+            ctrl: true,
+            shift: false,
+            alt: true,
+            super_key: false,
+            key: Key::Character('X'),
+        };
+
+        let bindings = vec![binding];
+
+        assert!(binding_matches(&bindings, true, false, true, false, 45));
+        assert!(!binding_matches(&bindings, true, false, false, false, 45));
+        assert!(!binding_matches(&bindings, true, true, true, false, 45));
+        assert!(!binding_matches(&bindings, true, false, true, true, 45));
+        assert!(!binding_matches(&bindings, false, false, true, false, 45));
+        assert!(!binding_matches(&bindings, true, false, true, false, 46));
     }
 }
