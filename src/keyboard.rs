@@ -3,8 +3,7 @@ use std::os::raw::{c_char, c_int, c_void};
 
 #[repr(C)]
 struct LibinputInterface {
-    open_restricted:
-        Option<unsafe extern "C" fn(*const c_char, c_int, *mut c_void) -> c_int>,
+    open_restricted: Option<unsafe extern "C" fn(*const c_char, c_int, *mut c_void) -> c_int>,
     close_restricted: Option<unsafe extern "C" fn(c_int, *mut c_void)>,
 }
 
@@ -56,10 +55,7 @@ unsafe extern "C" {
         udev: *mut Udev,
     ) -> *mut LibinputRaw;
 
-    fn libinput_udev_assign_seat(
-        libinput: *mut LibinputRaw,
-        seat_id: *const c_char,
-    ) -> c_int;
+    fn libinput_udev_assign_seat(libinput: *mut LibinputRaw, seat_id: *const c_char) -> c_int;
 
     fn libinput_get_fd(libinput: *mut LibinputRaw) -> c_int;
     fn libinput_dispatch(libinput: *mut LibinputRaw) -> c_int;
@@ -68,17 +64,12 @@ unsafe extern "C" {
     fn libinput_event_get_type(event: *mut LibinputEvent) -> LibinputEventType;
     fn libinput_event_destroy(event: *mut LibinputEvent);
 
-    fn libinput_event_get_keyboard_event(
-        event: *mut LibinputEvent,
-    ) -> *mut LibinputEventKeyboard;
+    fn libinput_event_get_keyboard_event(event: *mut LibinputEvent) -> *mut LibinputEventKeyboard;
 
-    fn libinput_event_keyboard_get_key(
-        event: *mut LibinputEventKeyboard,
-    ) -> u32;
+    fn libinput_event_keyboard_get_key(event: *mut LibinputEventKeyboard) -> u32;
 
-    fn libinput_event_keyboard_get_key_state(
-        event: *mut LibinputEventKeyboard,
-    ) -> LibinputKeyState;
+    fn libinput_event_keyboard_get_key_state(event: *mut LibinputEventKeyboard)
+    -> LibinputKeyState;
 
     fn libinput_unref(libinput: *mut LibinputRaw) -> *mut LibinputRaw;
 }
@@ -91,10 +82,7 @@ unsafe extern "C" fn open_restricted(
     unsafe { libc::open(path, flags) }
 }
 
-unsafe extern "C" fn close_restricted(
-    fd: c_int,
-    _user_data: *mut c_void,
-) {
+unsafe extern "C" fn close_restricted(fd: c_int, _user_data: *mut c_void) {
     unsafe {
         libc::close(fd);
     }
@@ -122,13 +110,8 @@ impl Libinput {
             return Err("CVB: unable to create udev context".to_string());
         }
 
-        let context = unsafe {
-            libinput_udev_create_context(
-                &*interface,
-                std::ptr::null_mut(),
-                udev,
-            )
-        };
+        let context =
+            unsafe { libinput_udev_create_context(&*interface, std::ptr::null_mut(), udev) };
 
         unsafe {
             udev_unref(udev);
@@ -138,9 +121,7 @@ impl Libinput {
             return Err("CVB: unable to create libinput context".to_string());
         }
 
-        let assigned = unsafe {
-            libinput_udev_assign_seat(context, seat.as_ptr())
-        };
+        let assigned = unsafe { libinput_udev_assign_seat(context, seat.as_ptr()) };
 
         if assigned != 0 {
             unsafe {
@@ -150,10 +131,7 @@ impl Libinput {
             return Err("CVB: unable to assign libinput seat0".to_string());
         }
 
-        Ok(Self {
-            context,
-            interface,
-        })
+        Ok(Self { context, interface })
     }
 
     fn fd(&self) -> c_int {
@@ -164,9 +142,7 @@ impl Libinput {
         let result = unsafe { libinput_dispatch(self.context) };
 
         if result != 0 {
-            return Err(format!(
-                "CVB: unable to dispatch libinput events: {result}"
-            ));
+            return Err(format!("CVB: unable to dispatch libinput events: {result}"));
         }
 
         Ok(())
@@ -175,11 +151,7 @@ impl Libinput {
     fn next_event(&mut self) -> Option<*mut LibinputEvent> {
         let event = unsafe { libinput_get_event(self.context) };
 
-        if event.is_null() {
-            None
-        } else {
-            Some(event)
-        }
+        if event.is_null() { None } else { Some(event) }
     }
 }
 
@@ -218,55 +190,44 @@ impl HotkeyMonitor {
         let mut detected = false;
 
         while let Some(event) = self.libinput.next_event() {
-            let event_type =
-                unsafe { libinput_event_get_type(event).0 };
+            let event_type = unsafe { libinput_event_get_type(event).0 };
 
             if event_type == LIBINPUT_EVENT_KEYBOARD_KEY {
-                let keyboard_event = unsafe {
-                    libinput_event_get_keyboard_event(event)
-                };
+                let keyboard_event = unsafe { libinput_event_get_keyboard_event(event) };
 
                 if !keyboard_event.is_null() {
-                    let key = unsafe {
-                        libinput_event_keyboard_get_key(keyboard_event)
-                    };
+                    let key = unsafe { libinput_event_keyboard_get_key(keyboard_event) };
 
-                    let state = unsafe {
-                        libinput_event_keyboard_get_key_state(keyboard_event).0
-                    };
+                    let state = unsafe { libinput_event_keyboard_get_key_state(keyboard_event).0 };
 
                     match state {
-                        LIBINPUT_KEY_STATE_PRESSED => {
-                            match key {
-                                KEY_LEFTCTRL | KEY_RIGHTCTRL => {
-                                    self.ctrl = true;
-                                }
-
-                                KEY_LEFTSHIFT | KEY_RIGHTSHIFT => {
-                                    self.shift = true;
-                                }
-
-                                KEY_A if self.ctrl && self.shift => {
-                                    detected = true;
-                                }
-
-                                _ => {}
+                        LIBINPUT_KEY_STATE_PRESSED => match key {
+                            KEY_LEFTCTRL | KEY_RIGHTCTRL => {
+                                self.ctrl = true;
                             }
-                        }
 
-                        LIBINPUT_KEY_STATE_RELEASED => {
-                            match key {
-                                KEY_LEFTCTRL | KEY_RIGHTCTRL => {
-                                    self.ctrl = false;
-                                }
-
-                                KEY_LEFTSHIFT | KEY_RIGHTSHIFT => {
-                                    self.shift = false;
-                                }
-
-                                _ => {}
+                            KEY_LEFTSHIFT | KEY_RIGHTSHIFT => {
+                                self.shift = true;
                             }
-                        }
+
+                            KEY_A if self.ctrl && self.shift => {
+                                detected = true;
+                            }
+
+                            _ => {}
+                        },
+
+                        LIBINPUT_KEY_STATE_RELEASED => match key {
+                            KEY_LEFTCTRL | KEY_RIGHTCTRL => {
+                                self.ctrl = false;
+                            }
+
+                            KEY_LEFTSHIFT | KEY_RIGHTSHIFT => {
+                                self.shift = false;
+                            }
+
+                            _ => {}
+                        },
 
                         LIBINPUT_KEY_STATE_KEY_REPEAT => {}
 
