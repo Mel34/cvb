@@ -1,11 +1,26 @@
 use std::fmt::Write as FmtWrite;
 use std::io::Write as IoWrite;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 mod cli;
 mod control;
 mod keyboard;
 mod pty;
 mod shell;
+
+const DEFAULT_IGNORE_LIST: &str = "\
+# This file contains directory names that CVB excludes from directory inventories.
+# One directory name per line. Blank lines and lines starting with # are ignored.
+
+.git
+.hg
+.svn
+.bzr
+.jj
+";
+
+const INVENTORY_HEADER: &str =
+    "path\tname\ttype\tsize\tmodified\tcreated\tsymlink\ttarget\tpermissions\towner\tgroup\n";
 
 fn main() {
     match cli::parse() {
@@ -103,6 +118,8 @@ fn build_paths_output(paths: &[std::path::PathBuf]) -> Result<String, String> {
             writeln!(output, "--- {} ---", path.display())
                 .map_err(|error| format!("CVB: unable to build directory output: {error}"))?;
 
+            output.push_str(INVENTORY_HEADER);
+
             let ignore = load_ignore_list()?;
             append_directory_entries(path, path, &mut output, &ignore)?;
         } else {
@@ -173,18 +190,7 @@ fn load_ignore_list() -> Result<Vec<String>, String> {
             )
         })?;
 
-        let default_contents = "\
-# This file contains directory names that CVB excludes from directory inventories.
-# One directory name per line. Blank lines and lines starting with # are ignored.
-
-.git
-.hg
-.svn
-.bzr
-.jj
-";
-
-        std::fs::write(&ignore_file, default_contents).map_err(|error| {
+        std::fs::write(&ignore_file, DEFAULT_IGNORE_LIST).map_err(|error| {
             format!(
                 "CVB: unable to create ignore file {}: {error}",
                 ignore_file.display()
@@ -204,7 +210,7 @@ fn load_ignore_list() -> Result<Vec<String>, String> {
 
 fn bridge_directory(path: &Path) -> Result<(), String> {
     let ignore = load_ignore_list()?;
-    let mut output = String::from("path\ttype\tsize\n");
+    let mut output = String::from(INVENTORY_HEADER);
 
     append_directory_entries(path, path, &mut output, &ignore)?;
 
@@ -231,40 +237,199 @@ fn append_directory_entries(
 
     for entry in entries {
         let entry_path = entry.path();
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy().into_owned();
+
         let relative_path = entry_path
             .strip_prefix(root)
             .map_err(|error| format!("CVB: unable to determine relative path: {error}"))?;
 
         let relative_path = relative_path.to_string_lossy();
 
-        if entry_path.is_dir() {
-            let name = entry.file_name().to_string_lossy().into_owned();
+        let metadata = std::fs::symlink_metadata(&entry_path).map_err(|error| {
+            format!(
+                "CVB: unable to read metadata for {}: {error}",
+                entry_path.display()
+            )
+        })?;
 
+        let is_symlink = metadata.file_type().is_symlink();
+
+        if is_symlink {
+            let target = std::fs::read_link(&entry_path)
+                .map_err(|error| {
+                    format!(
+                        "CVB: unable to read symlink target for {}: {error}",
+                        entry_path.display()
+                    )
+                })?
+                .to_string_lossy()
+                .into_owned();
+
+            append_inventory_entry(
+                output,
+                &relative_path,
+                &name,
+                "symlink",
+                "-",
+                &metadata,
+                true,
+                &target,
+            )?;
+
+            continue;
+        }
+
+        if metadata.is_dir() {
             if ignore.iter().any(|ignored| ignored == &name) {
                 continue;
             }
 
-            writeln!(output, "{relative_path}\tdir\t-")
-                .map_err(|error| format!("CVB: unable to build directory inventory: {error}"))?;
+            append_inventory_entry(
+                output,
+                &relative_path,
+                &name,
+                "dir",
+                "-",
+                &metadata,
+                false,
+                "-",
+            )?;
 
             append_directory_entries(root, &entry_path, output, ignore)?;
-        } else if entry_path.is_file() {
-            let size = entry
-                .metadata()
-                .map_err(|error| {
-                    format!(
-                        "CVB: unable to read metadata for {}: {error}",
-                        entry_path.display()
-                    )
-                })?
-                .len();
-
-            writeln!(output, "{relative_path}\tfile\t{size}")
-                .map_err(|error| format!("CVB: unable to build directory inventory: {error}"))?;
+        } else if metadata.is_file() {
+            append_inventory_entry(
+                output,
+                &relative_path,
+                &name,
+                "file",
+                &metadata.len().to_string(),
+                &metadata,
+                false,
+                "-",
+            )?;
+        } else {
+            append_inventory_entry(
+                output,
+                &relative_path,
+                &name,
+                "other",
+                "-",
+                &metadata,
+                false,
+                "-",
+            )?;
         }
     }
 
     Ok(())
+}
+
+fn append_inventory_entry(
+    output: &mut String,
+    path: &str,
+    name: &str,
+    entry_type: &str,
+    size: &str,
+    metadata: &std::fs::Metadata,
+    symlink: bool,
+    target: &str,
+) -> Result<(), String> {
+    let modified = format_system_time(
+        metadata
+            .modified()
+            .map_err(|error| format!("CVB: unable to read modification time: {error}"))?,
+    )?;
+
+    let created = match metadata.created() {
+        Ok(time) => format_system_time(time)?,
+        Err(_) => "-".to_string(),
+    };
+
+    let permissions = format!("{:04o}", metadata.permissions().mode() & 0o7777);
+    let owner = user_name(metadata.uid());
+    let group = group_name(metadata.gid());
+
+    writeln!(
+        output,
+        "{path}\t{name}\t{entry_type}\t{size}\t{modified}\t{created}\t{}\t{target}\t{permissions}\t{owner}\t{group}",
+        if symlink { "yes" } else { "no" }
+    )
+    .map_err(|error| format!("CVB: unable to build directory inventory: {error}"))
+}
+
+fn format_system_time(time: std::time::SystemTime) -> Result<String, String> {
+    let duration = time
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| format!("CVB: unable to format timestamp: {error}"))?;
+
+    format_unix_timestamp(duration.as_secs() as i64)
+}
+
+fn format_unix_timestamp(timestamp: i64) -> Result<String, String> {
+    let days = timestamp.div_euclid(86_400);
+    let seconds = timestamp.rem_euclid(86_400);
+
+    let (year, month, day) = civil_from_days(days)?;
+
+    let hour = seconds / 3_600;
+    let minute = (seconds % 3_600) / 60;
+    let second = seconds % 60;
+
+    Ok(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z"
+    ))
+}
+
+fn civil_from_days(days: i64) -> Result<(i64, i64, i64), String> {
+    let z = days + 719_468;
+    let era = if z >= 0 {
+        z / 146_097
+    } else {
+        (z - 146_096) / 146_097
+    };
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    let year = year + if month <= 2 { 1 } else { 0 };
+
+    if !(1..=9999).contains(&year) {
+        return Err(format!("CVB: timestamp year is out of range: {year}"));
+    }
+
+    Ok((year, month, day))
+}
+
+fn user_name(uid: u32) -> String {
+    unsafe {
+        let passwd = libc::getpwuid(uid);
+
+        if passwd.is_null() || (*passwd).pw_name.is_null() {
+            return uid.to_string();
+        }
+
+        std::ffi::CStr::from_ptr((*passwd).pw_name)
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+fn group_name(gid: u32) -> String {
+    unsafe {
+        let group = libc::getgrgid(gid);
+
+        if group.is_null() || (*group).gr_name.is_null() {
+            return gid.to_string();
+        }
+
+        std::ffi::CStr::from_ptr((*group).gr_name)
+            .to_string_lossy()
+            .into_owned()
+    }
 }
 
 #[cfg(test)]
@@ -307,6 +472,7 @@ mod tests {
             vec![".git", "node_modules", "__pycache__"]
         );
     }
+
     #[test]
     fn directory_inventory_excludes_ignored_directories_at_any_depth() {
         let directory = test_directory("ignore-nested");
@@ -317,7 +483,8 @@ mod tests {
         fs::write(nested.join("package.json"), "ignored").unwrap();
         fs::write(&included, "included").unwrap();
 
-        let mut output = String::new();
+        let mut output = String::from(INVENTORY_HEADER);
+
         append_directory_entries(
             &directory,
             &directory,
@@ -327,11 +494,12 @@ mod tests {
         .unwrap();
 
         assert!(!output.contains("node_modules"));
-        assert!(output.contains("src\tdir\t-"));
-        assert!(output.contains("src/main.rs\tfile\t8"));
+        assert!(output.contains("src\tsrc\tdir\t-"));
+        assert!(output.contains("src/main.rs\tmain.rs\tfile\t8"));
 
         fs::remove_dir_all(directory).unwrap();
     }
+
     #[test]
     fn directory_inventory_excludes_ignored_directories() {
         let directory = test_directory("ignore");
@@ -344,16 +512,88 @@ mod tests {
         fs::create_dir_all(&included).unwrap();
         fs::write(included.join("main.rs"), "included").unwrap();
 
-        let mut output = String::new();
-        append_directory_entries(&directory, &directory, &mut output, &[".git".to_string()])
-            .unwrap();
+        let mut output = String::from(INVENTORY_HEADER);
+
+        append_directory_entries(
+            &directory,
+            &directory,
+            &mut output,
+            &[".git".to_string()],
+        )
+        .unwrap();
 
         assert!(!output.contains(".git"));
-        assert!(output.contains("src\tdir\t-"));
-        assert!(output.contains("src/main.rs\tfile\t8"));
+        assert!(output.contains("src\tsrc\tdir\t-"));
+        assert!(output.contains("src/main.rs\tmain.rs\tfile\t8"));
 
         fs::remove_dir_all(directory).unwrap();
     }
+
+    #[test]
+    fn directory_inventory_contains_metadata() {
+        let directory = test_directory("metadata");
+        let file = directory.join("test.txt");
+
+        fs::write(&file, "contents").unwrap();
+
+        let mut output = String::from(INVENTORY_HEADER);
+
+        append_directory_entries(&directory, &directory, &mut output, &[]).unwrap();
+
+        let line = output
+            .lines()
+            .find(|line| line.starts_with("test.txt\t"))
+            .unwrap();
+
+        let fields = line.split('\t').collect::<Vec<_>>();
+
+        assert_eq!(fields.len(), 11);
+        assert_eq!(fields[0], "test.txt");
+        assert_eq!(fields[1], "test.txt");
+        assert_eq!(fields[2], "file");
+        assert_eq!(fields[3], "8");
+        assert!(fields[4] != "-");
+        assert!(fields[5] != "-");
+        assert_eq!(fields[6], "no");
+        assert_eq!(fields[7], "-");
+        assert!(fields[8].starts_with("0"));
+        assert!(!fields[9].is_empty());
+        assert!(!fields[10].is_empty());
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_inventory_reports_symlinks() {
+        let directory = test_directory("symlink");
+        let target = directory.join("target.txt");
+        let link = directory.join("link.txt");
+
+        fs::write(&target, "target").unwrap();
+        std::os::unix::fs::symlink("target.txt", &link).unwrap();
+
+        let mut output = String::from(INVENTORY_HEADER);
+
+        append_directory_entries(&directory, &directory, &mut output, &[]).unwrap();
+
+        let line = output
+            .lines()
+            .find(|line| line.starts_with("link.txt\t"))
+            .unwrap();
+
+        let fields = line.split('\t').collect::<Vec<_>>();
+
+        assert_eq!(fields[0], "link.txt");
+        assert_eq!(fields[1], "link.txt");
+        assert_eq!(fields[2], "symlink");
+        assert_eq!(fields[3], "-");
+        assert_eq!(fields[6], "yes");
+        assert_eq!(fields[7], "target.txt");
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn multiple_files_are_combined_with_headers() {
         let directory = test_directory("multiple-files");
@@ -407,14 +647,34 @@ mod tests {
 
         let output = build_paths_output(&[file.clone(), subdirectory.clone()]).unwrap();
 
-        assert_eq!(
-            output,
-            format!(
-                "--- {} ---\nfile contents\n\n--- {} ---\nnested.txt\tfile\t16\n",
-                file.display(),
-                subdirectory.display()
-            )
+        let expected_prefix = format!(
+            "--- {} ---\nfile contents\n\n--- {} ---\n{}",
+            file.display(),
+            subdirectory.display(),
+            INVENTORY_HEADER
         );
+
+        assert!(output.starts_with(&expected_prefix));
+
+        let line = output
+            .lines()
+            .find(|line| line.starts_with("nested.txt\t"))
+            .unwrap();
+
+        let fields = line.split('\t').collect::<Vec<_>>();
+
+        assert_eq!(fields.len(), 11);
+        assert_eq!(fields[0], "nested.txt");
+        assert_eq!(fields[1], "nested.txt");
+        assert_eq!(fields[2], "file");
+        assert_eq!(fields[3], "16");
+        assert!(fields[4] != "-");
+        assert!(fields[5] != "-");
+        assert_eq!(fields[6], "no");
+        assert_eq!(fields[7], "-");
+        assert!(fields[8].starts_with("0"));
+        assert!(!fields[9].is_empty());
+        assert!(!fields[10].is_empty());
 
         fs::remove_dir_all(directory).unwrap();
     }
