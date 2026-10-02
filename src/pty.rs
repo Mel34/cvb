@@ -244,6 +244,7 @@ struct CaptureState {
     cursor_col: u16,
     prompt: String,
     command: String,
+    copy: bool,
 }
 
 fn proxy(
@@ -400,7 +401,11 @@ fn handle_control_message(
     pending_end: &mut bool,
 ) -> Result<(), String> {
     match message {
-        ControlMessage::Start { command, .. } => {
+        ControlMessage::Start {
+            command,
+            copy,
+            ..
+        } => {
             let screen = terminal.screen();
             let (cursor_row, cursor_col) = screen.cursor_position();
 
@@ -416,6 +421,7 @@ fn handle_control_message(
                 cursor_col,
                 prompt,
                 command,
+                copy,
             });
 
             *pending_end = false;
@@ -459,7 +465,9 @@ fn capture_command_output(
         output.to_string()
     };
 
-    copy_to_clipboard(&processed)?;
+    if state.copy {
+        copy_to_clipboard(&processed)?;
+    }
 
     *terminal = vt100::Parser::new(rows, cols, 0);
 
