@@ -353,11 +353,9 @@ fn handle_control_message(
         }
 
         ControlMessage::End { id: _, status: _ } => {
-            let _screen = terminal.screen();
+            let processed = screen_to_text(terminal);
 
             *capturing_output = false;
-
-            let processed = postprocess_output(command_output);
 
             let mut child = std::process::Command::new("wl-copy")
                 .stdin(std::process::Stdio::piped())
@@ -366,7 +364,7 @@ fn handle_control_message(
 
             if let Some(mut stdin) = child.stdin.take() {
                 stdin
-                    .write_all(&processed)
+                    .write_all(processed.as_bytes())
                     .map_err(|error| format!("CVB: unable to write to wl-copy: {error}"))?;
             }
 
