@@ -341,7 +341,12 @@ fn proxy(
         if signal_events.contains(nix::poll::PollFlags::POLLIN) {
             let _ = read(signal_read.as_fd(), &mut signal_buffer);
 
-            resize_pty(master, child)?;
+            let winsize = resize_pty(master, child)?;
+            let rows = winsize.ws_row;
+            let cols = winsize.ws_col;
+
+            terminal.screen_mut().set_size(rows, cols);
+            screen_terminal.screen_mut().set_size(rows, cols);
         }
 
         if control_events.intersects(
@@ -577,7 +582,7 @@ fn terminal_size() -> Result<Winsize, String> {
     Ok(winsize)
 }
 
-fn resize_pty(master: &OwnedFd, child: Pid) -> Result<(), String> {
+fn resize_pty(master: &OwnedFd, child: Pid) -> Result<Winsize, String> {
     let winsize = terminal_size()?;
 
     unsafe {
@@ -588,7 +593,7 @@ fn resize_pty(master: &OwnedFd, child: Pid) -> Result<(), String> {
     signal::kill(child, Signal::SIGWINCH)
         .map_err(|error| format!("CVB: unable to forward SIGWINCH: {error}"))?;
 
-    Ok(())
+    Ok(winsize)
 }
 
 fn status_to_code(status: WaitStatus) -> i32 {
