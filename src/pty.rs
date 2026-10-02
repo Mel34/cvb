@@ -167,8 +167,7 @@ fn run_pty(rcfile: &Path) -> Result<i32, String> {
 fn control_socketpair() -> Result<(OwnedFd, OwnedFd), String> {
     let mut fds = [0; 2];
 
-    let result =
-        unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+    let result = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
 
     if result == -1 {
         return Err(format!(
@@ -193,8 +192,7 @@ fn set_nonblocking(fd: &OwnedFd) -> Result<(), String> {
         ));
     }
 
-    let result =
-        unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    let result = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) };
 
     if result == -1 {
         return Err(format!(
@@ -553,10 +551,7 @@ mod tests {
 
     #[test]
     fn preserves_plain_output() {
-        assert_eq!(
-            postprocess_output(b"hello\r\n"),
-            b"hello\r\n"
-        );
+        assert_eq!(postprocess_output(b"hello\r\n"), b"hello\r\n");
     }
 
     #[test]
@@ -569,43 +564,64 @@ mod tests {
 
     #[test]
     fn strips_csi_sequences() {
-        assert_eq!(
-            postprocess_output(b"\x1b[31mred\x1b[0m\r\n"),
-            b"red\r\n"
-        );
+        assert_eq!(postprocess_output(b"\x1b[31mred\x1b[0m\r\n"), b"red\r\n");
     }
 
     #[test]
     fn preserves_carriage_returns() {
-        assert_eq!(
-            postprocess_output(b"hello\rworld\r\n"),
-            b"hello\rworld\r\n"
-        );
+        assert_eq!(postprocess_output(b"hello\rworld\r\n"), b"hello\rworld\r\n");
     }
 
     #[test]
     fn preserves_backspaces() {
-        assert_eq!(
-            postprocess_output(b"hellp\x08\r\n"),
-            b"hellp\x08\r\n"
-        );
+        assert_eq!(postprocess_output(b"hellp\x08\r\n"), b"hellp\x08\r\n");
     }
 
     #[test]
     fn returns_marker_for_empty_output() {
-        assert_eq!(
-            postprocess_output(b""),
-            b"[CVB: no output]\n"
-        );
+        assert_eq!(postprocess_output(b""), b"[CVB: no output]\n");
     }
 
     #[test]
     fn processes_mixed_output() {
         assert_eq!(
-            postprocess_output(
-                b"\x1b]0;title\x07\x1b[32mhello\x1b[0m\r\n"
-            ),
+            postprocess_output(b"\x1b]0;title\x07\x1b[32mhello\x1b[0m\r\n"),
             b"hello\r\n"
         );
+    }
+    #[test]
+    fn screen_to_text_ignores_ansi_color_sequences() {
+        let mut terminal = vt100::Parser::new(4, 20, 0);
+
+        terminal.process(b"\x1b[31mred\x1b[0m");
+
+        assert_eq!(screen_to_text(&terminal), "red");
+    }
+
+    #[test]
+    fn screen_to_text_handles_cursor_movement() {
+        let mut terminal = vt100::Parser::new(4, 20, 0);
+
+        terminal.process(b"hello\x1b[2DXX");
+
+        assert_eq!(screen_to_text(&terminal), "helXX");
+    }
+
+    #[test]
+    fn screen_to_text_handles_screen_clearing() {
+        let mut terminal = vt100::Parser::new(4, 20, 0);
+
+        terminal.process(b"hello\x1b[2K");
+
+        assert_eq!(screen_to_text(&terminal), "");
+    }
+
+    #[test]
+    fn screen_to_text_preserves_multiple_lines() {
+        let mut terminal = vt100::Parser::new(4, 20, 0);
+
+        terminal.process(b"one\r\ntwo\r\nthree");
+
+        assert_eq!(screen_to_text(&terminal), "one\ntwo\nthree");
     }
 }
