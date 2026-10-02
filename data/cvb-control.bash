@@ -14,11 +14,7 @@ HISTFILESIZE=1000
 HISTCONTROL=
 HISTIGNORE=
 HISTTIMEFORMAT=
-
-if [[ -n ${CVB_HISTORY_FILE:-} ]]; then
-    HISTFILE=$CVB_HISTORY_FILE
-    : >"$HISTFILE"
-fi
+HISTFILE=/dev/null
 
 set -o history
 shopt -s cmdhist
@@ -85,7 +81,8 @@ cvb_control_end() {
 
 cvb_control_exit() {
     CVB_EXITING=1
-    history -a
+    set +o history
+
     cvb_control_write_u32 00000001
     cvb_control_write_byte 03
 }
@@ -118,6 +115,9 @@ cvb_control_debug() {
     [[ $command == cvb || $command == cvb[[:space:]]* ]] && return
 
     CVB_LAST_HISTCMD=$HISTCMD
+
+    printf '%s\n' "$command" >>"$CVB_HISTORY_FILE"
+
     cvb_control_start "$command"
 }
 
