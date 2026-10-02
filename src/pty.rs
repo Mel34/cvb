@@ -510,6 +510,48 @@ mod tests {
     }
 
     #[test]
+    fn reset_starts_next_capture_with_empty_screen() {
+        let mut terminal = vt100::Parser::new(4, 20, 0);
+
+        terminal.process(b"echo one\r\none\r\n");
+        assert_eq!(screen_to_text(&terminal), "echo one\none");
+
+        terminal = vt100::Parser::new(4, 20, 0);
+
+        terminal.process(b"echo two\r\ntwo\r\n");
+        assert_eq!(screen_to_text(&terminal), "echo two\ntwo");
+    }
+
+    #[test]
+    fn reset_removes_previous_capture_content() {
+        let mut terminal = vt100::Parser::new(4, 20, 0);
+
+        terminal.process(b"first command\r\nfirst output\r\n");
+        assert!(screen_to_text(&terminal).contains("first command"));
+        assert!(screen_to_text(&terminal).contains("first output"));
+
+        terminal = vt100::Parser::new(4, 20, 0);
+
+        terminal.process(b"second command\r\nsecond output\r\n");
+
+        let captured = screen_to_text(&terminal);
+
+        assert!(captured.contains("second command"));
+        assert!(captured.contains("second output"));
+        assert!(!captured.contains("first command"));
+        assert!(!captured.contains("first output"));
+    }
+
+    #[test]
+    fn screen_to_text_handles_carriage_return_overwrite() {
+        let mut terminal = vt100::Parser::new(4, 20, 0);
+
+        terminal.process(b"hello\rworld");
+
+        assert_eq!(screen_to_text(&terminal), "world");
+    }
+
+    #[test]
     fn preserves_plain_output() {
         assert_eq!(
             postprocess_output(b"hello\r\n"),
