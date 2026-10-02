@@ -345,35 +345,46 @@ fn handle_control_message(
     cols: u16,
 ) -> Result<(), String> {
     match message {
-        ControlMessage::Start { id: _, command: _ } => {}
+        ControlMessage::Start { .. } => {}
 
-        ControlMessage::End { id: _, status: _ } => {
-            let processed = screen_to_text(terminal);
-
-            let mut child = std::process::Command::new("wl-copy")
-                .stdin(std::process::Stdio::piped())
-                .spawn()
-                .map_err(|error| format!("CVB: unable to start wl-copy: {error}"))?;
-
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin
-                    .write_all(processed.as_bytes())
-                    .map_err(|error| format!("CVB: unable to write to wl-copy: {error}"))?;
-            }
-
-            let status = child
-                .wait()
-                .map_err(|error| format!("CVB: unable to wait for wl-copy: {error}"))?;
-
-            if !status.success() {
-                return Err(format!("CVB: wl-copy exited with status {status}"));
-            }
-
-            *terminal = vt100::Parser::new(rows, cols, 0);
+        ControlMessage::End { .. } => {
+            capture_screen(terminal, rows, cols)?;
         }
 
         ControlMessage::Exit => {}
     }
+
+    Ok(())
+}
+
+fn capture_screen(
+    terminal: &mut vt100::Parser,
+    rows: u16,
+    cols: u16,
+) -> Result<(), String> {
+    let processed = screen_to_text(terminal);
+
+    let mut clipboard = std::process::Command::new("wl-copy")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("CVB: unable to start wl-copy: {error}"))?;
+
+    clipboard
+        .stdin
+        .take()
+        .ok_or_else(|| "CVB: unable to open wl-copy stdin".to_string())?
+        .write_all(processed.as_bytes())
+        .map_err(|error| format!("CVB: unable to write clipboard data: {error}"))?;
+
+    let status = clipboard
+        .wait()
+        .map_err(|error| format!("CVB: unable to wait for wl-copy: {error}"))?;
+
+    if !status.success() {
+        return Err("CVB: wl-copy failed".to_string());
+    }
+
+    *terminal = vt100::Parser::new(rows, cols, 0);
 
     Ok(())
 }
