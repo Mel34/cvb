@@ -286,7 +286,9 @@ fn proxy(
                     message,
                     &mut command_output,
                     &mut capturing_output,
-                    &terminal,
+                    &mut terminal,
+                    rows,
+                    cols,
                 )?;
             }
         }
@@ -344,7 +346,9 @@ fn handle_control_message(
     message: ControlMessage,
     command_output: &mut Vec<u8>,
     capturing_output: &mut bool,
-    terminal: &vt100::Parser,
+    terminal: &mut vt100::Parser,
+    rows: u16,
+    cols: u16,
 ) -> Result<(), String> {
     match message {
         ControlMessage::Start { id: _, command: _ } => {
@@ -375,6 +379,8 @@ fn handle_control_message(
             if !status.success() {
                 return Err(format!("CVB: wl-copy exited with status {status}"));
             }
+
+            *terminal = vt100::Parser::new(rows, cols, 0);
         }
 
         ControlMessage::Exit => {}
