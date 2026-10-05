@@ -418,7 +418,7 @@ fn proxy(
 
         if pending_end {
             if let Some(state) = capture_state.take() {
-                capture_command_output(&mut terminal, rows, cols, &state)?;
+                capture_command_output(&mut terminal, &mut screen_terminal, rows, cols, &state)?;
             }
 
             pending_end = false;
@@ -473,10 +473,26 @@ fn handle_control_message(
 
 fn capture_command_output(
     terminal: &mut vt100::Parser,
+    screen_terminal: &mut vt100::Parser,
     rows: u16,
     cols: u16,
     state: &CaptureState,
 ) -> Result<(), String> {
+    let alternate_screen = screen_terminal.screen().alternate_screen();
+
+    if alternate_screen {
+        let text = screen_terminal.screen().contents();
+        let processed = if text.is_empty() {
+            NO_OUTPUT.to_string()
+        } else {
+            text
+        };
+
+        copy_to_clipboard(&processed)?;
+
+        return Ok(());
+    }
+
     let end_cursor = terminal.screen().cursor_position();
 
     let region = terminal.screen().contents_between(
