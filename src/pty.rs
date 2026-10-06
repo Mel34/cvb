@@ -5,11 +5,11 @@ use std::path::Path;
 
 use nix::ioctl_read_bad;
 use nix::ioctl_write_ptr_bad;
-use nix::pty::{ForkptyResult, Winsize, forkpty};
+use nix::pty::{forkpty, ForkptyResult, Winsize};
 use nix::sys::signal::{self, SigHandler, Signal};
 use nix::sys::termios::{self, SetArg, Termios};
-use nix::sys::wait::{WaitStatus, waitpid};
-use nix::unistd::{Pid, pipe, read, write};
+use nix::sys::wait::{waitpid, WaitStatus};
+use nix::unistd::{pipe, read, write, Pid};
 
 use crate::control::{ControlChannel, ControlMessage};
 use crate::keyboard::HotkeyMonitor;
@@ -21,6 +21,7 @@ ioctl_write_ptr_bad!(tiocswinsz, libc::TIOCSWINSZ, Winsize);
 
 const CONTROL_FD: i32 = 3;
 const NO_OUTPUT: &str = "[NO_VISIBLE_OUTPUT]";
+const PROMPT_MARKER: &[u8] = b"\x1b[31m\xe2\x97\x8f\x1b[0m ";
 
 static mut SIGWINCH_PIPE: Option<i32> = None;
 
@@ -246,6 +247,187 @@ struct CaptureState {
     prompt: String,
     command: String,
     copy: bool,
+    prompt_serial_at_start: u64,
+}
+
+struct InputTracker {
+    active: bool,
+    waiting_for_submit: bool,
+    command_exact: bool,
+    text: Vec<u8>,
+    escape: Vec<u8>,
+}
+
+impl InputTracker {
+    fn new() -> Self {
+        Self {
+            active: false,
+            waiting_for_submit: false,
+            command_exact: true,
+            text: Vec::new(),
+            escape: Vec::new(),
+        }
+    }
+
+    fn reset(&mut self) {
+        self.active = false;
+        self.waiting_for_submit = false;
+        self.command_exact = true;
+        self.text.clear();
+        self.escape.clear();
+    }
+
+    fn command_text(&self) -> String {
+        if !self.command_exact {
+            return String::new();
+        }
+
+        String::from_utf8_lossy(&self.text)
+            .trim_matches(|character| character == '\r' || character == '\n')
+            .to_string()
+    }
+
+    fn feed(
+        &mut self,
+        bytes: &[u8],
+        terminal: &vt100::Parser,
+    ) -> Option<(u16, u16, String)> {
+        let mut start = None;
+
+        for &byte in bytes {
+            if !self.escape.is_empty() {
+                self.escape.push(byte);
+
+                if (0x40..=0x7e).contains(&byte) {
+                    if byte == b'~' {
+                        let params = &self.escape[2..self.escape.len() - 1];
+
+                        if params == b"200" || params == b"201" {
+                            self.escape.clear();
+                            continue;
+                        }
+                    }
+
+                    if self.escape.len() >= 3
+                        && self.escape[1] == b'['
+                        && matches!(byte, b'A' | b'B')
+                        && !self.active
+                    {
+                        self.waiting_for_submit = true;
+                    }
+
+                    let bracketed_paste = byte == b'~'
+                        && self.escape.len() >= 3
+                        && (&self.escape[2..self.escape.len() - 1] == b"200"
+                            || &self.escape[2..self.escape.len() - 1] == b"201");
+
+                    if !bracketed_paste {
+                        self.command_exact = false;
+                    }
+
+                    self.escape.clear();
+                }
+
+                continue;
+            }
+
+            if byte == 0x1b {
+                self.escape.push(byte);
+                continue;
+            }
+
+            if byte == b'\r' || byte == b'\n' {
+                if !self.active && self.waiting_for_submit {
+                    let (row, col) = terminal.screen().cursor_position();
+
+                    self.active = true;
+                    self.waiting_for_submit = false;
+                    self.command_exact = false;
+                    self.text.clear();
+
+                    if start.is_none() {
+                        start = Some((row, col, String::new()));
+                    }
+                } else if self.active && self.command_exact {
+                    self.text.push(b'\n');
+                }
+
+                continue;
+            }
+
+            if !self.active {
+                if byte == 0x12 {
+                    self.waiting_for_submit = true;
+                    continue;
+                }
+
+                if !is_command_input_byte(byte) || self.waiting_for_submit {
+                    continue;
+                }
+
+                let (row, col) = terminal.screen().cursor_position();
+                let prompt = terminal.screen().contents_between(row, 0, row, col);
+
+                self.active = true;
+                self.command_exact = true;
+
+                if start.is_none() {
+                    start = Some((row, col, prompt));
+                }
+            }
+
+            if self.command_exact {
+                match byte {
+                    0x7f | 0x08 => {
+                        let mut cursor = self.text.len();
+
+                        if cursor > 0 {
+                            cursor -= 1;
+
+                            while cursor > 0 && (self.text[cursor] & 0xc0) == 0x80 {
+                                cursor -= 1;
+                            }
+
+                            self.text.truncate(cursor);
+                        }
+                    }
+                    0x17 => {
+                        while self.text.last().is_some_and(|byte| byte.is_ascii_whitespace()) {
+                            self.text.pop();
+                        }
+
+                        while self.text.last().is_some_and(|byte| !byte.is_ascii_whitespace()) {
+                            self.text.pop();
+                        }
+                    }
+                    0x15 => self.text.clear(),
+                    b'\t' | 0x20..=0x7e | 0x80..=0xff => self.text.push(byte),
+                    _ => {}
+                }
+            }
+        }
+
+        start
+    }
+}
+
+fn is_command_input_byte(byte: u8) -> bool {
+    byte == b'\t' || (byte >= 0x20 && byte != 0x7f)
+}
+
+fn update_prompt_marker(matcher: &mut usize, serial: &mut u64, bytes: &[u8]) {
+    for &byte in bytes {
+        if byte == PROMPT_MARKER[*matcher] {
+            *matcher += 1;
+
+            if *matcher == PROMPT_MARKER.len() {
+                *matcher = 0;
+                *serial += 1;
+            }
+        } else {
+            *matcher = usize::from(byte == PROMPT_MARKER[0]);
+        }
+    }
 }
 
 fn proxy(
@@ -262,22 +444,23 @@ fn proxy(
 
     let mut buffer = [0u8; 8192];
     let mut signal_buffer = [0u8; 64];
-    let mut terminal = vt100::Parser::new(rows, cols, 0);
-    let mut screen_terminal = vt100::Parser::new(rows, cols, 0);
+    let mut terminal = vt100::Parser::new(rows, cols, 1000);
+    let mut screen_terminal = vt100::Parser::new(rows, cols, 1000);
     let bindings = keybind::load()?;
     let mut keyboard = HotkeyMonitor::new(bindings)?;
     let keybind_watcher = KeybindWatcher::new()?;
+    let mut input_tracker = InputTracker::new();
     let mut capture_state: Option<CaptureState> = None;
     let mut pending_end = false;
+    let mut prompt_matcher = 0usize;
+    let mut prompt_serial = 0u64;
     let mut loop_iteration = 0u64;
 
     loop {
         loop_iteration += 1;
-        let capture_ready = pending_end;
-                let keyboard_fd =
-            unsafe { std::os::fd::BorrowedFd::borrow_raw(keyboard.fd()) };
-        let keybind_fd =
-            unsafe { std::os::fd::BorrowedFd::borrow_raw(keybind_watcher.fd()) };
+
+        let keyboard_fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(keyboard.fd()) };
+        let keybind_fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(keybind_watcher.fd()) };
 
         let mut poll_fds = [
             nix::poll::PollFd::new(stdin.as_fd(), nix::poll::PollFlags::POLLIN),
@@ -287,14 +470,8 @@ fn proxy(
                 control.fd().as_fd(),
                 nix::poll::PollFlags::POLLIN,
             ),
-            nix::poll::PollFd::new(
-                keyboard_fd,
-                nix::poll::PollFlags::POLLIN,
-            ),
-            nix::poll::PollFd::new(
-                keybind_fd,
-                nix::poll::PollFlags::POLLIN,
-            ),
+            nix::poll::PollFd::new(keyboard_fd, nix::poll::PollFlags::POLLIN),
+            nix::poll::PollFd::new(keybind_fd, nix::poll::PollFlags::POLLIN),
         ];
 
         match nix::poll::poll(&mut poll_fds, None::<u16>) {
@@ -328,16 +505,11 @@ fn proxy(
             .unwrap_or(nix::poll::PollFlags::empty());
 
         if keybind_events.contains(nix::poll::PollFlags::POLLIN) {
-            match keybind_watcher.changed()? {
-                true => match keybind::load() {
-                    Ok(bindings) => {
-                        keyboard.set_bindings(bindings);
-                    }
-                    Err(error) => {
-                        eprintln!("{error}");
-                    }
-                },
-                false => {}
+            if keybind_watcher.changed()? {
+                match keybind::load() {
+                    Ok(bindings) => keyboard.set_bindings(bindings),
+                    Err(error) => eprintln!("{error}"),
+                }
             }
         }
 
@@ -345,11 +517,10 @@ fn proxy(
             let _ = read(signal_read.as_fd(), &mut signal_buffer);
 
             let winsize = resize_pty(master, child)?;
-            let rows = winsize.ws_row;
-            let cols = winsize.ws_col;
-
-            terminal.screen_mut().set_size(rows, cols);
-            screen_terminal.screen_mut().set_size(rows, cols);
+            terminal.screen_mut().set_size(winsize.ws_row, winsize.ws_col);
+            screen_terminal
+                .screen_mut()
+                .set_size(winsize.ws_row, winsize.ws_col);
         }
 
         if keyboard_events.contains(nix::poll::PollFlags::POLLIN) {
@@ -362,20 +533,29 @@ fn proxy(
             }
         }
 
-        if master_events.intersects(
-            nix::poll::PollFlags::POLLHUP
-                | nix::poll::PollFlags::POLLERR
-                | nix::poll::PollFlags::POLLNVAL,
-        ) {
-            break;
-        }
-
         if stdin_events.contains(nix::poll::PollFlags::POLLIN) {
             let count = read(stdin.as_fd(), &mut buffer)
                 .map_err(|error| format!("CVB: stdin read failed: {error}"))?;
 
             if count == 0 {
                 break;
+            }
+
+            if capture_state.is_none() {
+                if let Some((cursor_row, cursor_col, prompt)) =
+                    input_tracker.feed(&buffer[..count], &terminal)
+                {
+                    capture_state = Some(CaptureState {
+                        cursor_row,
+                        cursor_col,
+                        prompt,
+                        command: input_tracker.command_text(),
+                        copy: true,
+                        prompt_serial_at_start: prompt_serial,
+                    });
+                }
+            } else {
+                input_tracker.feed(&buffer[..count], &terminal);
             }
 
             write(master.as_fd(), &buffer[..count])
@@ -389,6 +569,8 @@ fn proxy(
             if count == 0 {
                 break;
             }
+
+            update_prompt_marker(&mut prompt_matcher, &mut prompt_serial, &buffer[..count]);
 
             terminal.process(&buffer[..count]);
             screen_terminal.process(&buffer[..count]);
@@ -405,7 +587,6 @@ fn proxy(
 
             {
                 use std::fs::OpenOptions;
-                use std::io::Write;
 
                 let mut file = OpenOptions::new()
                     .create(true)
@@ -417,11 +598,12 @@ fn proxy(
 
                 writeln!(
                     file,
-                    "MASTER iteration={} bytes={} cursor=({}, {})",
+                    "MASTER iteration={} bytes={} cursor=({}, {}) prompt_serial={}",
                     loop_iteration,
                     count,
                     cursor.0,
                     cursor.1,
+                    prompt_serial,
                 )
                 .map_err(|error| format!("CVB: unable to write capture debug log: {error}"))?;
             }
@@ -435,19 +617,35 @@ fn proxy(
             for message in control.receive()? {
                 handle_control_message(
                     message,
-                    &terminal,
                     &mut capture_state,
                     &mut pending_end,
                 )?;
             }
         }
 
-        if capture_ready {
-            if let Some(state) = capture_state.take() {
-                capture_command_output(&mut terminal, &mut screen_terminal, rows, cols, &state)?;
-            }
+        if pending_end {
+            let ready = capture_state
+                .as_ref()
+                .is_some_and(|state| prompt_serial > state.prompt_serial_at_start);
 
-            pending_end = false;
+            if ready {
+                if let Some(mut state) = capture_state.take() {
+                    state.command = input_tracker.command_text();
+                    state.copy = !is_cvb_command(&state.command);
+
+                    capture_command_output(
+                        &mut terminal,
+                        &mut screen_terminal,
+                        rows,
+                        cols,
+                        &state,
+                    )?;
+
+                    input_tracker.reset();
+                }
+
+                pending_end = false;
+            }
         }
     }
 
@@ -456,82 +654,16 @@ fn proxy(
 
 fn handle_control_message(
     message: ControlMessage,
-    terminal: &vt100::Parser,
     capture_state: &mut Option<CaptureState>,
     pending_end: &mut bool,
 ) -> Result<(), String> {
     match message {
-        ControlMessage::Start {
-            command,
-            copy,
-            ..
-        } => {
-            let screen = terminal.screen();
-            let (cursor_row, cursor_col) = screen.cursor_position();
-
-            {
-                use std::fs::OpenOptions;
-                use std::io::Write;
-
-                let mut file = OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("/tmp/cvb-capture-debug.log")
-                    .map_err(|error| format!("CVB: unable to open capture debug log: {error}"))?;
-
-                writeln!(
-                    file,
-                    "CONTROL START command={:?} cursor=({}, {}) screen={:?}",
-                    command,
-                    cursor_row,
-                    cursor_col,
-                    screen.contents(),
-                )
-                .map_err(|error| format!("CVB: unable to write capture debug log: {error}"))?;
-            }
-
-            let prompt = screen.contents_between(
-                cursor_row,
-                0,
-                cursor_row,
-                cursor_col,
-            );
-
-            *capture_state = Some(CaptureState {
-                cursor_row,
-                cursor_col,
-                prompt,
-                command,
-                copy,
-            });
-
-            *pending_end = false;
-        }
+        ControlMessage::Start { .. } => {}
 
         ControlMessage::End { .. } => {
-            {
-                use std::fs::OpenOptions;
-                use std::io::Write;
-
-                let screen = terminal.screen();
-                let (cursor_row, cursor_col) = screen.cursor_position();
-
-                let mut file = OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("/tmp/cvb-capture-debug.log")
-                    .map_err(|error| format!("CVB: unable to open capture debug log: {error}"))?;
-
-                writeln!(
-                    file,
-                    "CONTROL END cursor=({}, {})",
-                    cursor_row,
-                    cursor_col,
-                )
-                .map_err(|error| format!("CVB: unable to write capture debug log: {error}"))?;
+            if capture_state.is_some() {
+                *pending_end = true;
             }
-
-            *pending_end = true;
         }
 
         ControlMessage::Exit => {}
@@ -540,6 +672,11 @@ fn handle_control_message(
     }
 
     Ok(())
+}
+
+fn is_cvb_command(command: &str) -> bool {
+    let command = command.trim_start();
+    command == "cvb" || command.starts_with("cvb ")
 }
 
 fn capture_command_output(
@@ -559,30 +696,36 @@ fn capture_command_output(
             text
         };
 
-        copy_to_clipboard(&processed)?;
+        if state.copy {
+            copy_to_clipboard(&processed)?;
+        }
 
         return Ok(());
     }
 
     let end_cursor = terminal.screen().cursor_position();
 
-    let region = terminal.screen().contents_between(
+    let original_region = terminal.screen().contents_between(
         state.cursor_row,
         state.cursor_col,
         end_cursor.0,
         end_cursor.1,
     );
 
-    let region = region.strip_prefix(&state.command).unwrap_or(&region);
+    let region = if !state.command.is_empty() {
+        original_region
+            .strip_prefix(&state.command)
+            .unwrap_or(&original_region)
+    } else {
+        &original_region
+    };
 
-    let output = region
-        .strip_suffix(&state.prompt)
-        .unwrap_or(region)
-        .trim_matches('\n');
+    let region = region.strip_suffix(&state.prompt).unwrap_or(region);
+
+    let output = region.trim_matches('\n');
 
     {
         use std::fs::OpenOptions;
-        use std::io::Write;
 
         let mut file = OpenOptions::new()
             .create(true)
@@ -592,16 +735,18 @@ fn capture_command_output(
 
         writeln!(
             file,
-            "start=({}, {}) end=({}, {}) command_len={} region_len={} output_len={} prefix={} prompt_len={}",
+            "START cursor=({}, {}) prompt_serial_start={} end_cursor=({}, {}) command_len={} region_len={} output_len={} prefix={} prompt_len={} prompt_serial={}",
             state.cursor_row,
             state.cursor_col,
+            state.prompt_serial_at_start,
             end_cursor.0,
             end_cursor.1,
             state.command.len(),
             region.len(),
             output.len(),
-            region.starts_with(&state.command),
+            original_region.starts_with(&state.command),
             state.prompt.len(),
+            0u64,
         )
         .map_err(|error| format!("CVB: unable to write capture debug log: {error}"))?;
     }
@@ -621,9 +766,33 @@ fn capture_command_output(
     Ok(())
 }
 
-fn capture_screen(
-    terminal: &mut vt100::Parser,
-) -> Result<(), String> {
+fn capture_screen(terminal: &mut vt100::Parser) -> Result<(), String> {
+    terminal.screen_mut().set_scrollback(usize::MAX);
+
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/cvb-capture-debug.log")
+        .ok()
+        .and_then(|mut file| {
+            writeln!(
+                file,
+                "SCREEN DEBUG: scrollback={} contents_len={}",
+                terminal.screen().scrollback(),
+                terminal.screen().contents().len()
+            )
+            .ok()
+        });
+
+    terminal.screen_mut().set_scrollback(0);
+
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/cvb-capture-debug.log")
+        .ok()
+        .and_then(|mut file| writeln!(file, "SCREEN CAPTURE ENTERED").ok());
+
     let text = screen_to_text(terminal);
 
     let processed = if text.is_empty() {
@@ -661,8 +830,29 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn screen_to_text(terminal: &vt100::Parser) -> String {
-    terminal.screen().contents()
+fn screen_to_text(terminal: &mut vt100::Parser) -> String {
+    let (_, cols) = terminal.screen().size();
+
+    terminal.screen_mut().set_scrollback(usize::MAX);
+    let max_scrollback = terminal.screen().scrollback();
+
+    let mut output = Vec::new();
+
+    for offset in (1..=max_scrollback).rev() {
+        terminal.screen_mut().set_scrollback(offset);
+
+        if let Some(row) = terminal.screen().rows(0, cols).next() {
+            output.push(row);
+        }
+    }
+
+    terminal.screen_mut().set_scrollback(0);
+
+    for row in terminal.screen().rows(0, cols) {
+        output.push(row);
+    }
+
+    output.join("\n").trim_end_matches('\n').to_string()
 }
 
 fn make_raw(original: &Termios) -> Termios {
@@ -719,119 +909,45 @@ fn status_to_code(status: WaitStatus) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::screen_to_text;
+    use super::{is_cvb_command, update_prompt_marker, InputTracker, PROMPT_MARKER};
 
     #[test]
-    fn osc_sync_marker_is_not_screen_content() {
-        let mut terminal = vt100::Parser::new(4, 20, 0);
+    fn prompt_marker_is_detected_across_reads() {
+        let mut matcher = 0usize;
+        let mut serial = 0u64;
 
-        terminal.process(b"BEFORE");
-        terminal.process(b"\x1b]1337;CVB-END\x07");
-        terminal.process(b"AFTER");
+        update_prompt_marker(&mut matcher, &mut serial, &PROMPT_MARKER[..5]);
+        update_prompt_marker(&mut matcher, &mut serial, &PROMPT_MARKER[5..]);
 
-        assert_eq!(terminal.screen().contents(), "BEFOREAFTER");
+        assert_eq!(serial, 1);
     }
 
     #[test]
-    fn screen_to_text_extracts_visible_content() {
-        let mut terminal = vt100::Parser::new(4, 20, 0);
+    fn input_tracker_starts_on_command_text() {
+        let mut tracker = InputTracker::new();
+        let terminal = vt100::Parser::new(4, 20, 0);
 
-        terminal.process(b"hello\r\nworld");
+        let start = tracker.feed(b"echo hello\r", &terminal);
 
-        assert_eq!(screen_to_text(&terminal), "hello\nworld");
+        assert_eq!(start, Some((0, 0, String::new())));
+        assert_eq!(tracker.command_text(), "echo hello");
     }
 
     #[test]
-    fn reset_starts_next_capture_with_empty_screen() {
-        let mut terminal = vt100::Parser::new(4, 20, 0);
+    fn input_tracker_waits_for_history_recall_submission() {
+        let mut tracker = InputTracker::new();
+        let terminal = vt100::Parser::new(4, 20, 0);
 
-        terminal.process(b"echo one\r\none\r\n");
-        assert_eq!(screen_to_text(&terminal), "echo one\none");
+        let start = tracker.feed(b"\x1b[A\r", &terminal);
 
-        terminal = vt100::Parser::new(4, 20, 0);
-
-        terminal.process(b"echo two\r\ntwo\r\n");
-        assert_eq!(screen_to_text(&terminal), "echo two\ntwo");
+        assert_eq!(start, Some((0, 0, String::new())));
+        assert_eq!(tracker.command_text(), "");
     }
 
     #[test]
-    fn reset_removes_previous_capture_content() {
-        let mut terminal = vt100::Parser::new(4, 20, 0);
-
-        terminal.process(b"first command\r\nfirst output\r\n");
-        assert!(screen_to_text(&terminal).contains("first command"));
-        assert!(screen_to_text(&terminal).contains("first output"));
-
-        terminal = vt100::Parser::new(4, 20, 0);
-
-        terminal.process(b"second command\r\nsecond output\r\n");
-
-        let captured = screen_to_text(&terminal);
-
-        assert!(captured.contains("second command"));
-        assert!(captured.contains("second output"));
-        assert!(!captured.contains("first command"));
-        assert!(!captured.contains("first output"));
-    }
-
-    #[test]
-    fn screen_to_text_handles_carriage_return_overwrite() {
-        let mut terminal = vt100::Parser::new(4, 20, 0);
-
-        terminal.process(b"hello\rworld");
-
-        assert_eq!(screen_to_text(&terminal), "world");
-    }
-
-    #[test]
-    fn screen_to_text_ignores_ansi_color_sequences() {
-        let mut terminal = vt100::Parser::new(4, 20, 0);
-
-        terminal.process(b"\x1b[31mred\x1b[0m");
-
-        assert_eq!(screen_to_text(&terminal), "red");
-    }
-
-    #[test]
-    fn screen_to_text_handles_cursor_movement() {
-        let mut terminal = vt100::Parser::new(4, 20, 0);
-
-        terminal.process(b"hello\x1b[2DXX");
-
-        assert_eq!(screen_to_text(&terminal), "helXX");
-    }
-
-    #[test]
-    fn screen_to_text_handles_screen_clearing() {
-        let mut terminal = vt100::Parser::new(4, 20, 0);
-
-        terminal.process(b"hello\x1b[2K");
-
-        assert_eq!(screen_to_text(&terminal), "");
-    }
-
-    #[test]
-    fn screen_to_text_preserves_multiple_lines() {
-        let mut terminal = vt100::Parser::new(4, 20, 0);
-
-        terminal.process(b"one\r\ntwo\r\nthree");
-
-        assert_eq!(screen_to_text(&terminal), "one\ntwo\nthree");
-    }
-
-    #[test]
-    fn scrollback_can_be_viewed() {
-        let mut terminal = vt100::Parser::new(4, 20, 20);
-
-        terminal.process(
-            b"line1\r\nline2\r\nline3\r\nline4\r\nline5\r\nline6\r\nline7\r\nline8",
-        );
-
-        assert_eq!(terminal.screen().contents(), "line5\nline6\nline7\nline8");
-
-        terminal.screen_mut().set_scrollback(4);
-
-        assert_eq!(terminal.screen().scrollback(), 4);
-        assert!(terminal.screen().contents().contains("line1"));
+    fn recognizes_cvb_commands() {
+        assert!(is_cvb_command("cvb"));
+        assert!(is_cvb_command("  cvb file"));
+        assert!(!is_cvb_command("cvbench"));
     }
 }
