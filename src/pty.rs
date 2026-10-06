@@ -352,21 +352,6 @@ fn proxy(
             screen_terminal.screen_mut().set_size(rows, cols);
         }
 
-        if control_events.intersects(
-            nix::poll::PollFlags::POLLIN
-                | nix::poll::PollFlags::POLLHUP
-                | nix::poll::PollFlags::POLLERR,
-        ) {
-            for message in control.receive()? {
-                handle_control_message(
-                    message,
-                    &terminal,
-                    &mut capture_state,
-                    &mut pending_end,
-                )?;
-            }
-        }
-
         if keyboard_events.contains(nix::poll::PollFlags::POLLIN) {
             if keyboard.poll()? {
                 capture_screen(&mut screen_terminal)?;
@@ -442,6 +427,21 @@ fn proxy(
             }
         }
 
+        if control_events.intersects(
+            nix::poll::PollFlags::POLLIN
+                | nix::poll::PollFlags::POLLHUP
+                | nix::poll::PollFlags::POLLERR,
+        ) {
+            for message in control.receive()? {
+                handle_control_message(
+                    message,
+                    &terminal,
+                    &mut capture_state,
+                    &mut pending_end,
+                )?;
+            }
+        }
+
         if capture_ready {
             if let Some(state) = capture_state.take() {
                 capture_command_output(&mut terminal, &mut screen_terminal, rows, cols, &state)?;
@@ -469,6 +469,27 @@ fn handle_control_message(
             let screen = terminal.screen();
             let (cursor_row, cursor_col) = screen.cursor_position();
 
+            {
+                use std::fs::OpenOptions;
+                use std::io::Write;
+
+                let mut file = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("/tmp/cvb-capture-debug.log")
+                    .map_err(|error| format!("CVB: unable to open capture debug log: {error}"))?;
+
+                writeln!(
+                    file,
+                    "CONTROL START command={:?} cursor=({}, {}) screen={:?}",
+                    command,
+                    cursor_row,
+                    cursor_col,
+                    screen.contents(),
+                )
+                .map_err(|error| format!("CVB: unable to write capture debug log: {error}"))?;
+            }
+
             let prompt = screen.contents_between(
                 cursor_row,
                 0,
@@ -488,6 +509,28 @@ fn handle_control_message(
         }
 
         ControlMessage::End { .. } => {
+            {
+                use std::fs::OpenOptions;
+                use std::io::Write;
+
+                let screen = terminal.screen();
+                let (cursor_row, cursor_col) = screen.cursor_position();
+
+                let mut file = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("/tmp/cvb-capture-debug.log")
+                    .map_err(|error| format!("CVB: unable to open capture debug log: {error}"))?;
+
+                writeln!(
+                    file,
+                    "CONTROL END cursor=({}, {})",
+                    cursor_row,
+                    cursor_col,
+                )
+                .map_err(|error| format!("CVB: unable to write capture debug log: {error}"))?;
+            }
+
             *pending_end = true;
         }
 
@@ -497,20 +540,6 @@ fn handle_control_message(
     }
 
     Ok(())
-}
-
-const CVB_SYNC_MARKER: &[u8] = b"\x1b]777;CVB;END\x07";
-
-fn consume_sync_marker(buffer: &mut Vec<u8>) -> bool {
-    if let Some(position) = buffer
-        .windows(CVB_SYNC_MARKER.len())
-        .position(|window| window == CVB_SYNC_MARKER)
-    {
-        buffer.drain(..position + CVB_SYNC_MARKER.len());
-        return true;
-    }
-
-    false
 }
 
 fn capture_command_output(
@@ -587,7 +616,7 @@ fn capture_command_output(
         copy_to_clipboard(&processed)?;
     }
 
-    *terminal = vt100::Parser::new(rows, cols, 0);
+    *terminal = vt100::Parser::new(rows, cols, 1000);
 
     Ok(())
 }
@@ -693,26 +722,6 @@ mod tests {
     use super::screen_to_text;
 
     #[test]
-    fn sync_marker_is_detected_in_complete_buffer() {
-        let mut buffer = b"BEFORE\x1b]777;CVB;END\x07AFTER".to_vec();
-
-        assert!(super::consume_sync_marker(&mut buffer));
-        assert_eq!(buffer, b"AFTER");
-    }
-
-    #[test]
-    fn sync_marker_is_detected_when_split_across_reads() {
-        let marker = super::CVB_SYNC_MARKER;
-        let split = marker.len() / 2;
-
-        let mut buffer = marker[..split].to_vec();
-        buffer.extend_from_slice(&marker[split..]);
-
-        assert!(super::consume_sync_marker(&mut buffer));
-        assert!(buffer.is_empty());
-    }
-
-    #[test]
     fn osc_sync_marker_is_not_screen_content() {
         let mut terminal = vt100::Parser::new(4, 20, 0);
 
@@ -808,5 +817,21 @@ mod tests {
         terminal.process(b"one\r\ntwo\r\nthree");
 
         assert_eq!(screen_to_text(&terminal), "one\ntwo\nthree");
+    }
+
+    #[test]
+    fn scrollback_can_be_viewed() {
+        let mut terminal = vt100::Parser::new(4, 20, 20);
+
+        terminal.process(
+            b"line1\r\nline2\r\nline3\r\nline4\r\nline5\r\nline6\r\nline7\r\nline8",
+        );
+
+        assert_eq!(terminal.screen().contents(), "line5\nline6\nline7\nline8");
+
+        terminal.screen_mut().set_scrollback(4);
+
+        assert_eq!(terminal.screen().scrollback(), 4);
+        assert!(terminal.screen().contents().contains("line1"));
     }
 }
