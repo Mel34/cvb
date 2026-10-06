@@ -35,6 +35,7 @@ pub fn create_rcfile() -> Result<PathBuf, String> {
     let bashrc = home.join(".bashrc");
 
     let control_script = control_script()?;
+    let patch_function = patch_function();
 
     let content = format!(
         "set +o history\n\
@@ -45,6 +46,7 @@ pub fn create_rcfile() -> Result<PathBuf, String> {
          \n\
          source {parent_init}\n\
          {control_script}\n\
+         {patch_function}\n\
          \n\
          history -c\n\
          history -r {parent_history}\n\
@@ -68,6 +70,27 @@ pub fn create_rcfile() -> Result<PathBuf, String> {
 
 fn control_script() -> Result<String, String> {
     Ok(include_str!("../data/cvb-control.bash").to_string())
+}
+
+fn patch_function() -> String {
+    r#"
+patch() {
+    local arg
+    local dry_run=0
+    local verbose=0
+
+    for arg in "$@"; do
+        [[ "$arg" == "--dry-run" ]] && dry_run=1
+        [[ "$arg" == "--verbose" ]] && verbose=1
+    done
+
+    if (( dry_run && verbose == 0 )); then
+        command patch --verbose "$@"
+    else
+        command patch "$@"
+    fi
+}
+"#.to_string()
 }
 
 fn bash_quote(path: &Path) -> String {
