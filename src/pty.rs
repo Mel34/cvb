@@ -466,6 +466,8 @@ fn handle_control_message(
         }
 
         ControlMessage::Exit => {}
+
+        ControlMessage::TargetRequest { .. } | ControlMessage::TargetResponse { .. } => {}
     }
 
     Ok(())
