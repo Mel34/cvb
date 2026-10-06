@@ -2,13 +2,10 @@
 
 CVB_CONTROL_FD=3
 CVB_COMMAND_ID=0
-CVB_COMMAND_ACTIVE=0
-CVB_LAST_HISTCMD=
 CVB_EXITING=0
 CVB_SAVED_PROMPT_COMMAND=()
 CVB_SAVED_PROMPT_IS_ARRAY=0
 
-# CVB owns command history inside the child shell.
 HISTSIZE=1000
 HISTFILESIZE=1000
 HISTCONTROL=
@@ -46,39 +43,15 @@ cvb_control_write_u64() {
     printf '%b' "\\x${value:14:2}" >&"$CVB_CONTROL_FD"
 }
 
-cvb_control_start() {
-    local command=$1
-    local copy=$2
-    local command_length
-    local payload_length
-
-    ((CVB_COMMAND_ID++))
-    CVB_COMMAND_ACTIVE=1
-
-    command_length=$(printf '%s' "$command" | wc -c)
-    payload_length=$(printf '%08x' $((10 + command_length)))
-
-    cvb_control_write_u32 "$payload_length"
-    cvb_control_write_byte 01
-    cvb_control_write_byte "$copy"
-    cvb_control_write_u64 "$(printf '%016x' "$CVB_COMMAND_ID")"
-    printf '%s' "$command" >&"$CVB_CONTROL_FD"
-}
-
 cvb_control_end() {
     local status=$1
-    local status_hex
 
-    ((CVB_COMMAND_ACTIVE)) || return
-
-    status_hex=$(printf '%08x' "$status")
+    ((CVB_COMMAND_ID++))
 
     cvb_control_write_u32 0000000d
     cvb_control_write_byte 02
     cvb_control_write_u64 "$(printf '%016x' "$CVB_COMMAND_ID")"
-    cvb_control_write_u32 "$status_hex"
-
-    CVB_COMMAND_ACTIVE=0
+    cvb_control_write_u32 "$(printf '%08x' "$status")"
 }
 
 cvb_control_exit() {
@@ -87,44 +60,6 @@ cvb_control_exit() {
 
     cvb_control_write_u32 00000001
     cvb_control_write_byte 03
-}
-
-cvb_control_debug() {
-    ((CVB_EXITING)) && return
-    ((CVB_COMMAND_ACTIVE)) && return
-
-    local history_line
-    local history_number
-    local command
-    local normalized_command
-    local copy=1
-
-    [[ ${BASH_COMMAND} == cvb_control_* ]] && return
-    [[ -n ${BASH_COMMAND} ]] || return
-
-    history_line=$(history 1)
-
-    history_line="${history_line#"${history_line%%[![:space:]]*}"}"
-    history_number="${history_line%%[[:space:]]*}"
-
-    [[ $history_number == "$HISTCMD" ]] || return
-    [[ $history_number != "$CVB_LAST_HISTCMD" ]] || return
-
-    command="${history_line#*[[:space:]]}"
-    normalized_command="${command#"${command%%[![:space:]]*}"}"
-
-    [[ -n $normalized_command ]] || return
-
-    [[ ${history_line} =~ ^[0-9]+[[:space:]]{3} ]] && copy=0
-
-    [[ $normalized_command == exit || $normalized_command == exit[[:space:]]* ]] && return
-    [[ $normalized_command == cvb || $normalized_command == cvb[[:space:]]* ]] && return
-
-    CVB_LAST_HISTCMD=$HISTCMD
-
-    printf '%s\n' "$command" >>"$CVB_HISTORY_FILE"
-
-    cvb_control_start "$command" "$copy"
 }
 
 cvb_control_prompt() {
@@ -138,6 +73,8 @@ cvb_control_prompt() {
     elif ((${#CVB_SAVED_PROMPT_COMMAND[@]})); then
         eval "${CVB_SAVED_PROMPT_COMMAND[0]}"
     fi
+
+    ((CVB_EXITING)) && return
 
     cvb_control_end "$status"
 }
@@ -155,5 +92,3 @@ PROMPT_COMMAND='cvb_control_prompt'
 
 CVB_SAVED_PS1=$PS1
 PS1='\[\e[31m\]●\[\e[0m\] '"$CVB_SAVED_PS1"
-
-trap 'cvb_control_debug' DEBUG
