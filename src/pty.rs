@@ -562,9 +562,12 @@ fn proxy(
                 .map_err(|error| format!("CVB: PTY write failed: {error}"))?;
         }
 
-        if master_events.contains(nix::poll::PollFlags::POLLIN) {
-            let count = read(master.as_fd(), &mut buffer)
-                .map_err(|error| format!("CVB: PTY read failed: {error}"))?;
+        if master_events.intersects(nix::poll::PollFlags::POLLIN | nix::poll::PollFlags::POLLHUP | nix::poll::PollFlags::POLLERR) {
+            let count = match read(master.as_fd(), &mut buffer) {
+                Ok(count) => count,
+                Err(nix::errno::Errno::EIO) => break,
+                Err(error) => return Err(format!("CVB: PTY read failed: {error}")),
+            };
 
             if count == 0 {
                 break;
@@ -712,15 +715,17 @@ fn capture_command_output(
         end_cursor.1,
     );
 
-    let region = if !state.command.is_empty() {
-        original_region
-            .strip_prefix(&state.command)
-            .unwrap_or(&original_region)
-    } else {
-        &original_region
-    };
+    let region = original_region
+        .strip_suffix(&state.prompt)
+        .unwrap_or(&original_region);
 
-    let region = region.strip_suffix(&state.prompt).unwrap_or(region);
+    let region = if !state.command.is_empty() {
+        region
+            .strip_prefix(&state.command)
+            .unwrap_or(region)
+    } else {
+        region
+    };
 
     let output = region.trim_matches('\n');
 
@@ -733,9 +738,18 @@ fn capture_command_output(
             .open("/tmp/cvb-capture-debug.log")
             .map_err(|error| format!("CVB: unable to open capture debug log: {error}"))?;
 
+        let tail = original_region
+            .chars()
+            .rev()
+            .take(100)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect::<String>();
+
         writeln!(
             file,
-            "START cursor=({}, {}) prompt_serial_start={} end_cursor=({}, {}) command_len={} region_len={} output_len={} prefix={} prompt_len={} prompt_serial={}",
+            "START cursor=({}, {}) prompt_serial_start={} end_cursor=({}, {}) command_len={} region_len={} output_len={} prefix={} prompt_len={} prompt_serial={} tail={:?}",
             state.cursor_row,
             state.cursor_col,
             state.prompt_serial_at_start,
@@ -747,6 +761,7 @@ fn capture_command_output(
             original_region.starts_with(&state.command),
             state.prompt.len(),
             0u64,
+            tail,
         )
         .map_err(|error| format!("CVB: unable to write capture debug log: {error}"))?;
     }

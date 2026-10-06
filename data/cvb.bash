@@ -1,5 +1,5 @@
 cvb() {
-    if [[ "$1" == "on" ]]; then
+    if [[ -z "$1" || "$1" == "on" ]]; then
         if [[ -n ${CVB_ACTIVE:-} ]]; then
             printf 'CVB: already running\n' >&2
             return 1
@@ -54,7 +54,11 @@ cvb() {
         export CVB_HISTORY_FILE="$history_file"
         export CVB_PARENT_HISTORY_FILE="$parent_history_file"
 
-        CVB_INIT_FILE="$init_file" command cvb "$@"
+        if [[ -z "$1" ]]; then
+            CVB_INIT_FILE="$init_file" command cvb on
+        else
+            CVB_INIT_FILE="$init_file" command cvb "$@"
+        fi
         local status=$?
 
         if [[ -f $history_file ]]; then
