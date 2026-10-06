@@ -269,8 +269,11 @@ fn proxy(
     let keybind_watcher = KeybindWatcher::new()?;
     let mut capture_state: Option<CaptureState> = None;
     let mut pending_end = false;
+    let mut loop_iteration = 0u64;
 
     loop {
+        loop_iteration += 1;
+        let capture_ready = pending_end;
                 let keyboard_fd =
             unsafe { std::os::fd::BorrowedFd::borrow_raw(keyboard.fd()) };
         let keybind_fd =
@@ -414,9 +417,32 @@ fn proxy(
             stdout
                 .flush()
                 .map_err(|error| format!("CVB: stdout flush failed: {error}"))?;
+
+            {
+                use std::fs::OpenOptions;
+                use std::io::Write;
+
+                let mut file = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("/tmp/cvb-capture-debug.log")
+                    .map_err(|error| format!("CVB: unable to open capture debug log: {error}"))?;
+
+                let cursor = terminal.screen().cursor_position();
+
+                writeln!(
+                    file,
+                    "MASTER iteration={} bytes={} cursor=({}, {})",
+                    loop_iteration,
+                    count,
+                    cursor.0,
+                    cursor.1,
+                )
+                .map_err(|error| format!("CVB: unable to write capture debug log: {error}"))?;
+            }
         }
 
-        if pending_end {
+        if capture_ready {
             if let Some(state) = capture_state.take() {
                 capture_command_output(&mut terminal, &mut screen_terminal, rows, cols, &state)?;
             }
@@ -510,6 +536,32 @@ fn capture_command_output(
         .strip_suffix(&state.prompt)
         .unwrap_or(region)
         .trim_matches('\n');
+
+    {
+        use std::fs::OpenOptions;
+        use std::io::Write;
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/cvb-capture-debug.log")
+            .map_err(|error| format!("CVB: unable to open capture debug log: {error}"))?;
+
+        writeln!(
+            file,
+            "start=({}, {}) end=({}, {}) command_len={} region_len={} output_len={} prefix={} prompt_len={}",
+            state.cursor_row,
+            state.cursor_col,
+            end_cursor.0,
+            end_cursor.1,
+            state.command.len(),
+            region.len(),
+            output.len(),
+            region.starts_with(&state.command),
+            state.prompt.len(),
+        )
+        .map_err(|error| format!("CVB: unable to write capture debug log: {error}"))?;
+    }
 
     let processed = if output.is_empty() {
         NO_OUTPUT.to_string()
@@ -625,6 +677,17 @@ fn status_to_code(status: WaitStatus) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::screen_to_text;
+
+    #[test]
+    fn osc_sync_marker_is_not_screen_content() {
+        let mut terminal = vt100::Parser::new(4, 20, 0);
+
+        terminal.process(b"BEFORE");
+        terminal.process(b"\x1b]1337;CVB-END\x07");
+        terminal.process(b"AFTER");
+
+        assert_eq!(terminal.screen().contents(), "BEFOREAFTER");
+    }
 
     #[test]
     fn screen_to_text_extracts_visible_content() {
