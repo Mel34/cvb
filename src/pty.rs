@@ -499,6 +499,20 @@ fn handle_control_message(
     Ok(())
 }
 
+const CVB_SYNC_MARKER: &[u8] = b"\x1b]777;CVB;END\x07";
+
+fn consume_sync_marker(buffer: &mut Vec<u8>) -> bool {
+    if let Some(position) = buffer
+        .windows(CVB_SYNC_MARKER.len())
+        .position(|window| window == CVB_SYNC_MARKER)
+    {
+        buffer.drain(..position + CVB_SYNC_MARKER.len());
+        return true;
+    }
+
+    false
+}
+
 fn capture_command_output(
     terminal: &mut vt100::Parser,
     screen_terminal: &mut vt100::Parser,
@@ -677,6 +691,26 @@ fn status_to_code(status: WaitStatus) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::screen_to_text;
+
+    #[test]
+    fn sync_marker_is_detected_in_complete_buffer() {
+        let mut buffer = b"BEFORE\x1b]777;CVB;END\x07AFTER".to_vec();
+
+        assert!(super::consume_sync_marker(&mut buffer));
+        assert_eq!(buffer, b"AFTER");
+    }
+
+    #[test]
+    fn sync_marker_is_detected_when_split_across_reads() {
+        let marker = super::CVB_SYNC_MARKER;
+        let split = marker.len() / 2;
+
+        let mut buffer = marker[..split].to_vec();
+        buffer.extend_from_slice(&marker[split..]);
+
+        assert!(super::consume_sync_marker(&mut buffer));
+        assert!(buffer.is_empty());
+    }
 
     #[test]
     fn osc_sync_marker_is_not_screen_content() {
