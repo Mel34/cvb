@@ -1,20 +1,20 @@
 use std::ffi::CString;
 use std::io::{self, Write};
-use std::num::NonZeroU16;
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::path::Path;
+use std::num::NonZeroU16;
 
 use nix::ioctl_read_bad;
 use nix::ioctl_write_ptr_bad;
-use nix::pty::{ForkptyResult, Winsize, forkpty};
+use nix::pty::{forkpty, ForkptyResult, Winsize};
 use nix::sys::signal::{self, SigHandler, Signal};
 use nix::sys::termios::{self, SetArg, Termios};
-use nix::sys::wait::{WaitStatus, waitpid};
-use nix::unistd::{Pid, pipe, read, write};
+use nix::sys::wait::{waitpid, WaitStatus};
+use nix::unistd::{pipe, read, write, Pid};
 
 use crate::control::{ControlChannel, ControlMessage};
-use crate::keybind::{self, KeybindWatcher};
 use crate::keyboard::HotkeyMonitor;
+use crate::keybind::{self, KeybindWatcher};
 use crate::sound::SoundPlayer;
 
 ioctl_read_bad!(tiocgwinsz, libc::TIOCGWINSZ, Winsize);
@@ -174,7 +174,14 @@ fn run_pty(rcfile: &Path) -> Result<i32, String> {
 fn control_socketpair() -> Result<(OwnedFd, OwnedFd), String> {
     let mut fds = [0; 2];
 
-    let result = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+    let result = unsafe {
+        libc::socketpair(
+            libc::AF_UNIX,
+            libc::SOCK_STREAM,
+            0,
+            fds.as_mut_ptr(),
+        )
+    };
 
     if result == -1 {
         return Err(format!(
@@ -199,7 +206,13 @@ fn set_nonblocking(fd: &OwnedFd) -> Result<(), String> {
         ));
     }
 
-    let result = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    let result = unsafe {
+        libc::fcntl(
+            fd.as_raw_fd(),
+            libc::F_SETFL,
+            flags | libc::O_NONBLOCK,
+        )
+    };
 
     if result == -1 {
         return Err(format!(
@@ -250,16 +263,8 @@ fn proxy(
 
     let mut buffer = [0u8; 8192];
     let mut signal_buffer = [0u8; 64];
-    let mut terminal = vt100::Parser::new(
-        NonZeroU16::new(rows).unwrap(),
-        NonZeroU16::new(cols).unwrap(),
-        1000,
-    );
-    let mut screen_terminal = vt100::Parser::new(
-        NonZeroU16::new(rows).unwrap(),
-        NonZeroU16::new(cols).unwrap(),
-        1000,
-    );
+    let mut terminal = vt100::Parser::new(NonZeroU16::new(rows).unwrap(), NonZeroU16::new(cols).unwrap(), 1000);
+    let mut screen_terminal = vt100::Parser::new(NonZeroU16::new(rows).unwrap(), NonZeroU16::new(cols).unwrap(), 1000);
     let bindings = keybind::load()?;
     let mut keyboard = HotkeyMonitor::new(bindings)?;
     let keybind_watcher = KeybindWatcher::new()?;
@@ -278,7 +283,10 @@ fn proxy(
             nix::poll::PollFd::new(stdin.as_fd(), nix::poll::PollFlags::POLLIN),
             nix::poll::PollFd::new(master.as_fd(), nix::poll::PollFlags::POLLIN),
             nix::poll::PollFd::new(signal_read.as_fd(), nix::poll::PollFlags::POLLIN),
-            nix::poll::PollFd::new(control.fd().as_fd(), nix::poll::PollFlags::POLLIN),
+            nix::poll::PollFd::new(
+                control.fd().as_fd(),
+                nix::poll::PollFlags::POLLIN,
+            ),
             nix::poll::PollFd::new(keyboard_fd, nix::poll::PollFlags::POLLIN),
             nix::poll::PollFd::new(keybind_fd, nix::poll::PollFlags::POLLIN),
         ];
@@ -326,14 +334,10 @@ fn proxy(
             let _ = read(signal_read.as_fd(), &mut signal_buffer);
 
             let winsize = resize_pty(master, child)?;
-            terminal.screen_mut().set_size(
-                NonZeroU16::new(winsize.ws_row).unwrap(),
-                NonZeroU16::new(winsize.ws_col).unwrap(),
-            );
-            screen_terminal.screen_mut().set_size(
-                NonZeroU16::new(winsize.ws_row).unwrap(),
-                NonZeroU16::new(winsize.ws_col).unwrap(),
-            );
+            terminal.screen_mut().set_size(NonZeroU16::new(winsize.ws_row).unwrap(), NonZeroU16::new(winsize.ws_col).unwrap());
+            screen_terminal
+                .screen_mut()
+                .set_size(NonZeroU16::new(winsize.ws_row).unwrap(), NonZeroU16::new(winsize.ws_col).unwrap());
         }
 
         if keyboard_events.contains(nix::poll::PollFlags::POLLIN) {
@@ -358,11 +362,7 @@ fn proxy(
                 .map_err(|error| format!("CVB: PTY write failed: {error}"))?;
         }
 
-        if master_events.intersects(
-            nix::poll::PollFlags::POLLIN
-                | nix::poll::PollFlags::POLLHUP
-                | nix::poll::PollFlags::POLLERR,
-        ) {
+        if master_events.intersects(nix::poll::PollFlags::POLLIN | nix::poll::PollFlags::POLLHUP | nix::poll::PollFlags::POLLERR) {
             let count = match read(master.as_fd(), &mut buffer) {
                 Ok(count) => count,
                 Err(nix::errno::Errno::EIO) => break,
@@ -379,6 +379,7 @@ fn proxy(
             if marker_seen && capture_state.is_some() {
                 pending_end = true;
             }
+
 
             terminal.process(&output);
             screen_terminal.process(&output);
@@ -407,8 +408,11 @@ fn proxy(
                 writeln!(
                     file,
                     "MASTER iteration={} bytes={} cursor=({}, {})",
-                    loop_iteration, count, cursor.0, cursor.1,
-                )
+                    loop_iteration,
+                    count,
+                    cursor.0,
+                    cursor.1,
+                        )
                 .map_err(|error| format!("CVB: unable to write capture debug log: {error}"))?;
             }
         }
@@ -419,13 +423,22 @@ fn proxy(
                 | nix::poll::PollFlags::POLLERR,
         ) {
             for message in control.receive()? {
-                handle_control_message(message, &mut capture_state, &mut pending_end, &terminal)?;
+                handle_control_message(
+                    message,
+                    &mut capture_state,
+                    &mut pending_end,
+                    &terminal,
+                )?;
             }
         }
 
         if pending_end {
             if let Some(state) = capture_state.take() {
-                capture_command_output(&mut terminal, &mut screen_terminal, &state)?;
+                capture_command_output(
+                    &mut terminal,
+                    &mut screen_terminal,
+                    &state,
+                )?;
             }
 
             pending_end = false;
@@ -442,11 +455,20 @@ fn handle_control_message(
     terminal: &vt100::Parser,
 ) -> Result<(), String> {
     match message {
-        ControlMessage::Start { command, copy, .. } => {
+        ControlMessage::Start {
+            command,
+            copy,
+            ..
+        } => {
             let screen = terminal.screen();
             let (cursor_row, cursor_col) = screen.cursor_position();
 
-            let prompt = screen.contents_between(cursor_row, 0, cursor_row, cursor_col);
+            let prompt = screen.contents_between(
+                cursor_row,
+                0,
+                cursor_row,
+                cursor_col,
+            );
 
             *capture_state = Some(CaptureState {
                 cursor_row,
@@ -475,7 +497,10 @@ fn handle_control_message(
 
 const CVB_SYNC_MARKER: &[u8] = b"\x1b]777;CVB;END\x07";
 
-fn consume_sync_marker_stream(pending: &mut Vec<u8>, input: &[u8]) -> (Vec<u8>, bool) {
+fn consume_sync_marker_stream(
+    pending: &mut Vec<u8>,
+    input: &[u8],
+) -> (Vec<u8>, bool) {
     let mut output = Vec::new();
     let mut marker_seen = false;
 
@@ -483,7 +508,9 @@ fn consume_sync_marker_stream(pending: &mut Vec<u8>, input: &[u8]) -> (Vec<u8>, 
         pending.push(byte);
 
         while !pending.is_empty() {
-            if pending.len() <= CVB_SYNC_MARKER.len() && CVB_SYNC_MARKER.starts_with(pending) {
+            if pending.len() <= CVB_SYNC_MARKER.len()
+                && CVB_SYNC_MARKER.starts_with(pending)
+            {
                 break;
             }
 
@@ -522,7 +549,9 @@ fn capture_command_output(
     }
 
     use vt100::capture::{
-        BasicFormattedCaptureRange, BasicFormattedCaptureState, basic_formatted_to_plain,
+        basic_formatted_to_plain,
+        BasicFormattedCaptureRange,
+        BasicFormattedCaptureState,
     };
 
     let mut captured = String::new();
@@ -552,26 +581,14 @@ fn capture_command_output(
         String::new()
     };
 
-    {
-        use std::fs::OpenOptions;
+    let processed = if extracted.is_empty() {
+        NO_OUTPUT.to_string()
+    } else {
+        extracted
+    };
 
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/tmp/cvb-capture-debug.log")
-            .map_err(|error| format!("CVB: unable to open capture debug log: {error}"))?;
-
-        writeln!(file, "=== CAPTURE ===")
-            .map_err(|error| format!("CVB: unable to write capture debug log: {error}"))?;
-
-        writeln!(file, "COMMAND: {:?}", state.command)
-            .map_err(|error| format!("CVB: unable to write capture debug log: {error}"))?;
-
-        writeln!(file, "--- EXTRACTED ---")
-            .map_err(|error| format!("CVB: unable to write capture debug log: {error}"))?;
-
-        writeln!(file, "{}", extracted)
-            .map_err(|error| format!("CVB: unable to write capture debug log: {error}"))?;
+    if state.copy {
+        copy_to_clipboard(&processed)?;
     }
 
     Ok(())
@@ -726,13 +743,15 @@ mod tests {
         let split = marker.len() / 2;
         let mut pending = Vec::new();
 
-        let (output, seen) = super::consume_sync_marker_stream(&mut pending, b"BEFORE");
+        let (output, seen) =
+            super::consume_sync_marker_stream(&mut pending, b"BEFORE");
 
         assert_eq!(output, b"BEFORE");
         assert!(!seen);
         assert!(pending.is_empty());
 
-        let (output, seen) = super::consume_sync_marker_stream(&mut pending, &marker[..split]);
+        let (output, seen) =
+            super::consume_sync_marker_stream(&mut pending, &marker[..split]);
 
         assert!(output.is_empty());
         assert!(!seen);
@@ -741,10 +760,12 @@ mod tests {
         let mut second = marker[split..].to_vec();
         second.extend_from_slice(b"AFTER");
 
-        let (output, seen) = super::consume_sync_marker_stream(&mut pending, &second);
+        let (output, seen) =
+            super::consume_sync_marker_stream(&mut pending, &second);
 
         assert_eq!(output, b"AFTER");
         assert!(seen);
         assert!(pending.is_empty());
     }
+
 }
