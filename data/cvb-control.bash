@@ -7,6 +7,7 @@ CVB_LAST_HISTCMD=
 CVB_EXITING=0
 CVB_SAVED_PROMPT_COMMAND=()
 CVB_SAVED_PROMPT_IS_ARRAY=0
+CVB_SAVED_PS0=
 
 # History
 #
@@ -23,7 +24,17 @@ cvb_control_history_start() {
     history -r "$CVB_PARENT_HISTORY_FILE"
     set -o history
 
-    CVB_LAST_HISTCMD=$HISTCMD
+    CVB_LAST_HISTCMD=$(history 1 | awk '{print $1}')
+}
+
+cvb_control_start_marker() {
+    printf '\e]777;CVB;START;%s\a' "$CVB_MARKER_KEY"
+}
+
+cvb_control_end_marker() {
+    local status=$1
+
+    printf '\e]777;CVB;END;%s;%s\a' "$CVB_MARKER_KEY" "$status"
 }
 
 cvb_control_write_byte() {
@@ -100,6 +111,8 @@ cvb_control_prompt() {
         return
     fi
 
+    cvb_control_end_marker "$status"
+
     history -a
 
     if ((HISTCMD != CVB_LAST_HISTCMD)); then
@@ -127,6 +140,10 @@ cvb_control_prompt() {
     cvb_control_end "$status"
 }
 
+if [[ -n ${PS0-} ]]; then
+    CVB_SAVED_PS0=$PS0
+fi
+
 if declare -p PROMPT_COMMAND &>/dev/null; then
     if [[ $(declare -p PROMPT_COMMAND) == "declare -a"* ]]; then
         CVB_SAVED_PROMPT_COMMAND=("${PROMPT_COMMAND[@]}")
@@ -136,7 +153,25 @@ if declare -p PROMPT_COMMAND &>/dev/null; then
     fi
 fi
 
+cvb_control_ps0() {
+    local command=$1
+
+    {
+        printf 'PS0 command=<%s>\\n' "$command"
+    } >>/tmp/cvb-ps0-debug.log
+}
+
+PS0='$(cvb_control_ps0 "$BASH_COMMAND")'
+
 PROMPT_COMMAND='cvb_control_prompt'
+
+CVB_START_MARKER=$(printf '\e]777;CVB;START;%s\a' "$CVB_MARKER_KEY")
+
+if [[ -n $CVB_SAVED_PS0 ]]; then
+    PS0="${CVB_START_MARKER}${CVB_SAVED_PS0}"
+else
+    PS0=$CVB_START_MARKER
+fi
 
 CVB_SAVED_PS1=$PS1
 PS1='\[\e[31m\]●\[\e[0m\] '"$CVB_SAVED_PS1"

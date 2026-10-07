@@ -23,6 +23,113 @@ ioctl_write_ptr_bad!(tiocswinsz, libc::TIOCSWINSZ, Winsize);
 const CONTROL_FD: i32 = 3;
 const NO_OUTPUT: &str = "[NO_VISIBLE_OUTPUT]";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Marker {
+    Start,
+    End(i32),
+}
+
+struct MarkerScanner {
+    start: Vec<u8>,
+    end_prefix: Vec<u8>,
+    key: Vec<u8>,
+    pending: Vec<u8>,
+}
+
+impl MarkerScanner {
+    fn new(key: &str) -> Self {
+        Self {
+            start: format!("\x1b]777;CVB;START;{key}\x07").into_bytes(),
+            end_prefix: format!("\x1b]777;CVB;END;{key};").into_bytes(),
+            key: key.as_bytes().to_vec(),
+            pending: Vec::new(),
+        }
+    }
+
+    fn process(&mut self, input: &[u8]) -> (Vec<u8>, Vec<Marker>) {
+        let mut output = Vec::new();
+        let mut markers = Vec::new();
+
+        self.pending.extend_from_slice(input);
+
+        loop {
+            let start_position = find_subslice(&self.pending, &self.start);
+            let end_position = find_subslice(&self.pending, &self.end_prefix);
+
+            let position = match (start_position, end_position) {
+                (Some(start), Some(end)) => Some((start.min(end), start <= end)),
+                (Some(start), None) => Some((start, true)),
+                (None, Some(end)) => Some((end, false)),
+                (None, None) => None,
+            };
+
+            let Some((position, is_start)) = position else {
+                let keep = self
+                    .start
+                    .len()
+                    .max(self.end_prefix.len())
+                    .saturating_sub(1);
+
+                if self.pending.len() > keep {
+                    let split = self.pending.len() - keep;
+                    output.extend(self.pending.drain(..split));
+                }
+
+                break;
+            };
+
+            output.extend(self.pending.drain(..position));
+
+            if is_start {
+                self.pending.drain(..self.start.len());
+                markers.push(Marker::Start);
+                continue;
+            }
+
+            let Some(end) = find_byte(&self.pending[self.end_prefix.len()..], 0x07) else {
+                break;
+            };
+
+            let status_bytes = &self.pending[self.end_prefix.len()..self.end_prefix.len() + end];
+
+            let status = match std::str::from_utf8(status_bytes)
+                .ok()
+                .and_then(|value| value.parse::<i32>().ok())
+            {
+                Some(status) => status,
+                None => {
+                    output.push(self.pending.remove(0));
+                    continue;
+                }
+            };
+
+            let marker_len = self.end_prefix.len() + end + 1;
+            self.pending.drain(..marker_len);
+            markers.push(Marker::End(status));
+        }
+
+        (output, markers)
+    }
+
+    fn finish(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.pending)
+    }
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn find_byte(bytes: &[u8], byte: u8) -> Option<usize> {
+    bytes.iter().position(|value| *value == byte)
+}
+
 static mut SIGWINCH_PIPE: Option<i32> = None;
 
 extern "C" fn handle_sigwinch(_: libc::c_int) {
@@ -269,6 +376,10 @@ fn proxy(
     let mut end_seen = false;
     let mut marker_seen_pending = false;
     let mut loop_iteration = 0u64;
+    let marker_key = std::env::var("CVB_MARKER_KEY")
+        .map_err(|_| "CVB: CVB_MARKER_KEY is not set".to_string())?;
+
+    let mut marker_scanner = MarkerScanner::new(&marker_key);
     let mut sync_marker_pending: Vec<u8> = Vec::new();
 
     loop {
@@ -371,8 +482,30 @@ fn proxy(
                 break;
             }
 
+            let (output, markers) =
+                marker_scanner.process(&buffer[..count]);
+
+            for marker in &markers {
+                {
+                    use std::fs::OpenOptions;
+
+                    let mut file = OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open("/tmp/cvb-capture-debug.log")
+                        .map_err(|error| {
+                            format!("CVB: unable to open capture debug log: {error}")
+                        })?;
+
+                    writeln!(file, "INBAND marker={marker:?}")
+                        .map_err(|error| {
+                            format!("CVB: unable to write capture debug log: {error}")
+                        })?;
+                }
+            }
+
             let (output, marker_seen) =
-                consume_sync_marker_stream(&mut sync_marker_pending, &buffer[..count]);
+                consume_sync_marker_stream(&mut sync_marker_pending, &output);
 
             if marker_seen {
                 marker_seen_pending = true;
@@ -442,6 +575,20 @@ fn proxy(
         }
     }
 
+    let remaining = marker_scanner.finish();
+
+    if !remaining.is_empty() {
+        let mut stdout = stdout.lock();
+
+        stdout
+            .write_all(&remaining)
+            .map_err(|error| format!("CVB: stdout write failed: {error}"))?;
+
+        stdout
+            .flush()
+            .map_err(|error| format!("CVB: stdout flush failed: {error}"))?;
+    }
+
     Ok(())
 }
 
@@ -450,6 +597,19 @@ fn handle_control_message(
     capture_state: &mut Option<CaptureState>,
     end_seen: &mut bool,
 ) -> Result<(), String> {
+    {
+        use std::fs::OpenOptions;
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/cvb-capture-debug.log")
+            .map_err(|error| format!("CVB: unable to open capture debug log: {error}"))?;
+
+        writeln!(file, "CONTROL message={message:?}")
+            .map_err(|error| format!("CVB: unable to write capture debug log: {error}"))?;
+    }
+
     match message {
         ControlMessage::Start {
             command,

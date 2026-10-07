@@ -12,6 +12,8 @@ cvb() {
         local previous_cvb_active=${CVB_ACTIVE+x}
         local previous_cvb_active_value=${CVB_ACTIVE-}
         local previous_cvb_history_file=${CVB_HISTORY_FILE-}
+        local previous_cvb_marker_key=${CVB_MARKER_KEY+x}
+        local previous_cvb_marker_key_value=${CVB_MARKER_KEY-}
 
         mkdir -p "$runtime_dir" || return 1
 
@@ -59,6 +61,7 @@ cvb() {
         export CVB_ACTIVE=1
         export CVB_HISTORY_FILE="$history_file"
         export CVB_PARENT_HISTORY_FILE="$parent_history_file"
+        export CVB_MARKER_KEY=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
 
         CVB_INIT_FILE="$init_file" command cvb "$@"
         local status=$?
@@ -100,6 +103,12 @@ cvb() {
             export CVB_HISTORY_FILE="$previous_cvb_history_file"
         else
             unset CVB_HISTORY_FILE
+        fi
+
+        if [[ -n $previous_cvb_marker_key ]]; then
+            export CVB_MARKER_KEY="$previous_cvb_marker_key_value"
+        else
+            unset CVB_MARKER_KEY
         fi
 
         return "$status"
