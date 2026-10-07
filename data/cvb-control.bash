@@ -2,6 +2,8 @@
 
 CVB_CONTROL_FD=3
 CVB_COMMAND_ID=0
+CVB_COMMAND_ACTIVE=0
+CVB_LAST_HISTCMD=
 CVB_EXITING=0
 CVB_SAVED_PROMPT_COMMAND=()
 CVB_SAVED_PROMPT_IS_ARRAY=0
@@ -43,10 +45,51 @@ cvb_control_write_u64() {
     printf '%b' "\\x${value:14:2}" >&"$CVB_CONTROL_FD"
 }
 
-cvb_control_end() {
-    local status=$1
+cvb_control_start() {
+    local command=$1
+    local copy=$2
+    local command_length
+    local payload_length
 
     ((CVB_COMMAND_ID++))
+    CVB_COMMAND_ACTIVE=1
+
+    command_length=$(printf '%s' "$command" | wc -c)
+    payload_length=$(printf '%08x' $((10 + command_length)))
+
+    cvb_control_write_u32 "$payload_length"
+    cvb_control_write_byte 01
+    cvb_control_write_byte "$copy"
+    cvb_control_write_u64 "$(printf '%016x' "$CVB_COMMAND_ID")"
+    printf '%s' "$command" >&"$CVB_CONTROL_FD"
+}
+
+cvb_control_debug() {
+    local command=$BASH_COMMAND
+    local normalized_command
+    local copy=1
+
+    [[ ${BASH_COMMAND} == cvb_control_* ]] && return
+    [[ -n ${BASH_COMMAND} ]] || return
+
+    normalized_command="${command#"${command%%[![:space:]]*}"}"
+
+    [[ -n $normalized_command ]] || return
+
+    [[ $normalized_command == exit || $normalized_command == exit[[:space:]]* ]] && return
+    [[ $normalized_command == cvb || $normalized_command == cvb[[:space:]]* ]] && return
+
+    [[ $command == [[:space:]]* ]] && copy=0
+
+    CVB_LAST_HISTCMD=$HISTCMD
+
+    printf '%s\n' "$command" >>"$CVB_HISTORY_FILE"
+
+    cvb_control_start "$command" "$copy"
+}
+
+cvb_control_end() {
+    local status=$1
 
     cvb_control_write_u32 0000000d
     cvb_control_write_byte 02
@@ -91,6 +134,8 @@ if declare -p PROMPT_COMMAND &>/dev/null; then
 fi
 
 PROMPT_COMMAND='cvb_control_prompt'
+
+trap cvb_control_debug DEBUG
 
 CVB_SAVED_PS1=$PS1
 PS1='\[\e[31m\]●\[\e[0m\] '"$CVB_SAVED_PS1"
