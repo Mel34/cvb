@@ -7,7 +7,7 @@ pub fn create_rcfile() -> Result<PathBuf, String> {
     let parent_init =
         env::var_os("CVB_INIT_FILE").ok_or_else(|| "CVB: CVB_INIT_FILE is not set".to_string())?;
 
-    let parent_history = env::var_os("CVB_PARENT_HISTORY_FILE")
+    env::var_os("CVB_PARENT_HISTORY_FILE")
         .ok_or_else(|| "CVB: CVB_PARENT_HISTORY_FILE is not set".to_string())?;
 
     env::var_os("CVB_HISTORY_FILE")
@@ -43,19 +43,15 @@ pub fn create_rcfile() -> Result<PathBuf, String> {
          if [[ -f {bashrc} ]]; then\n\
              source {bashrc}\n\
          fi\n\
-         \n\
          source {parent_init}\n\
          {control_script}\n\
          {patch_function}\n\
          \n\
-         history -c\n\
-         history -r {parent_history}\n\
-         \n\
-         set -o history\n",
+         cvb_control_history_start\n",
         bashrc = bash_quote(&bashrc),
         parent_init = bash_quote(Path::new(&parent_init)),
         control_script = control_script,
-        parent_history = bash_quote(Path::new(&parent_history)),
+        patch_function = patch_function,
     );
 
     fs::write(&rcfile, content).map_err(|error| {

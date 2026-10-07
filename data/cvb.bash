@@ -50,6 +50,12 @@ cvb() {
             return 1
         }
 
+        : >"$history_file" || {
+            printf 'CVB: unable to create history file: %s\n' "$history_file" >&2
+            rm -f "$init_file" "$parent_history_file"
+            return 1
+        }
+
         export CVB_ACTIVE=1
         export CVB_HISTORY_FILE="$history_file"
         export CVB_PARENT_HISTORY_FILE="$parent_history_file"
@@ -57,19 +63,23 @@ cvb() {
         CVB_INIT_FILE="$init_file" command cvb "$@"
         local status=$?
 
-        if [[ -f $history_file ]]; then
-            while IFS= read -r command; do
-                command="${command#"${command%%[![:space:]]*}"}"
-                history -s "$command"
-            done <"$history_file"
-            rm -f "$history_file"
+        if [[ -s $history_file ]]; then
+            # Flush the parent's pending history first. Entries loaded with
+            # `history -r` are not counted among Bash's pending entries.
+            history -a
+            history -r "$history_file"
+
+            # Bash does not write `history -r` entries to HISTFILE on exit.
+            # Persist the imported session entries explicitly.
+            if [[ -n ${HISTFILE-} ]]; then
+                cat "$history_file" >>"$HISTFILE"
+            fi
         fi
+        rm -f "$history_file"
 
         rm -f "$parent_history_file"
 
-        if [[ $status -ne 0 ]]; then
-            rm -f "$init_file"
-        fi
+        rm -f "$init_file"
 
         if [[ -n $previous_cvb_active ]]; then
             export CVB_ACTIVE="$previous_cvb_active_value"

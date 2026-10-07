@@ -8,16 +8,27 @@ CVB_EXITING=0
 CVB_SAVED_PROMPT_COMMAND=()
 CVB_SAVED_PROMPT_IS_ARRAY=0
 
-HISTSIZE=1000
-HISTFILESIZE=1000
-HISTCONTROL=
-HISTIGNORE=
-HISTTIMEFORMAT=
-HISTFILE=/dev/null
+# History
+#
+# Keep the user's normal Bash history settings. The CVB session temporarily
+# redirects HISTFILE to a private session file, then the parent shell imports
+# the completed commands after the child exits.
+#
+# This function must be called as the final command in the generated rcfile.
+# History stays disabled during all initialization because Bash records later
+# lines of a sourced rcfile once `set -o history` is enabled.
+cvb_control_history_start() {
+    trap - DEBUG
 
-set -o history
-shopt -s cmdhist
-shopt -s lithist
+    HISTFILE=$CVB_HISTORY_FILE
+    history -c
+    history -r "$CVB_PARENT_HISTORY_FILE"
+    printf 'DEBUG: history immediately after history -r:\n' >&2
+    history >&2
+    set -o history
+
+    trap cvb_control_debug DEBUG
+}
 
 cvb_control_write_byte() {
     printf '%b' "\\x$1" >&"$CVB_CONTROL_FD"
@@ -65,8 +76,10 @@ cvb_control_start() {
 }
 
 cvb_control_debug() {
-    local command=$BASH_COMMAND
-    local normalized_command
+    local command
+    command=$(history 1)
+    command=${command#*[0-9]  }
+    command=${command#*  }
     local copy=1
 
     [[ ${BASH_COMMAND} == cvb_control_* ]] && return
@@ -76,14 +89,19 @@ cvb_control_debug() {
 
     [[ -n $normalized_command ]] || return
 
-    [[ $normalized_command == exit || $normalized_command == exit[[:space:]]* ]] && return
+    if [[ $normalized_command == exit || $normalized_command == exit[[:space:]]* ]]; then
+        history -d "$HISTCMD"
+        set +o history
+        return
+    fi
     [[ $normalized_command == cvb || $normalized_command == cvb[[:space:]]* ]] && return
 
     [[ $command == [[:space:]]* ]] && copy=0
 
-    CVB_LAST_HISTCMD=$HISTCMD
+    printf 'DEBUG: HISTCMD=%s LAST=%s BASH_COMMAND=%q command=%q\n' \
+        "$HISTCMD" "$CVB_LAST_HISTCMD" "$BASH_COMMAND" "$command" >&2
 
-    printf '%s\n' "$command" >>"$CVB_HISTORY_FILE"
+    CVB_LAST_HISTCMD=$HISTCMD
 
     cvb_control_start "$command" "$copy"
 }
@@ -110,6 +128,12 @@ cvb_control_exit() {
 cvb_control_prompt() {
     local status=$?
 
+    if ((CVB_EXITING)); then
+        return
+    fi
+
+    history -a
+
     if ((CVB_SAVED_PROMPT_IS_ARRAY)); then
         local command
         for command in "${CVB_SAVED_PROMPT_COMMAND[@]}"; do
@@ -134,8 +158,6 @@ if declare -p PROMPT_COMMAND &>/dev/null; then
 fi
 
 PROMPT_COMMAND='cvb_control_prompt'
-
-trap cvb_control_debug DEBUG
 
 CVB_SAVED_PS1=$PS1
 PS1='\[\e[31m\]●\[\e[0m\] '"$CVB_SAVED_PS1"

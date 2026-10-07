@@ -27,10 +27,14 @@ const INVENTORY_HEADER: &str =
 fn main() {
     match cli::parse() {
         cli::Command::Start => match shell::create_rcfile() {
-            Ok(rcfile) => match pty::run(&rcfile) {
-                Ok(_) => {}
-                Err(error) => eprintln!("{error}"),
-            },
+            Ok(rcfile) => {
+                let result = pty::run(&rcfile);
+                let _ = std::fs::remove_file(&rcfile);
+
+                if let Err(error) = result {
+                    eprintln!("{error}");
+                }
+            }
             Err(error) => eprintln!("{error}"),
         },
         cli::Command::Help => println!(
