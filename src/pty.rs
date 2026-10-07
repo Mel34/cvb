@@ -374,6 +374,7 @@ fn proxy(
     let mut signal_buffer = [0u8; 64];
     let mut terminal = vt100::Parser::new(NonZeroU16::new(rows).unwrap(), NonZeroU16::new(cols).unwrap(), 1000);
     let mut screen_terminal = vt100::Parser::new(NonZeroU16::new(rows).unwrap(), NonZeroU16::new(cols).unwrap(), 1000);
+    let mut capture_terminal: Option<vt100::Parser> = None;
     let bindings = keybind::load()?;
     let mut keyboard = HotkeyMonitor::new(bindings)?;
     let keybind_watcher = KeybindWatcher::new()?;
@@ -494,6 +495,10 @@ fn proxy(
             for event in events {
                 match event {
                     MarkerEvent::Data(output) => {
+                        if let Some(capture_terminal) = capture_terminal.as_mut() {
+                            capture_terminal.process(&output);
+                        }
+
                         let (output, marker_seen) =
                             consume_sync_marker_stream(&mut sync_marker_pending, &output);
 
@@ -510,6 +515,12 @@ fn proxy(
                     }
 
                     MarkerEvent::Start => {
+                        capture_terminal = Some(vt100::Parser::new(
+                            NonZeroU16::new(rows).unwrap(),
+                            NonZeroU16::new(cols).unwrap(),
+                            1000,
+                        ));
+
                         {
                             use std::fs::OpenOptions;
 
@@ -529,6 +540,33 @@ fn proxy(
                     }
 
                     MarkerEvent::End(status) => {
+                        if let Some(capture_terminal) = capture_terminal.as_ref() {
+                            let captured = capture_terminal.screen().contents();
+
+                            {
+                                use std::fs::OpenOptions;
+
+                                let mut file = OpenOptions::new()
+                                    .create(true)
+                                    .append(true)
+                                    .open("/tmp/cvb-capture-debug.log")
+                                    .map_err(|error| {
+                                        format!("CVB: unable to open capture debug log: {error}")
+                                    })?;
+
+                                writeln!(
+                                    file,
+                                    "CAPTURE DEBUG: status={} contents_len={} contents={:?}",
+                                    status,
+                                    captured.len(),
+                                    captured
+                                )
+                                .map_err(|error| {
+                                    format!("CVB: unable to write capture debug log: {error}")
+                                })?;
+                            }
+                        }
+
                         {
                             use std::fs::OpenOptions;
 
