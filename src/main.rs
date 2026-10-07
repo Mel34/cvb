@@ -26,15 +26,35 @@ const INVENTORY_HEADER: &str =
 
 fn main() {
     match cli::parse() {
-        cli::Command::On => match shell::create_rcfile() {
+        cli::Command::Start => match shell::create_rcfile() {
             Ok(rcfile) => match pty::run(&rcfile) {
                 Ok(_) => {}
                 Err(error) => eprintln!("{error}"),
             },
             Err(error) => eprintln!("{error}"),
         },
-        cli::Command::Off => println!("CVB off"),
-        cli::Command::Help => println!("CVB — Capture → View → Bridge"),
+        cli::Command::Help => println!(
+            "CVB — Capture → View → Bridge
+
+Capture your terminal session and bridge command output to the clipboard.
+
+Usage:
+    cvb
+    cvb <PATH>...
+    cvb --help
+    cvb --version
+
+Modes:
+    cvb              Start a terminal capture session
+    cvb <PATH>...    Capture files or directory inventories
+
+Options:
+    -h, --help       Show this help message
+    -V, --version    Show version information
+
+A capture session ends with:
+    exit"
+        ),
         cli::Command::Version => println!("cvb {}", env!("CARGO_PKG_VERSION")),
         cli::Command::Target(args) => {
             if let Some(paths) = target_paths(&args) {
