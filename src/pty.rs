@@ -21,7 +21,6 @@ ioctl_write_ptr_bad!(tiocswinsz, libc::TIOCSWINSZ, Winsize);
 
 const CONTROL_FD: i32 = 3;
 const NO_OUTPUT: &str = "[NO_VISIBLE_OUTPUT]";
-const PROMPT_MARKER: &[u8] = b"\x1b[31m\xe2\x97\x8f\x1b[0m ";
 
 static mut SIGWINCH_PIPE: Option<i32> = None;
 
@@ -247,188 +246,6 @@ struct CaptureState {
     prompt: String,
     command: String,
     copy: bool,
-    prompt_serial_at_start: u64,
-}
-
-struct InputTracker {
-    active: bool,
-    waiting_for_submit: bool,
-    command_exact: bool,
-    text: Vec<u8>,
-    escape: Vec<u8>,
-}
-
-impl InputTracker {
-    fn new() -> Self {
-        Self {
-            active: false,
-            waiting_for_submit: false,
-            command_exact: true,
-            text: Vec::new(),
-            escape: Vec::new(),
-        }
-    }
-
-    fn reset(&mut self) {
-        self.active = false;
-        self.waiting_for_submit = false;
-        self.command_exact = true;
-        self.text.clear();
-        self.escape.clear();
-    }
-
-    fn command_text(&self) -> String {
-        if !self.command_exact {
-            return String::new();
-        }
-
-        String::from_utf8_lossy(&self.text)
-            .trim_matches(|character| character == '\r' || character == '\n')
-            .to_string()
-    }
-
-    fn feed(
-        &mut self,
-        bytes: &[u8],
-        terminal: &vt100::Parser,
-    ) -> Option<(u16, u16, String)> {
-        let mut start = None;
-
-        for &byte in bytes {
-            if !self.escape.is_empty() {
-                self.escape.push(byte);
-
-                if (0x40..=0x7e).contains(&byte) {
-                    if byte == b'~' {
-                        let params = &self.escape[2..self.escape.len() - 1];
-
-                        if params == b"200" || params == b"201" {
-                            self.escape.clear();
-                            continue;
-                        }
-                    }
-
-                    if self.escape.len() >= 3
-                        && self.escape[1] == b'['
-                        && matches!(byte, b'A' | b'B')
-                        && !self.active
-                    {
-                        self.waiting_for_submit = true;
-                    }
-
-                    let bracketed_paste = byte == b'~'
-                        && self.escape.len() >= 3
-                        && (&self.escape[2..self.escape.len() - 1] == b"200"
-                            || &self.escape[2..self.escape.len() - 1] == b"201");
-
-                    if !bracketed_paste {
-                        self.command_exact = false;
-                    }
-
-                    self.escape.clear();
-                }
-
-                continue;
-            }
-
-            if byte == 0x1b {
-                self.escape.push(byte);
-                continue;
-            }
-
-            if byte == b'\r' || byte == b'\n' {
-                if !self.active && self.waiting_for_submit {
-                    let (row, col) = terminal.screen().cursor_position();
-
-                    self.active = true;
-                    self.waiting_for_submit = false;
-                    self.command_exact = false;
-                    self.text.clear();
-
-                    if start.is_none() {
-                        start = Some((row, col, String::new()));
-                    }
-                } else if self.active && self.command_exact {
-                    self.text.push(b'\n');
-                }
-
-                continue;
-            }
-
-            if !self.active {
-                if byte == 0x12 {
-                    self.waiting_for_submit = true;
-                    continue;
-                }
-
-                if !is_command_input_byte(byte) || self.waiting_for_submit {
-                    continue;
-                }
-
-                let (row, col) = terminal.screen().cursor_position();
-                let prompt = terminal.screen().contents_between(row, 0, row, col);
-                eprintln!("CVB DEBUG input cursor=({}, {}) prompt={:?}", row, col, prompt);
-
-                self.active = true;
-                self.command_exact = true;
-
-                if start.is_none() {
-                    start = Some((row, col, prompt));
-                }
-            }
-
-            if self.command_exact {
-                match byte {
-                    0x7f | 0x08 => {
-                        let mut cursor = self.text.len();
-
-                        if cursor > 0 {
-                            cursor -= 1;
-
-                            while cursor > 0 && (self.text[cursor] & 0xc0) == 0x80 {
-                                cursor -= 1;
-                            }
-
-                            self.text.truncate(cursor);
-                        }
-                    }
-                    0x17 => {
-                        while self.text.last().is_some_and(|byte| byte.is_ascii_whitespace()) {
-                            self.text.pop();
-                        }
-
-                        while self.text.last().is_some_and(|byte| !byte.is_ascii_whitespace()) {
-                            self.text.pop();
-                        }
-                    }
-                    0x15 => self.text.clear(),
-                    b'\t' | 0x20..=0x7e | 0x80..=0xff => self.text.push(byte),
-                    _ => {}
-                }
-            }
-        }
-
-        start
-    }
-}
-
-fn is_command_input_byte(byte: u8) -> bool {
-    byte == b'\t' || (byte >= 0x20 && byte != 0x7f)
-}
-
-fn update_prompt_marker(matcher: &mut usize, serial: &mut u64, bytes: &[u8]) {
-    for &byte in bytes {
-        if byte == PROMPT_MARKER[*matcher] {
-            *matcher += 1;
-
-            if *matcher == PROMPT_MARKER.len() {
-                *matcher = 0;
-                *serial += 1;
-            }
-        } else {
-            *matcher = usize::from(byte == PROMPT_MARKER[0]);
-        }
-    }
 }
 
 fn proxy(
@@ -450,11 +267,8 @@ fn proxy(
     let bindings = keybind::load()?;
     let mut keyboard = HotkeyMonitor::new(bindings)?;
     let keybind_watcher = KeybindWatcher::new()?;
-    let mut input_tracker = InputTracker::new();
     let mut capture_state: Option<CaptureState> = None;
     let mut pending_end = false;
-    let mut prompt_matcher = 0usize;
-    let mut prompt_serial = 0u64;
     let mut loop_iteration = 0u64;
     let mut sync_marker_pending: Vec<u8> = Vec::new();
 
@@ -543,23 +357,6 @@ fn proxy(
                 break;
             }
 
-            if capture_state.is_none() {
-                if let Some((cursor_row, cursor_col, prompt)) =
-                    input_tracker.feed(&buffer[..count], &terminal)
-                {
-                    capture_state = Some(CaptureState {
-                        cursor_row,
-                        cursor_col,
-                        prompt,
-                        command: input_tracker.command_text(),
-                        copy: true,
-                        prompt_serial_at_start: prompt_serial,
-                    });
-                }
-            } else {
-                input_tracker.feed(&buffer[..count], &terminal);
-            }
-
             write(master.as_fd(), &buffer[..count])
                 .map_err(|error| format!("CVB: PTY write failed: {error}"))?;
         }
@@ -582,7 +379,6 @@ fn proxy(
                 pending_end = true;
             }
 
-            update_prompt_marker(&mut prompt_matcher, &mut prompt_serial, &output);
 
             terminal.process(&output);
             screen_terminal.process(&output);
@@ -610,13 +406,12 @@ fn proxy(
 
                 writeln!(
                     file,
-                    "MASTER iteration={} bytes={} cursor=({}, {}) prompt_serial={}",
+                    "MASTER iteration={} bytes={} cursor=({}, {})",
                     loop_iteration,
                     count,
                     cursor.0,
                     cursor.1,
-                    prompt_serial,
-                )
+                        )
                 .map_err(|error| format!("CVB: unable to write capture debug log: {error}"))?;
             }
         }
@@ -637,19 +432,12 @@ fn proxy(
         }
 
         if pending_end {
-            if let Some(mut state) = capture_state.take() {
-                state.command = input_tracker.command_text();
-                state.copy = !is_cvb_command(&state.command);
-
+            if let Some(state) = capture_state.take() {
                 capture_command_output(
                     &mut terminal,
                     &mut screen_terminal,
-                    rows,
-                    cols,
                     &state,
                 )?;
-
-                input_tracker.reset();
             }
 
             pending_end = false;
@@ -687,7 +475,6 @@ fn handle_control_message(
                 prompt,
                 command,
                 copy,
-                prompt_serial_at_start: 0,
             });
 
             *pending_end = false;
@@ -707,24 +494,7 @@ fn handle_control_message(
     Ok(())
 }
 
-fn is_cvb_command(command: &str) -> bool {
-    let command = command.trim_start();
-    command == "cvb" || command.starts_with("cvb ")
-}
-
 const CVB_SYNC_MARKER: &[u8] = b"\x1b]777;CVB;END\x07";
-
-fn consume_sync_marker(buffer: &mut Vec<u8>) -> bool {
-    if let Some(position) = buffer
-        .windows(CVB_SYNC_MARKER.len())
-        .position(|window| window == CVB_SYNC_MARKER)
-    {
-        buffer.drain(..position + CVB_SYNC_MARKER.len());
-        return true;
-    }
-
-    false
-}
 
 fn consume_sync_marker_stream(
     pending: &mut Vec<u8>,
@@ -758,8 +528,6 @@ fn consume_sync_marker_stream(
 fn capture_command_output(
     terminal: &mut vt100::Parser,
     screen_terminal: &mut vt100::Parser,
-    rows: u16,
-    cols: u16,
     state: &CaptureState,
 ) -> Result<(), String> {
     let alternate_screen = screen_terminal.screen().alternate_screen();
@@ -828,10 +596,9 @@ fn capture_command_output(
 
         writeln!(
             file,
-            "START cursor=({}, {}) prompt_serial_start={} end_cursor=({}, {}) command_len={} region_len={} output_len={} prefix={} prompt_len={} prompt_serial={} tail={:?}",
+            "START cursor=({}, {}) end_cursor=({}, {}) command_len={} region_len={} output_len={} prefix={} prompt_len={} tail={}",
             state.cursor_row,
             state.cursor_col,
-            state.prompt_serial_at_start,
             end_cursor.0,
             end_cursor.1,
             state.command.len(),
@@ -839,7 +606,6 @@ fn capture_command_output(
             output.len(),
             original_region.starts_with(&state.command),
             state.prompt.len(),
-            0u64,
             tail,
         )
         .map_err(|error| format!("CVB: unable to write capture debug log: {error}"))?;
@@ -1001,27 +767,6 @@ fn status_to_code(status: WaitStatus) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_cvb_command, update_prompt_marker, InputTracker, PROMPT_MARKER};
-
-    #[test]
-    fn sync_marker_is_detected_in_complete_buffer() {
-        let mut buffer = b"BEFORE\x1b]777;CVB;END\x07AFTER".to_vec();
-
-        assert!(super::consume_sync_marker(&mut buffer));
-        assert_eq!(buffer, b"AFTER");
-    }
-
-    #[test]
-    fn sync_marker_is_detected_when_split_across_reads() {
-        let marker = super::CVB_SYNC_MARKER;
-        let split = marker.len() / 2;
-
-        let mut buffer = marker[..split].to_vec();
-        buffer.extend_from_slice(&marker[split..]);
-
-        assert!(super::consume_sync_marker(&mut buffer));
-        assert!(buffer.is_empty());
-    }
 
     #[test]
     fn sync_marker_stream_is_detected_when_split_across_reads() {
@@ -1054,43 +799,4 @@ mod tests {
         assert!(pending.is_empty());
     }
 
-    #[test]
-    fn prompt_marker_is_detected_across_reads() {
-        let mut matcher = 0usize;
-        let mut serial = 0u64;
-
-        update_prompt_marker(&mut matcher, &mut serial, &PROMPT_MARKER[..5]);
-        update_prompt_marker(&mut matcher, &mut serial, &PROMPT_MARKER[5..]);
-
-        assert_eq!(serial, 1);
-    }
-
-    #[test]
-    fn input_tracker_starts_on_command_text() {
-        let mut tracker = InputTracker::new();
-        let terminal = vt100::Parser::new(4, 20, 0);
-
-        let start = tracker.feed(b"echo hello\r", &terminal);
-
-        assert_eq!(start, Some((0, 0, String::new())));
-        assert_eq!(tracker.command_text(), "echo hello");
-    }
-
-    #[test]
-    fn input_tracker_waits_for_history_recall_submission() {
-        let mut tracker = InputTracker::new();
-        let terminal = vt100::Parser::new(4, 20, 0);
-
-        let start = tracker.feed(b"\x1b[A\r", &terminal);
-
-        assert_eq!(start, Some((0, 0, String::new())));
-        assert_eq!(tracker.command_text(), "");
-    }
-
-    #[test]
-    fn recognizes_cvb_commands() {
-        assert!(is_cvb_command("cvb"));
-        assert!(is_cvb_command("  cvb file"));
-        assert!(!is_cvb_command("cvbench"));
-    }
 }
