@@ -242,9 +242,6 @@ fn install_control_fd(control: OwnedFd) -> Result<(), String> {
 }
 
 struct CaptureState {
-    cursor_row: u16,
-    cursor_col: u16,
-    prompt: String,
     command: String,
     copy: bool,
 }
@@ -427,7 +424,6 @@ fn proxy(
                     message,
                     &mut capture_state,
                     &mut end_seen,
-                    &terminal,
                 )?;
             }
         }
@@ -453,7 +449,6 @@ fn handle_control_message(
     message: ControlMessage,
     capture_state: &mut Option<CaptureState>,
     end_seen: &mut bool,
-    terminal: &vt100::Parser,
 ) -> Result<(), String> {
     match message {
         ControlMessage::Start {
@@ -461,20 +456,7 @@ fn handle_control_message(
             copy,
             ..
         } => {
-            let screen = terminal.screen();
-            let (cursor_row, cursor_col) = screen.cursor_position();
-
-            let prompt = screen.contents_between(
-                cursor_row,
-                0,
-                cursor_row,
-                cursor_col,
-            );
-
             *capture_state = Some(CaptureState {
-                cursor_row,
-                cursor_col,
-                prompt,
                 command,
                 copy,
             });
