@@ -367,6 +367,7 @@ impl InputTracker {
 
                 let (row, col) = terminal.screen().cursor_position();
                 let prompt = terminal.screen().contents_between(row, 0, row, col);
+                eprintln!("CVB DEBUG input cursor=({}, {}) prompt={:?}", row, col, prompt);
 
                 self.active = true;
                 self.command_exact = true;
@@ -455,6 +456,7 @@ fn proxy(
     let mut prompt_matcher = 0usize;
     let mut prompt_serial = 0u64;
     let mut loop_iteration = 0u64;
+    let mut sync_marker_pending: Vec<u8> = Vec::new();
 
     loop {
         loop_iteration += 1;
@@ -573,15 +575,22 @@ fn proxy(
                 break;
             }
 
-            update_prompt_marker(&mut prompt_matcher, &mut prompt_serial, &buffer[..count]);
+            let (output, marker_seen) =
+                consume_sync_marker_stream(&mut sync_marker_pending, &buffer[..count]);
 
-            terminal.process(&buffer[..count]);
-            screen_terminal.process(&buffer[..count]);
+            if marker_seen && capture_state.is_some() {
+                pending_end = true;
+            }
+
+            update_prompt_marker(&mut prompt_matcher, &mut prompt_serial, &output);
+
+            terminal.process(&output);
+            screen_terminal.process(&output);
 
             let mut stdout = stdout.lock();
 
             stdout
-                .write_all(&buffer[..count])
+                .write_all(&output)
                 .map_err(|error| format!("CVB: stdout write failed: {error}"))?;
 
             stdout
@@ -622,33 +631,28 @@ fn proxy(
                     message,
                     &mut capture_state,
                     &mut pending_end,
+                    &terminal,
                 )?;
             }
         }
 
         if pending_end {
-            let ready = capture_state
-                .as_ref()
-                .is_some_and(|state| prompt_serial > state.prompt_serial_at_start);
+            if let Some(mut state) = capture_state.take() {
+                state.command = input_tracker.command_text();
+                state.copy = !is_cvb_command(&state.command);
 
-            if ready {
-                if let Some(mut state) = capture_state.take() {
-                    state.command = input_tracker.command_text();
-                    state.copy = !is_cvb_command(&state.command);
+                capture_command_output(
+                    &mut terminal,
+                    &mut screen_terminal,
+                    rows,
+                    cols,
+                    &state,
+                )?;
 
-                    capture_command_output(
-                        &mut terminal,
-                        &mut screen_terminal,
-                        rows,
-                        cols,
-                        &state,
-                    )?;
-
-                    input_tracker.reset();
-                }
-
-                pending_end = false;
+                input_tracker.reset();
             }
+
+            pending_end = false;
         }
     }
 
@@ -659,9 +663,35 @@ fn handle_control_message(
     message: ControlMessage,
     capture_state: &mut Option<CaptureState>,
     pending_end: &mut bool,
+    terminal: &vt100::Parser,
 ) -> Result<(), String> {
     match message {
-        ControlMessage::Start { .. } => {}
+        ControlMessage::Start {
+            command,
+            copy,
+            ..
+        } => {
+            let screen = terminal.screen();
+            let (cursor_row, cursor_col) = screen.cursor_position();
+
+            let prompt = screen.contents_between(
+                cursor_row,
+                0,
+                cursor_row,
+                cursor_col,
+            );
+
+            *capture_state = Some(CaptureState {
+                cursor_row,
+                cursor_col,
+                prompt,
+                command,
+                copy,
+                prompt_serial_at_start: 0,
+            });
+
+            *pending_end = false;
+        }
 
         ControlMessage::End { .. } => {
             if capture_state.is_some() {
@@ -680,6 +710,49 @@ fn handle_control_message(
 fn is_cvb_command(command: &str) -> bool {
     let command = command.trim_start();
     command == "cvb" || command.starts_with("cvb ")
+}
+
+const CVB_SYNC_MARKER: &[u8] = b"\x1b]777;CVB;END\x07";
+
+fn consume_sync_marker(buffer: &mut Vec<u8>) -> bool {
+    if let Some(position) = buffer
+        .windows(CVB_SYNC_MARKER.len())
+        .position(|window| window == CVB_SYNC_MARKER)
+    {
+        buffer.drain(..position + CVB_SYNC_MARKER.len());
+        return true;
+    }
+
+    false
+}
+
+fn consume_sync_marker_stream(
+    pending: &mut Vec<u8>,
+    input: &[u8],
+) -> (Vec<u8>, bool) {
+    let mut output = Vec::new();
+    let mut marker_seen = false;
+
+    for &byte in input {
+        pending.push(byte);
+
+        while !pending.is_empty() {
+            if pending.len() <= CVB_SYNC_MARKER.len()
+                && CVB_SYNC_MARKER.starts_with(pending)
+            {
+                break;
+            }
+
+            if pending.starts_with(CVB_SYNC_MARKER) {
+                pending.drain(..CVB_SYNC_MARKER.len());
+                marker_seen = true;
+            } else {
+                output.push(pending.remove(0));
+            }
+        }
+    }
+
+    (output, marker_seen)
 }
 
 fn capture_command_output(
@@ -706,6 +779,8 @@ fn capture_command_output(
         return Ok(());
     }
 
+    terminal.screen_mut().set_scrollback(usize::MAX);
+
     let end_cursor = terminal.screen().cursor_position();
 
     let original_region = terminal.screen().contents_between(
@@ -714,6 +789,8 @@ fn capture_command_output(
         end_cursor.0,
         end_cursor.1,
     );
+
+    terminal.screen_mut().set_scrollback(0);
 
     let region = original_region
         .strip_suffix(&state.prompt)
@@ -747,6 +824,8 @@ fn capture_command_output(
             .rev()
             .collect::<String>();
 
+        eprintln!("CVB DEBUG prompt={:?} tail={:?}", state.prompt, tail);
+
         writeln!(
             file,
             "START cursor=({}, {}) prompt_serial_start={} end_cursor=({}, {}) command_len={} region_len={} output_len={} prefix={} prompt_len={} prompt_serial={} tail={:?}",
@@ -775,8 +854,6 @@ fn capture_command_output(
     if state.copy {
         copy_to_clipboard(&processed)?;
     }
-
-    *terminal = vt100::Parser::new(rows, cols, 1000);
 
     Ok(())
 }
@@ -925,6 +1002,57 @@ fn status_to_code(status: WaitStatus) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{is_cvb_command, update_prompt_marker, InputTracker, PROMPT_MARKER};
+
+    #[test]
+    fn sync_marker_is_detected_in_complete_buffer() {
+        let mut buffer = b"BEFORE\x1b]777;CVB;END\x07AFTER".to_vec();
+
+        assert!(super::consume_sync_marker(&mut buffer));
+        assert_eq!(buffer, b"AFTER");
+    }
+
+    #[test]
+    fn sync_marker_is_detected_when_split_across_reads() {
+        let marker = super::CVB_SYNC_MARKER;
+        let split = marker.len() / 2;
+
+        let mut buffer = marker[..split].to_vec();
+        buffer.extend_from_slice(&marker[split..]);
+
+        assert!(super::consume_sync_marker(&mut buffer));
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn sync_marker_stream_is_detected_when_split_across_reads() {
+        let marker = super::CVB_SYNC_MARKER;
+        let split = marker.len() / 2;
+        let mut pending = Vec::new();
+
+        let (output, seen) =
+            super::consume_sync_marker_stream(&mut pending, b"BEFORE");
+
+        assert_eq!(output, b"BEFORE");
+        assert!(!seen);
+        assert!(pending.is_empty());
+
+        let (output, seen) =
+            super::consume_sync_marker_stream(&mut pending, &marker[..split]);
+
+        assert!(output.is_empty());
+        assert!(!seen);
+        assert_eq!(pending, &marker[..split]);
+
+        let mut second = marker[split..].to_vec();
+        second.extend_from_slice(b"AFTER");
+
+        let (output, seen) =
+            super::consume_sync_marker_stream(&mut pending, &second);
+
+        assert_eq!(output, b"AFTER");
+        assert!(seen);
+        assert!(pending.is_empty());
+    }
 
     #[test]
     fn prompt_marker_is_detected_across_reads() {

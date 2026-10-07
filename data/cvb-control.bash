@@ -52,6 +52,8 @@ cvb_control_end() {
     cvb_control_write_byte 02
     cvb_control_write_u64 "$(printf '%016x' "$CVB_COMMAND_ID")"
     cvb_control_write_u32 "$(printf '%08x' "$status")"
+
+    printf '\e]777;CVB;END\a'
 }
 
 cvb_control_exit() {
