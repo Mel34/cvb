@@ -67,6 +67,15 @@ cvb() {
             # Flush the parent's pending history first. Entries loaded with
             # `history -r` are not counted among Bash's pending entries.
             history -a
+
+            # Bash writes the final `exit` command directly to HISTFILE when
+            # the child terminates, so it never passes through PROMPT_COMMAND.
+            # It is CVB control flow, not session history.
+            if [[ $(tail -n 1 "$history_file") == exit ]]; then
+                sed '$d' "$history_file" >"$history_file.tmp" &&
+                    mv "$history_file.tmp" "$history_file"
+            fi
+
             history -r "$history_file"
 
             # Bash does not write `history -r` entries to HISTFILE on exit.

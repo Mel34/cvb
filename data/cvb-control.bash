@@ -18,16 +18,12 @@ CVB_SAVED_PROMPT_IS_ARRAY=0
 # History stays disabled during all initialization because Bash records later
 # lines of a sourced rcfile once `set -o history` is enabled.
 cvb_control_history_start() {
-    trap - DEBUG
-
     HISTFILE=$CVB_HISTORY_FILE
     history -c
     history -r "$CVB_PARENT_HISTORY_FILE"
-    printf 'DEBUG: history immediately after history -r:\n' >&2
-    history >&2
     set -o history
 
-    trap cvb_control_debug DEBUG
+    CVB_LAST_HISTCMD=$HISTCMD
 }
 
 cvb_control_write_byte() {
@@ -75,37 +71,6 @@ cvb_control_start() {
     printf '%s' "$command" >&"$CVB_CONTROL_FD"
 }
 
-cvb_control_debug() {
-    local command
-    command=$(history 1)
-    command=${command#*[0-9]  }
-    command=${command#*  }
-    local copy=1
-
-    [[ ${BASH_COMMAND} == cvb_control_* ]] && return
-    [[ -n ${BASH_COMMAND} ]] || return
-
-    normalized_command="${command#"${command%%[![:space:]]*}"}"
-
-    [[ -n $normalized_command ]] || return
-
-    if [[ $normalized_command == exit || $normalized_command == exit[[:space:]]* ]]; then
-        history -d "$HISTCMD"
-        set +o history
-        return
-    fi
-    [[ $normalized_command == cvb || $normalized_command == cvb[[:space:]]* ]] && return
-
-    [[ $command == [[:space:]]* ]] && copy=0
-
-    printf 'DEBUG: HISTCMD=%s LAST=%s BASH_COMMAND=%q command=%q\n' \
-        "$HISTCMD" "$CVB_LAST_HISTCMD" "$BASH_COMMAND" "$command" >&2
-
-    CVB_LAST_HISTCMD=$HISTCMD
-
-    cvb_control_start "$command" "$copy"
-}
-
 cvb_control_end() {
     local status=$1
 
@@ -119,6 +84,7 @@ cvb_control_end() {
 
 cvb_control_exit() {
     CVB_EXITING=1
+    history -d "$HISTCMD"
     set +o history
 
     cvb_control_write_u32 00000001
@@ -127,6 +93,8 @@ cvb_control_exit() {
 
 cvb_control_prompt() {
     local status=$?
+    local command
+    local copy=1
 
     if ((CVB_EXITING)); then
         return
@@ -134,8 +102,19 @@ cvb_control_prompt() {
 
     history -a
 
+    if ((HISTCMD != CVB_LAST_HISTCMD)); then
+        command=$(fc -ln -1)
+
+        if [[ $command != exit && $command != exit[[:space:]]* ]]; then
+            CVB_LAST_HISTCMD=$HISTCMD
+
+            [[ $command == [[:space:]]* ]] && copy=0
+
+            cvb_control_start "$command" "$copy"
+        fi
+    fi
+
     if ((CVB_SAVED_PROMPT_IS_ARRAY)); then
-        local command
         for command in "${CVB_SAVED_PROMPT_COMMAND[@]}"; do
             eval "$command"
         done
