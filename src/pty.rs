@@ -23,8 +23,9 @@ ioctl_write_ptr_bad!(tiocswinsz, libc::TIOCSWINSZ, Winsize);
 const CONTROL_FD: i32 = 3;
 const NO_OUTPUT: &str = "[NO_VISIBLE_OUTPUT]";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Marker {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MarkerEvent {
+    Data(Vec<u8>),
     Start,
     End(i32),
 }
@@ -32,7 +33,6 @@ enum Marker {
 struct MarkerScanner {
     start: Vec<u8>,
     end_prefix: Vec<u8>,
-    key: Vec<u8>,
     pending: Vec<u8>,
 }
 
@@ -41,14 +41,12 @@ impl MarkerScanner {
         Self {
             start: format!("\x1b]777;CVB;START;{key}\x07").into_bytes(),
             end_prefix: format!("\x1b]777;CVB;END;{key};").into_bytes(),
-            key: key.as_bytes().to_vec(),
             pending: Vec::new(),
         }
     }
 
-    fn process(&mut self, input: &[u8]) -> (Vec<u8>, Vec<Marker>) {
-        let mut output = Vec::new();
-        let mut markers = Vec::new();
+    fn process(&mut self, input: &[u8]) -> Vec<MarkerEvent> {
+        let mut events = Vec::new();
 
         self.pending.extend_from_slice(input);
 
@@ -72,17 +70,23 @@ impl MarkerScanner {
 
                 if self.pending.len() > keep {
                     let split = self.pending.len() - keep;
-                    output.extend(self.pending.drain(..split));
+                    events.push(MarkerEvent::Data(
+                        self.pending.drain(..split).collect(),
+                    ));
                 }
 
                 break;
             };
 
-            output.extend(self.pending.drain(..position));
+            if position > 0 {
+                events.push(MarkerEvent::Data(
+                    self.pending.drain(..position).collect(),
+                ));
+            }
 
             if is_start {
                 self.pending.drain(..self.start.len());
-                markers.push(Marker::Start);
+                events.push(MarkerEvent::Start);
                 continue;
             }
 
@@ -90,7 +94,8 @@ impl MarkerScanner {
                 break;
             };
 
-            let status_bytes = &self.pending[self.end_prefix.len()..self.end_prefix.len() + end];
+            let status_bytes =
+                &self.pending[self.end_prefix.len()..self.end_prefix.len() + end];
 
             let status = match std::str::from_utf8(status_bytes)
                 .ok()
@@ -98,17 +103,17 @@ impl MarkerScanner {
             {
                 Some(status) => status,
                 None => {
-                    output.push(self.pending.remove(0));
+                    events.push(MarkerEvent::Data(vec![self.pending.remove(0)]));
                     continue;
                 }
             };
 
             let marker_len = self.end_prefix.len() + end + 1;
             self.pending.drain(..marker_len);
-            markers.push(Marker::End(status));
+            events.push(MarkerEvent::End(status));
         }
 
-        (output, markers)
+        events
     }
 
     fn finish(&mut self) -> Vec<u8> {
@@ -482,43 +487,67 @@ fn proxy(
                 break;
             }
 
-            let (output, markers) =
-                marker_scanner.process(&buffer[..count]);
-
-            for marker in &markers {
-                {
-                    use std::fs::OpenOptions;
-
-                    let mut file = OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open("/tmp/cvb-capture-debug.log")
-                        .map_err(|error| {
-                            format!("CVB: unable to open capture debug log: {error}")
-                        })?;
-
-                    writeln!(file, "INBAND marker={marker:?}")
-                        .map_err(|error| {
-                            format!("CVB: unable to write capture debug log: {error}")
-                        })?;
-                }
-            }
-
-            let (output, marker_seen) =
-                consume_sync_marker_stream(&mut sync_marker_pending, &output);
-
-            if marker_seen {
-                marker_seen_pending = true;
-            }
-
-            terminal.process(&output);
-            screen_terminal.process(&output);
+            let events = marker_scanner.process(&buffer[..count]);
 
             let mut stdout = stdout.lock();
 
-            stdout
-                .write_all(&output)
-                .map_err(|error| format!("CVB: stdout write failed: {error}"))?;
+            for event in events {
+                match event {
+                    MarkerEvent::Data(output) => {
+                        let (output, marker_seen) =
+                            consume_sync_marker_stream(&mut sync_marker_pending, &output);
+
+                        if marker_seen {
+                            marker_seen_pending = true;
+                        }
+
+                        terminal.process(&output);
+                        screen_terminal.process(&output);
+
+                        stdout
+                            .write_all(&output)
+                            .map_err(|error| format!("CVB: stdout write failed: {error}"))?;
+                    }
+
+                    MarkerEvent::Start => {
+                        {
+                            use std::fs::OpenOptions;
+
+                            let mut file = OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open("/tmp/cvb-capture-debug.log")
+                                .map_err(|error| {
+                                    format!("CVB: unable to open capture debug log: {error}")
+                                })?;
+
+                            writeln!(file, "INBAND marker=Start")
+                                .map_err(|error| {
+                                    format!("CVB: unable to write capture debug log: {error}")
+                                })?;
+                        }
+                    }
+
+                    MarkerEvent::End(status) => {
+                        {
+                            use std::fs::OpenOptions;
+
+                            let mut file = OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open("/tmp/cvb-capture-debug.log")
+                                .map_err(|error| {
+                                    format!("CVB: unable to open capture debug log: {error}")
+                                })?;
+
+                            writeln!(file, "INBAND marker=End({status})")
+                                .map_err(|error| {
+                                    format!("CVB: unable to write capture debug log: {error}")
+                                })?;
+                        }
+                    }
+                }
+            }
 
             stdout
                 .flush()
