@@ -269,7 +269,8 @@ fn proxy(
     let mut keyboard = HotkeyMonitor::new(bindings)?;
     let keybind_watcher = KeybindWatcher::new()?;
     let mut capture_state: Option<CaptureState> = None;
-    let mut pending_end = false;
+    let mut end_seen = false;
+    let mut marker_seen_pending = false;
     let mut loop_iteration = 0u64;
     let mut sync_marker_pending: Vec<u8> = Vec::new();
 
@@ -376,10 +377,9 @@ fn proxy(
             let (output, marker_seen) =
                 consume_sync_marker_stream(&mut sync_marker_pending, &buffer[..count]);
 
-            if marker_seen && capture_state.is_some() {
-                pending_end = true;
+            if marker_seen {
+                marker_seen_pending = true;
             }
-
 
             terminal.process(&output);
             screen_terminal.process(&output);
@@ -426,13 +426,13 @@ fn proxy(
                 handle_control_message(
                     message,
                     &mut capture_state,
-                    &mut pending_end,
+                    &mut end_seen,
                     &terminal,
                 )?;
             }
         }
 
-        if pending_end {
+        if end_seen && marker_seen_pending {
             if let Some(state) = capture_state.take() {
                 capture_command_output(
                     &mut terminal,
@@ -441,7 +441,8 @@ fn proxy(
                 )?;
             }
 
-            pending_end = false;
+            end_seen = false;
+            marker_seen_pending = false;
         }
     }
 
@@ -451,7 +452,7 @@ fn proxy(
 fn handle_control_message(
     message: ControlMessage,
     capture_state: &mut Option<CaptureState>,
-    pending_end: &mut bool,
+    end_seen: &mut bool,
     terminal: &vt100::Parser,
 ) -> Result<(), String> {
     match message {
@@ -478,12 +479,12 @@ fn handle_control_message(
                 copy,
             });
 
-            *pending_end = false;
+            *end_seen = false;
         }
 
         ControlMessage::End { .. } => {
             if capture_state.is_some() {
-                *pending_end = true;
+                *end_seen = true;
             }
         }
 
