@@ -12,8 +12,6 @@ cvb() {
         local previous_cvb_active=${CVB_ACTIVE+x}
         local previous_cvb_active_value=${CVB_ACTIVE-}
         local previous_cvb_history_file=${CVB_HISTORY_FILE-}
-        local previous_cvb_marker_key=${CVB_MARKER_KEY+x}
-        local previous_cvb_marker_key_value=${CVB_MARKER_KEY-}
 
         mkdir -p "$runtime_dir" || return 1
 
@@ -61,7 +59,6 @@ cvb() {
         export CVB_ACTIVE=1
         export CVB_HISTORY_FILE="$history_file"
         export CVB_PARENT_HISTORY_FILE="$parent_history_file"
-        export CVB_MARKER_KEY=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
 
         CVB_INIT_FILE="$init_file" command cvb "$@"
         local status=$?
@@ -70,15 +67,6 @@ cvb() {
             # Flush the parent's pending history first. Entries loaded with
             # `history -r` are not counted among Bash's pending entries.
             history -a
-
-            # Bash writes the final `exit` command directly to HISTFILE when
-            # the child terminates, so it never passes through PROMPT_COMMAND.
-            # It is CVB control flow, not session history.
-            if [[ $(tail -n 1 "$history_file") == exit ]]; then
-                sed '$d' "$history_file" >"$history_file.tmp" &&
-                    mv "$history_file.tmp" "$history_file"
-            fi
-
             history -r "$history_file"
 
             # Bash does not write `history -r` entries to HISTFILE on exit.
@@ -103,12 +91,6 @@ cvb() {
             export CVB_HISTORY_FILE="$previous_cvb_history_file"
         else
             unset CVB_HISTORY_FILE
-        fi
-
-        if [[ -n $previous_cvb_marker_key ]]; then
-            export CVB_MARKER_KEY="$previous_cvb_marker_key_value"
-        else
-            unset CVB_MARKER_KEY
         fi
 
         return "$status"
