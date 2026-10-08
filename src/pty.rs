@@ -2,7 +2,6 @@ use std::ffi::CString;
 use std::io::{self, Write};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::path::Path;
-use std::num::NonZeroU16;
 
 use nix::ioctl_read_bad;
 use nix::ioctl_write_ptr_bad;
@@ -349,19 +348,21 @@ fn proxy(
     let mut buffer = [0u8; 8192];
     let mut signal_buffer = [0u8; 64];
     let mut terminal = vt100::Parser::new(
-        NonZeroU16::new(rows).unwrap(),
-        NonZeroU16::new(cols).unwrap(),
+        rows,
+        cols,
         1000,
     );
     let mut screen_terminal = vt100::Parser::new(
-        NonZeroU16::new(rows).unwrap(),
-        NonZeroU16::new(cols).unwrap(),
+        rows,
+        cols,
         1000,
     );
     let bindings = keybind::load()?;
     let mut keyboard = HotkeyMonitor::new(bindings)?;
     let keybind_watcher = KeybindWatcher::new()?;
     let mut marker_scanner = MarkerScanner::new();
+    let mut capturing = false;
+    let mut captured = Vec::new();
 
     loop {
 
@@ -426,12 +427,12 @@ fn proxy(
 
             let winsize = resize_pty(master, child)?;
             terminal.screen_mut().set_size(
-                NonZeroU16::new(winsize.ws_row).unwrap(),
-                NonZeroU16::new(winsize.ws_col).unwrap(),
+                winsize.ws_row,
+                winsize.ws_col,
             );
             screen_terminal.screen_mut().set_size(
-                NonZeroU16::new(winsize.ws_row).unwrap(),
-                NonZeroU16::new(winsize.ws_col).unwrap(),
+                winsize.ws_row,
+                winsize.ws_col,
             );
         }
 
@@ -474,7 +475,6 @@ fn proxy(
 
             let output = &buffer[..count];
 
-            terminal.process(output);
             screen_terminal.process(output);
 
             let mut stdout = stdout.lock();
@@ -487,11 +487,26 @@ fn proxy(
 
             for event in events {
                 match event {
-                    MarkerEvent::Data(_output) => {}
+                    MarkerEvent::Data(output) => {
+                        if capturing {
+                            terminal.process(&output);
+                            captured.extend_from_slice(&output);
+                        }
+                    }
 
-                    MarkerEvent::Start => {}
+                    MarkerEvent::Start => {
+                        capturing = true;
+                        captured.clear();
+                        terminal = vt100::Parser::new(rows, cols, 1000);
+                    }
 
-                    MarkerEvent::End(_status) => {}
+                    MarkerEvent::End(_status) => {
+                        capturing = false;
+
+                        let text = screen_to_text(&mut terminal);
+                        copy_to_clipboard(&text)?;
+                        captured.clear();
+                    }
                 }
             }
 
@@ -557,7 +572,7 @@ fn capture_screen(terminal: &mut vt100::Parser) -> Result<(), String> {
 }
 
 fn copy_to_clipboard(text: &str) -> Result<(), String> {
-    let mut clipboard = std::process::Command::new("wl-copy")
+    let mut clipboard = std::process::Command::new("wl-copy").arg("--type").arg("text/plain")
         .stdin(std::process::Stdio::piped())
         .spawn()
         .map_err(|error| format!("CVB: unable to start wl-copy: {error}"))?;
@@ -591,14 +606,14 @@ fn screen_to_text(terminal: &mut vt100::Parser) -> String {
     for offset in (1..=max_scrollback).rev() {
         terminal.screen_mut().set_scrollback(offset);
 
-        if let Some(row) = terminal.screen().rows(0, cols.get()).next() {
+        if let Some(row) = terminal.screen().rows(0, cols).next() {
             output.push(row);
         }
     }
 
     terminal.screen_mut().set_scrollback(0);
 
-    for row in terminal.screen().rows(0, cols.get()) {
+    for row in terminal.screen().rows(0, cols) {
         output.push(row);
     }
 
