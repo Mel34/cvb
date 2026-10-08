@@ -358,15 +358,12 @@ fn proxy(
         NonZeroU16::new(cols).unwrap(),
         1000,
     );
-    let mut capture_terminal: Option<vt100::Parser> = None;
     let bindings = keybind::load()?;
     let mut keyboard = HotkeyMonitor::new(bindings)?;
     let keybind_watcher = KeybindWatcher::new()?;
-    let mut loop_iteration = 0u64;
     let mut marker_scanner = MarkerScanner::new();
 
     loop {
-        loop_iteration += 1;
 
         let keyboard_fd =
             unsafe { std::os::fd::BorrowedFd::borrow_raw(keyboard.fd()) };
@@ -490,82 +487,11 @@ fn proxy(
 
             for event in events {
                 match event {
-                    MarkerEvent::Data(output) => {
-                        if let Some(capture_terminal) = capture_terminal.as_mut() {
-                            capture_terminal.process(&output);
-                        }
-                    }
+                    MarkerEvent::Data(_output) => {}
 
-                    MarkerEvent::Start => {
-                        capture_terminal = Some(vt100::Parser::new(
-                            NonZeroU16::new(rows).unwrap(),
-                            NonZeroU16::new(cols).unwrap(),
-                            1000,
-                        ));
+                    MarkerEvent::Start => {}
 
-                        {
-                            use std::fs::OpenOptions;
-
-                            let mut file = OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open("/tmp/cvb-capture-debug.log")
-                                .map_err(|error| {
-                                    format!("CVB: unable to open capture debug log: {error}")
-                                })?;
-
-                            writeln!(file, "INBAND marker=Start")
-                                .map_err(|error| {
-                                    format!("CVB: unable to write capture debug log: {error}")
-                                })?;
-                        }
-                    }
-
-                    MarkerEvent::End(status) => {
-                        if let Some(capture_terminal) = capture_terminal.as_ref() {
-                            let captured = capture_terminal.screen().contents();
-
-                            {
-                                use std::fs::OpenOptions;
-
-                                let mut file = OpenOptions::new()
-                                    .create(true)
-                                    .append(true)
-                                    .open("/tmp/cvb-capture-debug.log")
-                                    .map_err(|error| {
-                                        format!("CVB: unable to open capture debug log: {error}")
-                                    })?;
-
-                                writeln!(
-                                    file,
-                                    "CAPTURE DEBUG: status={} contents_len={} contents={:?}",
-                                    status,
-                                    captured.len(),
-                                    captured
-                                )
-                                .map_err(|error| {
-                                    format!("CVB: unable to write capture debug log: {error}")
-                                })?;
-                            }
-                        }
-
-                        {
-                            use std::fs::OpenOptions;
-
-                            let mut file = OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open("/tmp/cvb-capture-debug.log")
-                                .map_err(|error| {
-                                    format!("CVB: unable to open capture debug log: {error}")
-                                })?;
-
-                            writeln!(file, "INBAND marker=End({status})")
-                                .map_err(|error| {
-                                    format!("CVB: unable to write capture debug log: {error}")
-                                })?;
-                        }
-                    }
+                    MarkerEvent::End(_status) => {}
                 }
             }
 
@@ -573,27 +499,6 @@ fn proxy(
                 .flush()
                 .map_err(|error| format!("CVB: stdout flush failed: {error}"))?;
 
-            {
-                use std::fs::OpenOptions;
-
-                let mut file = OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("/tmp/cvb-capture-debug.log")
-                    .map_err(|error| format!("CVB: unable to open capture debug log: {error}"))?;
-
-                let cursor = terminal.screen().cursor_position();
-
-                writeln!(
-                    file,
-                    "MASTER iteration={} bytes={} cursor=({}, {})",
-                    loop_iteration,
-                    count,
-                    cursor.0,
-                    cursor.1,
-                )
-                .map_err(|error| format!("CVB: unable to write capture debug log: {error}"))?;
-            }
         }
 
         if control_events.intersects(
@@ -636,29 +541,7 @@ fn handle_control_message(message: ControlMessage) -> Result<(), String> {
 fn capture_screen(terminal: &mut vt100::Parser) -> Result<(), String> {
     terminal.screen_mut().set_scrollback(usize::MAX);
 
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/cvb-capture-debug.log")
-        .ok()
-        .and_then(|mut file| {
-            writeln!(
-                file,
-                "SCREEN DEBUG: scrollback={} contents_len={}",
-                terminal.screen().scrollback(),
-                terminal.screen().contents().len()
-            )
-            .ok()
-        });
-
     terminal.screen_mut().set_scrollback(0);
-
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/cvb-capture-debug.log")
-        .ok()
-        .and_then(|mut file| writeln!(file, "SCREEN CAPTURE ENTERED").ok());
 
     let text = screen_to_text(terminal);
 
