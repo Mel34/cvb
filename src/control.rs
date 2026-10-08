@@ -13,7 +13,7 @@ const TARGET_RESPONSE: u8 = 0x05;
 pub enum ControlMessage {
     Exit,
     TargetRequest { id: u64, args: Vec<String> },
-    TargetResponse { id: u64, status: i32 },
+    TargetResponse { id: u64, status: i32, message: String },
 }
 
 pub struct ControlChannel {
@@ -31,6 +31,30 @@ impl ControlChannel {
 
     pub fn fd(&self) -> &OwnedFd {
         &self.fd
+    }
+
+    pub fn send(&self, message: &ControlMessage) -> Result<(), String> {
+        let payload = encode(message)?;
+        let length = (payload.len() as u32).to_be_bytes();
+
+        let mut frame = Vec::with_capacity(HEADER_SIZE + payload.len());
+        frame.extend_from_slice(&length);
+        frame.extend_from_slice(&payload);
+
+        let mut written = 0;
+
+        while written < frame.len() {
+            let count = nix::unistd::write(self.fd.as_fd(), &frame[written..])
+                .map_err(|error| format!("CVB: unable to send control message: {error}"))?;
+
+            if count == 0 {
+                return Err("CVB: control message write returned zero bytes".to_string());
+            }
+
+            written += count;
+        }
+
+        Ok(())
     }
 
     pub fn receive(&mut self) -> Result<Vec<ControlMessage>, String> {
@@ -59,9 +83,56 @@ impl ControlChannel {
 
         decode_frames(&mut self.receive_buffer)
     }
+
+    pub fn receive_one(&mut self) -> Result<ControlMessage, String> {
+        loop {
+            if self.receive_buffer.len() >= HEADER_SIZE {
+                let length = u32::from_be_bytes(
+                    self.receive_buffer[..HEADER_SIZE]
+                        .try_into()
+                        .map_err(|_| "CVB: invalid control message header".to_string())?,
+                ) as usize;
+
+                if length > MAX_FRAME_SIZE {
+                    return Err("CVB: control message exceeds maximum frame size".to_string());
+                }
+
+                let frame_size = HEADER_SIZE + length;
+
+                if self.receive_buffer.len() >= frame_size {
+                    let payload = self.receive_buffer[HEADER_SIZE..frame_size].to_vec();
+                    self.receive_buffer.drain(..frame_size);
+
+                    return decode(&payload);
+                }
+            }
+
+            let mut buffer = [0u8; 4096];
+
+            match read(self.fd.as_fd(), &mut buffer) {
+                Ok(0) => {
+                    return Err("CVB: control channel closed while waiting for response".to_string());
+                }
+                Ok(count) => {
+                    self.receive_buffer.extend_from_slice(&buffer[..count]);
+
+                    if self.receive_buffer.len() > HEADER_SIZE + MAX_FRAME_SIZE {
+                        return Err(
+                            "CVB: control message exceeds maximum frame size".to_string()
+                        );
+                    }
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "CVB: unable to receive control message: {error}"
+                    ));
+                }
+            }
+        }
+    }
+
 }
 
-#[cfg(test)]
 fn encode(message: &ControlMessage) -> Result<Vec<u8>, String> {
     let mut payload = Vec::new();
 
@@ -82,10 +153,18 @@ fn encode(message: &ControlMessage) -> Result<Vec<u8>, String> {
             }
         }
 
-        ControlMessage::TargetResponse { id, status } => {
+        ControlMessage::TargetResponse {
+            id,
+            status,
+            message,
+        } => {
             payload.push(TARGET_RESPONSE);
             payload.extend_from_slice(&id.to_be_bytes());
             payload.extend_from_slice(&status.to_be_bytes());
+
+            let message = message.as_bytes();
+            payload.extend_from_slice(&(message.len() as u32).to_be_bytes());
+            payload.extend_from_slice(message);
         }
     }
 
@@ -189,7 +268,7 @@ fn decode(payload: &[u8]) -> Result<ControlMessage, String> {
         }
 
         TARGET_RESPONSE => {
-            if payload.len() != 13 {
+            if payload.len() < 17 {
                 return Err("CVB: malformed TARGET_RESPONSE message".to_string());
             }
 
@@ -205,7 +284,25 @@ fn decode(payload: &[u8]) -> Result<ControlMessage, String> {
                     .map_err(|_| "CVB: malformed TARGET_RESPONSE message".to_string())?,
             );
 
-            Ok(ControlMessage::TargetResponse { id, status })
+            let message_length = u32::from_be_bytes(
+                payload[13..17]
+                    .try_into()
+                    .map_err(|_| "CVB: malformed TARGET_RESPONSE message".to_string())?,
+            ) as usize;
+
+            if payload.len() != 17 + message_length {
+                return Err("CVB: malformed TARGET_RESPONSE message".to_string());
+            }
+
+            let message = std::str::from_utf8(&payload[17..])
+                .map_err(|_| "CVB: TARGET_RESPONSE message is not valid UTF-8".to_string())?
+                .to_string();
+
+            Ok(ControlMessage::TargetResponse {
+                id,
+                status,
+                message,
+            })
         }
 
         _ => Err(format!(
@@ -248,6 +345,7 @@ mod tests {
         let message = ControlMessage::TargetResponse {
             id: 42,
             status: 17,
+            message: "hello".to_string(),
         };
 
         let payload = encode(&message).unwrap();

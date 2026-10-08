@@ -357,6 +357,7 @@ fn proxy(
     let keybind_watcher = KeybindWatcher::new()?;
     let mut marker_scanner = MarkerScanner::new();
     let mut capturing = false;
+    let mut capture_suppression_depth = 0;
     let mut captured = Vec::new();
 
     loop {
@@ -485,11 +486,24 @@ fn proxy(
                     }
 
                     MarkerEvent::Start => {
-                        capturing = true;
-                        captured.clear();
+                        if capture_suppression_depth > 0 {
+                            capture_suppression_depth += 1;
+                            capturing = false;
+                            captured.clear();
+                        } else {
+                            capturing = true;
+                            captured.clear();
+                        }
                     }
 
                     MarkerEvent::End(_status) => {
+                        if capture_suppression_depth > 0 {
+                            capture_suppression_depth -= 1;
+                            capturing = false;
+                            captured.clear();
+                            continue;
+                        }
+
                         capturing = false;
 
                         let scrollback = captured.len();
@@ -515,7 +529,7 @@ fn proxy(
                 | nix::poll::PollFlags::POLLERR,
         ) {
             for message in control.receive()? {
-                handle_control_message(message)?;
+                handle_control_message(message, control, &mut capture_suppression_depth)?;
             }
         }
     }
@@ -537,10 +551,35 @@ fn proxy(
     Ok(())
 }
 
-fn handle_control_message(message: ControlMessage) -> Result<(), String> {
+fn handle_control_message(
+    message: ControlMessage,
+    control: &ControlChannel,
+    capture_suppression_depth: &mut usize,
+) -> Result<(), String> {
     match message {
         ControlMessage::Exit => {}
-        ControlMessage::TargetRequest { .. } | ControlMessage::TargetResponse { .. } => {}
+
+        ControlMessage::TargetRequest { id, args } => {
+            *capture_suppression_depth = 1;
+
+            let paths = args
+                .into_iter()
+                .map(std::path::PathBuf::from)
+                .collect::<Vec<_>>();
+
+            let (status, message) = match crate::bridge_paths(&paths) {
+                Ok(message) => (0, message),
+                Err(error) => (1, error),
+            };
+
+            control.send(&ControlMessage::TargetResponse {
+                id,
+                status,
+                message,
+            })?;
+        }
+
+        ControlMessage::TargetResponse { .. } => {}
     }
 
     Ok(())

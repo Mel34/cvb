@@ -1,5 +1,6 @@
 use std::fmt::Write as FmtWrite;
 use std::io::Write as IoWrite;
+use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 mod cli;
@@ -61,9 +62,13 @@ A capture session ends with:
         ),
         cli::Command::Version => println!("cvb {}", env!("CARGO_PKG_VERSION")),
         cli::Command::Target(args) => {
+            if std::env::var_os("CVB_INTERNAL_TARGET").is_some() {
+                run_internal_target(&args);
+            }
+
             if let Some(paths) = target_paths(&args) {
                 match bridge_paths(&paths) {
-                    Ok(()) => {}
+                    Ok(message) => eprintln!("{message}"),
                     Err(error) => {
                         eprintln!("{error}");
                         std::process::exit(1);
@@ -91,6 +96,47 @@ A capture session ends with:
     }
 }
 
+fn run_internal_target(args: &[String]) -> ! {
+    if args.is_empty() {
+        eprintln!("CVB: internal target request has no arguments");
+        std::process::exit(1);
+    }
+
+    let fd = unsafe { OwnedFd::from_raw_fd(3) };
+    let mut control = control::ControlChannel::new(fd);
+    let id = std::process::id() as u64;
+
+    let request = control::ControlMessage::TargetRequest {
+        id,
+        args: args.to_vec(),
+    };
+
+    if let Err(error) = control.send(&request) {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
+
+    loop {
+        match control.receive_one() {
+            Ok(control::ControlMessage::TargetResponse {
+                id: response_id,
+                status,
+                message,
+            }) if response_id == id => {
+                if !message.is_empty() {
+                    eprintln!("{message}");
+                }
+                std::process::exit(status);
+            }
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
 fn target_paths(args: &[String]) -> Option<Vec<std::path::PathBuf>> {
     let paths = args
         .iter()
@@ -107,7 +153,7 @@ fn target_paths(args: &[String]) -> Option<Vec<std::path::PathBuf>> {
     Some(paths)
 }
 
-fn bridge_paths(paths: &[std::path::PathBuf]) -> Result<(), String> {
+pub(crate) fn bridge_paths(paths: &[std::path::PathBuf]) -> Result<String, String> {
     if paths.len() == 1 {
         let path = &paths[0];
 
@@ -122,13 +168,11 @@ fn bridge_paths(paths: &[std::path::PathBuf]) -> Result<(), String> {
                 })?
                 .len();
 
-            eprintln!(
+            return Ok(format!(
                 "CVB: captured file '{}' ({} bytes)",
                 path.display(),
                 size
-            );
-
-            return Ok(());
+            ));
         }
 
         if path.is_dir() {
@@ -141,23 +185,19 @@ fn bridge_paths(paths: &[std::path::PathBuf]) -> Result<(), String> {
 
             copy_to_clipboard(output.as_bytes())?;
 
-            eprintln!(
+            return Ok(format!(
                 "CVB: captured directory inventory '{}' ({} {})",
                 path.display(),
                 entry_count,
                 if entry_count == 1 { "entry" } else { "entries" }
-            );
-
-            return Ok(());
+            ));
         }
     }
 
     let output = build_paths_output(paths)?;
     copy_to_clipboard(output.as_bytes())?;
 
-    eprintln!("CVB: captured {} paths", paths.len());
-
-    Ok(())
+    Ok(format!("CVB: captured {} paths", paths.len()))
 }
 
 fn build_paths_output(paths: &[std::path::PathBuf]) -> Result<String, String> {
