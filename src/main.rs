@@ -728,6 +728,21 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_path_returns_error() {
+        let directory = test_directory("unsupported-path");
+        let unsupported = directory.join("unsupported");
+
+        let output = build_paths_output(&[unsupported.clone()]);
+
+        assert_eq!(
+            output.unwrap_err(),
+            format!("CVB: unsupported path: {}", unsupported.display())
+        );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn file_and_directory_are_combined() {
         let directory = test_directory("file-and-directory");
         let file = directory.join("test.txt");
