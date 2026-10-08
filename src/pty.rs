@@ -853,4 +853,46 @@ fn status_to_code(status: WaitStatus) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    use super::screen_to_text;
+
+    #[test]
+    fn renders_plain_multiline_output() {
+        let mut terminal = vt100::Parser::new(24, 80, 64);
+
+        terminal.process(b"ONE\r\nTWO\r\nTHREE\r\n");
+
+        assert_eq!(screen_to_text(&mut terminal), "ONE\nTWO\nTHREE");
+    }
+
+    #[test]
+    fn strips_ansi_escape_sequences_from_text() {
+        let mut terminal = vt100::Parser::new(24, 80, 64);
+
+        terminal.process(b"\x1b[31mRED\x1b[0m\r\n");
+
+        assert_eq!(screen_to_text(&mut terminal), "RED");
+    }
+
+    #[test]
+    fn renders_carriage_return_rewrites() {
+        let mut terminal = vt100::Parser::new(24, 80, 64);
+
+        terminal.process(b"progress 10%\rprogress 100%\r\n");
+
+        assert_eq!(screen_to_text(&mut terminal), "progress 100%");
+    }
+
+    #[test]
+    fn renders_scrolled_back_output() {
+        let mut terminal = vt100::Parser::new(3, 80, 64);
+
+        terminal.process(
+            b"ONE\r\nTWO\r\nTHREE\r\nFOUR\r\nFIVE\r\n",
+        );
+
+        assert_eq!(
+            screen_to_text(&mut terminal),
+            "ONE\nTWO\nTHREE\nFOUR\nFIVE"
+        );
+    }
 }
