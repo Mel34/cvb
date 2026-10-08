@@ -539,6 +539,16 @@ mod tests {
     }
 
     #[test]
+    fn civil_from_days_rejects_year_before_one() {
+        let result = civil_from_days(-719_469);
+
+        assert_eq!(
+            result.unwrap_err(),
+            "CVB: timestamp year is out of range: 0"
+        );
+    }
+
+    #[test]
     fn parse_ignore_list_ignores_comments_and_blank_lines() {
         let contents = "\
     # comment
