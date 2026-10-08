@@ -19,11 +19,15 @@ cvb() {
         history_file="$runtime_dir/history-$$-$RANDOM"
         parent_history_file="$runtime_dir/parent-history-$$-$RANDOM"
 
+        local previous_umask
+        previous_umask=$(umask)
+
         umask 077
 
         history -w "$parent_history_file" || {
             printf 'CVB: unable to create history snapshot: %s\n' "$parent_history_file" >&2
             rm -f "$init_file" "$parent_history_file"
+            umask "$previous_umask"
             return 1
         }
 
@@ -46,6 +50,7 @@ cvb() {
             shopt -p
         ) >"$init_file" || {
             rm -f "$init_file" "$parent_history_file"
+            umask "$previous_umask"
             printf 'CVB: unable to create shell state file: %s\n' "$init_file" >&2
             return 1
         }
@@ -53,8 +58,11 @@ cvb() {
         : >"$history_file" || {
             printf 'CVB: unable to create history file: %s\n' "$history_file" >&2
             rm -f "$init_file" "$parent_history_file"
+            umask "$previous_umask"
             return 1
         }
+
+        umask "$previous_umask"
 
         export CVB_ACTIVE=1
         export CVB_HISTORY_FILE="$history_file"
