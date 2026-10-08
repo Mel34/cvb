@@ -490,7 +490,7 @@ fn proxy(
                             capture_suppression_depth += 1;
                             capturing = false;
                             captured.clear();
-                        } else {
+                        } else if !capturing {
                             capturing = true;
                             captured.clear();
                         }
