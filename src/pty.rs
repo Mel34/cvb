@@ -32,85 +32,70 @@ enum MarkerEvent {
 
 struct MarkerScanner {
     start: Vec<u8>,
-    end_prefix: Vec<u8>,
+    end: Vec<u8>,
     pending: Vec<u8>,
 }
 
 impl MarkerScanner {
-    fn new(key: &str) -> Self {
+    fn new() -> Self {
         Self {
-            start: format!("\x1b]777;CVB;START;{key}\x07").into_bytes(),
-            end_prefix: format!("\x1b]777;CVB;END;{key};").into_bytes(),
+            start: b"\x1b]777;CVB;START\x07".to_vec(),
+            end: b"\x1b]777;CVB;END\x07".to_vec(),
             pending: Vec::new(),
         }
     }
 
-    fn process(&mut self, input: &[u8]) -> Vec<MarkerEvent> {
+    fn process(&mut self, data: &[u8]) -> Vec<MarkerEvent> {
+        self.pending.extend_from_slice(data);
+
         let mut events = Vec::new();
 
-        self.pending.extend_from_slice(input);
-
         loop {
-            let start_position = find_subslice(&self.pending, &self.start);
-            let end_position = find_subslice(&self.pending, &self.end_prefix);
+            let start_pos = find_subslice(&self.pending, &self.start);
+            let end_pos = find_subslice(&self.pending, &self.end);
 
-            let position = match (start_position, end_position) {
-                (Some(start), Some(end)) => Some((start.min(end), start <= end)),
-                (Some(start), None) => Some((start, true)),
-                (None, Some(end)) => Some((end, false)),
-                (None, None) => None,
+            let marker = match (start_pos, end_pos) {
+                (Some(start), Some(end)) if start <= end => {
+                    Some((start, self.start.len(), true))
+                }
+                (Some(_), Some(end)) => Some((end, self.end.len(), false)),
+                (Some(start), None) => Some((start, self.start.len(), true)),
+                (None, Some(end)) => Some((end, self.end.len(), false)),
+                (None, None) => break,
             };
 
-            let Some((position, is_start)) = position else {
-                let keep = self
-                    .start
-                    .len()
-                    .max(self.end_prefix.len())
-                    .saturating_sub(1);
-
-                if self.pending.len() > keep {
-                    let split = self.pending.len() - keep;
-                    events.push(MarkerEvent::Data(
-                        self.pending.drain(..split).collect(),
-                    ));
-                }
-
+            let Some((pos, len, is_start)) = marker else {
                 break;
             };
 
-            if position > 0 {
+            if pos > 0 {
                 events.push(MarkerEvent::Data(
-                    self.pending.drain(..position).collect(),
+                    self.pending.drain(..pos).collect(),
                 ));
             }
 
+            self.pending.drain(..len);
+
             if is_start {
-                self.pending.drain(..self.start.len());
                 events.push(MarkerEvent::Start);
-                continue;
+            } else {
+                events.push(MarkerEvent::End(0));
             }
+        }
 
-            let Some(end) = find_byte(&self.pending[self.end_prefix.len()..], 0x07) else {
-                break;
-            };
+        if !self.pending.is_empty() {
+            let keep = self
+                .start
+                .len()
+                .max(self.end.len())
+                .saturating_sub(1);
 
-            let status_bytes =
-                &self.pending[self.end_prefix.len()..self.end_prefix.len() + end];
-
-            let status = match std::str::from_utf8(status_bytes)
-                .ok()
-                .and_then(|value| value.parse::<i32>().ok())
-            {
-                Some(status) => status,
-                None => {
-                    events.push(MarkerEvent::Data(vec![self.pending.remove(0)]));
-                    continue;
-                }
-            };
-
-            let marker_len = self.end_prefix.len() + end + 1;
-            self.pending.drain(..marker_len);
-            events.push(MarkerEvent::End(status));
+            if self.pending.len() > keep {
+                let split_at = self.pending.len() - keep;
+                events.push(MarkerEvent::Data(
+                    self.pending.drain(..split_at).collect(),
+                ));
+            }
         }
 
         events
@@ -129,10 +114,6 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
-}
-
-fn find_byte(bytes: &[u8], byte: u8) -> Option<usize> {
-    bytes.iter().position(|value| *value == byte)
 }
 
 static mut SIGWINCH_PIPE: Option<i32> = None;
@@ -353,11 +334,6 @@ fn install_control_fd(control: OwnedFd) -> Result<(), String> {
     Ok(())
 }
 
-struct CaptureState {
-    command: String,
-    copy: bool,
-}
-
 fn proxy(
     master: &OwnedFd,
     child: Pid,
@@ -372,27 +348,30 @@ fn proxy(
 
     let mut buffer = [0u8; 8192];
     let mut signal_buffer = [0u8; 64];
-    let mut terminal = vt100::Parser::new(NonZeroU16::new(rows).unwrap(), NonZeroU16::new(cols).unwrap(), 1000);
-    let mut screen_terminal = vt100::Parser::new(NonZeroU16::new(rows).unwrap(), NonZeroU16::new(cols).unwrap(), 1000);
+    let mut terminal = vt100::Parser::new(
+        NonZeroU16::new(rows).unwrap(),
+        NonZeroU16::new(cols).unwrap(),
+        1000,
+    );
+    let mut screen_terminal = vt100::Parser::new(
+        NonZeroU16::new(rows).unwrap(),
+        NonZeroU16::new(cols).unwrap(),
+        1000,
+    );
     let mut capture_terminal: Option<vt100::Parser> = None;
     let bindings = keybind::load()?;
     let mut keyboard = HotkeyMonitor::new(bindings)?;
     let keybind_watcher = KeybindWatcher::new()?;
-    let mut capture_state: Option<CaptureState> = None;
-    let mut end_seen = false;
-    let mut marker_seen_pending = false;
     let mut loop_iteration = 0u64;
-    let marker_key = std::env::var("CVB_MARKER_KEY")
-        .map_err(|_| "CVB: CVB_MARKER_KEY is not set".to_string())?;
-
-    let mut marker_scanner = MarkerScanner::new(&marker_key);
-    let mut sync_marker_pending: Vec<u8> = Vec::new();
+    let mut marker_scanner = MarkerScanner::new();
 
     loop {
         loop_iteration += 1;
 
-        let keyboard_fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(keyboard.fd()) };
-        let keybind_fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(keybind_watcher.fd()) };
+        let keyboard_fd =
+            unsafe { std::os::fd::BorrowedFd::borrow_raw(keyboard.fd()) };
+        let keybind_fd =
+            unsafe { std::os::fd::BorrowedFd::borrow_raw(keybind_watcher.fd()) };
 
         let mut poll_fds = [
             nix::poll::PollFd::new(stdin.as_fd(), nix::poll::PollFlags::POLLIN),
@@ -449,10 +428,14 @@ fn proxy(
             let _ = read(signal_read.as_fd(), &mut signal_buffer);
 
             let winsize = resize_pty(master, child)?;
-            terminal.screen_mut().set_size(NonZeroU16::new(winsize.ws_row).unwrap(), NonZeroU16::new(winsize.ws_col).unwrap());
-            screen_terminal
-                .screen_mut()
-                .set_size(NonZeroU16::new(winsize.ws_row).unwrap(), NonZeroU16::new(winsize.ws_col).unwrap());
+            terminal.screen_mut().set_size(
+                NonZeroU16::new(winsize.ws_row).unwrap(),
+                NonZeroU16::new(winsize.ws_col).unwrap(),
+            );
+            screen_terminal.screen_mut().set_size(
+                NonZeroU16::new(winsize.ws_row).unwrap(),
+                NonZeroU16::new(winsize.ws_col).unwrap(),
+            );
         }
 
         if keyboard_events.contains(nix::poll::PollFlags::POLLIN) {
@@ -477,7 +460,11 @@ fn proxy(
                 .map_err(|error| format!("CVB: PTY write failed: {error}"))?;
         }
 
-        if master_events.intersects(nix::poll::PollFlags::POLLIN | nix::poll::PollFlags::POLLHUP | nix::poll::PollFlags::POLLERR) {
+        if master_events.intersects(
+            nix::poll::PollFlags::POLLIN
+                | nix::poll::PollFlags::POLLHUP
+                | nix::poll::PollFlags::POLLERR,
+        ) {
             let count = match read(master.as_fd(), &mut buffer) {
                 Ok(count) => count,
                 Err(nix::errno::Errno::EIO) => break,
@@ -488,9 +475,18 @@ fn proxy(
                 break;
             }
 
-            let events = marker_scanner.process(&buffer[..count]);
+            let output = &buffer[..count];
+
+            terminal.process(output);
+            screen_terminal.process(output);
 
             let mut stdout = stdout.lock();
+
+            stdout
+                .write_all(output)
+                .map_err(|error| format!("CVB: stdout write failed: {error}"))?;
+
+            let events = marker_scanner.process(output);
 
             for event in events {
                 match event {
@@ -498,20 +494,6 @@ fn proxy(
                         if let Some(capture_terminal) = capture_terminal.as_mut() {
                             capture_terminal.process(&output);
                         }
-
-                        let (output, marker_seen) =
-                            consume_sync_marker_stream(&mut sync_marker_pending, &output);
-
-                        if marker_seen {
-                            marker_seen_pending = true;
-                        }
-
-                        terminal.process(&output);
-                        screen_terminal.process(&output);
-
-                        stdout
-                            .write_all(&output)
-                            .map_err(|error| format!("CVB: stdout write failed: {error}"))?;
                     }
 
                     MarkerEvent::Start => {
@@ -609,7 +591,7 @@ fn proxy(
                     count,
                     cursor.0,
                     cursor.1,
-                        )
+                )
                 .map_err(|error| format!("CVB: unable to write capture debug log: {error}"))?;
             }
         }
@@ -620,25 +602,8 @@ fn proxy(
                 | nix::poll::PollFlags::POLLERR,
         ) {
             for message in control.receive()? {
-                handle_control_message(
-                    message,
-                    &mut capture_state,
-                    &mut end_seen,
-                )?;
+                handle_control_message(message)?;
             }
-        }
-
-        if end_seen && marker_seen_pending {
-            if let Some(state) = capture_state.take() {
-                capture_command_output(
-                    &mut terminal,
-                    &mut screen_terminal,
-                    &state,
-                )?;
-            }
-
-            end_seen = false;
-            marker_seen_pending = false;
         }
     }
 
@@ -659,150 +624,15 @@ fn proxy(
     Ok(())
 }
 
-fn handle_control_message(
-    message: ControlMessage,
-    capture_state: &mut Option<CaptureState>,
-    end_seen: &mut bool,
-) -> Result<(), String> {
-    {
-        use std::fs::OpenOptions;
-
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/tmp/cvb-capture-debug.log")
-            .map_err(|error| format!("CVB: unable to open capture debug log: {error}"))?;
-
-        writeln!(file, "CONTROL message={message:?}")
-            .map_err(|error| format!("CVB: unable to write capture debug log: {error}"))?;
-    }
-
+fn handle_control_message(message: ControlMessage) -> Result<(), String> {
     match message {
-        ControlMessage::Start {
-            command,
-            copy,
-            ..
-        } => {
-            *capture_state = Some(CaptureState {
-                command,
-                copy,
-            });
-
-            *end_seen = false;
-        }
-
-        ControlMessage::End { .. } => {
-            if capture_state.is_some() {
-                *end_seen = true;
-            }
-        }
-
         ControlMessage::Exit => {}
-
         ControlMessage::TargetRequest { .. } | ControlMessage::TargetResponse { .. } => {}
     }
 
     Ok(())
 }
 
-const CVB_SYNC_MARKER: &[u8] = b"\x1b]777;CVB;END\x07";
-
-fn consume_sync_marker_stream(
-    pending: &mut Vec<u8>,
-    input: &[u8],
-) -> (Vec<u8>, bool) {
-    let mut output = Vec::new();
-    let mut marker_seen = false;
-
-    for &byte in input {
-        pending.push(byte);
-
-        while !pending.is_empty() {
-            if pending.len() <= CVB_SYNC_MARKER.len()
-                && CVB_SYNC_MARKER.starts_with(pending)
-            {
-                break;
-            }
-
-            if pending.starts_with(CVB_SYNC_MARKER) {
-                pending.drain(..CVB_SYNC_MARKER.len());
-                marker_seen = true;
-            } else {
-                output.push(pending.remove(0));
-            }
-        }
-    }
-
-    (output, marker_seen)
-}
-
-fn capture_command_output(
-    terminal: &mut vt100::Parser,
-    screen_terminal: &mut vt100::Parser,
-    state: &CaptureState,
-) -> Result<(), String> {
-    let alternate_screen = screen_terminal.screen().alternate_screen();
-
-    if alternate_screen {
-        let text = screen_terminal.screen().contents();
-        let processed = if text.is_empty() {
-            NO_OUTPUT.to_string()
-        } else {
-            text
-        };
-
-        if state.copy {
-            copy_to_clipboard(&processed)?;
-        }
-
-        return Ok(());
-    }
-
-    use vt100::capture::{
-        basic_formatted_to_plain,
-        BasicFormattedCaptureRange,
-        BasicFormattedCaptureState,
-    };
-
-    let mut captured = String::new();
-    let mut capture_state = BasicFormattedCaptureState::default();
-
-    terminal
-        .screen()
-        .write_contents_formatted_basic(
-            &mut captured,
-            BasicFormattedCaptureRange::Full(&mut capture_state),
-        )
-        .map_err(|error| format!("CVB: unable to capture terminal history: {error}"))?;
-
-    let plain: String = basic_formatted_to_plain(&captured).collect();
-
-    let extracted = if let Some(command_position) = plain.find(&state.command) {
-        let after_command = &plain[command_position + state.command.len()..];
-
-        after_command
-            .lines()
-            .map(str::trim_end)
-            .collect::<Vec<_>>()
-            .join("\n")
-            .trim()
-            .to_string()
-    } else {
-        String::new()
-    };
-
-    let processed = if extracted.is_empty() {
-        NO_OUTPUT.to_string()
-    } else {
-        extracted
-    };
-
-    if state.copy {
-        copy_to_clipboard(&processed)?;
-    }
-
-    Ok(())
-}
 fn capture_screen(terminal: &mut vt100::Parser) -> Result<(), String> {
     terminal.screen_mut().set_scrollback(usize::MAX);
 
@@ -946,36 +776,4 @@ fn status_to_code(status: WaitStatus) -> i32 {
 
 #[cfg(test)]
 mod tests {
-
-    #[test]
-    fn sync_marker_stream_is_detected_when_split_across_reads() {
-        let marker = super::CVB_SYNC_MARKER;
-        let split = marker.len() / 2;
-        let mut pending = Vec::new();
-
-        let (output, seen) =
-            super::consume_sync_marker_stream(&mut pending, b"BEFORE");
-
-        assert_eq!(output, b"BEFORE");
-        assert!(!seen);
-        assert!(pending.is_empty());
-
-        let (output, seen) =
-            super::consume_sync_marker_stream(&mut pending, &marker[..split]);
-
-        assert!(output.is_empty());
-        assert!(!seen);
-        assert_eq!(pending, &marker[..split]);
-
-        let mut second = marker[split..].to_vec();
-        second.extend_from_slice(b"AFTER");
-
-        let (output, seen) =
-            super::consume_sync_marker_stream(&mut pending, &second);
-
-        assert_eq!(output, b"AFTER");
-        assert!(seen);
-        assert!(pending.is_empty());
-    }
-
 }
