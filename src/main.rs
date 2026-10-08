@@ -539,6 +539,29 @@ mod tests {
     }
 
     #[test]
+    fn target_paths_requires_every_path_to_exist() {
+        let directory = test_directory("target-paths");
+        let existing = directory.join("existing.txt");
+        let missing = directory.join("missing.txt");
+
+        fs::write(&existing, "contents").unwrap();
+
+        let args = vec![existing.display().to_string()];
+        assert_eq!(
+            target_paths(&args),
+            Some(vec![existing.clone()])
+        );
+
+        let args = vec![
+            existing.display().to_string(),
+            missing.display().to_string(),
+        ];
+        assert_eq!(target_paths(&args), None);
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn civil_from_days_rejects_year_before_one() {
         let result = civil_from_days(-719_469);
 
