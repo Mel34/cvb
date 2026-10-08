@@ -67,3 +67,20 @@ PROMPT_COMMAND=cvb_control_prompt
 
 CVB_SAVED_PS1=$PS1
 PS1='\[\e[31m\]●\[\e[0m\] '"$CVB_SAVED_PS1"
+
+cvb() {
+    if [[ -z "$1" ]]; then
+        printf 'CVB: already running\n' >&2
+        return 1
+    fi
+
+    local path
+    for path in "$@"; do
+        if [[ ! -e $path ]]; then
+            command cvb "$@"
+            return $?
+        fi
+    done
+
+    CVB_INTERNAL_TARGET=1 command cvb "$@"
+}
