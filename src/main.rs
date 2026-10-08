@@ -562,6 +562,16 @@ mod tests {
     }
 
     #[test]
+    fn format_system_time_rejects_time_before_epoch() {
+        let time = std::time::UNIX_EPOCH - std::time::Duration::from_secs(1);
+
+        assert_eq!(
+            format_system_time(time).unwrap_err(),
+            "CVB: unable to format timestamp: second time provided was later than self"
+        );
+    }
+
+    #[test]
     fn format_unix_timestamp_formats_epoch() {
         assert_eq!(
             format_unix_timestamp(0).unwrap(),
