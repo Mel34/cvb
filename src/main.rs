@@ -562,6 +562,14 @@ mod tests {
     }
 
     #[test]
+    fn format_unix_timestamp_formats_epoch() {
+        assert_eq!(
+            format_unix_timestamp(0).unwrap(),
+            "1970-01-01T00:00:00Z"
+        );
+    }
+
+    #[test]
     fn civil_from_days_rejects_year_before_one() {
         let result = civil_from_days(-719_469);
 
