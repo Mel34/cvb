@@ -61,6 +61,70 @@ impl CaptureState {
     }
 }
 
+#[derive(Default)]
+struct CaptureSuppression {
+    depth: usize,
+}
+
+impl CaptureSuppression {
+    fn start(&mut self) {
+        self.depth += 1;
+    }
+
+    fn end(&mut self) -> bool {
+        if self.depth == 0 {
+            return false;
+        }
+
+        self.depth -= 1;
+        true
+    }
+
+    fn active(&self) -> bool {
+        self.depth > 0
+    }
+}
+
+#[cfg(test)]
+mod capture_suppression_tests {
+    use super::CaptureSuppression;
+
+    #[test]
+    fn starts_inactive() {
+        let suppression = CaptureSuppression::default();
+
+        assert!(!suppression.active());
+    }
+
+    #[test]
+    fn nested_starts_keep_suppression_active() {
+        let mut suppression = CaptureSuppression::default();
+
+        suppression.start();
+        assert!(suppression.active());
+
+        suppression.start();
+        assert!(suppression.active());
+    }
+
+    #[test]
+    fn ends_unwind_suppression() {
+        let mut suppression = CaptureSuppression::default();
+
+        suppression.start();
+        suppression.start();
+
+        assert!(suppression.end());
+        assert!(suppression.active());
+
+        assert!(suppression.end());
+        assert!(!suppression.active());
+
+        assert!(!suppression.end());
+        assert!(!suppression.active());
+    }
+}
+
 #[cfg(test)]
 mod capture_state_tests {
     use super::CaptureState;
@@ -511,7 +575,7 @@ fn proxy(
     let keybind_watcher = KeybindWatcher::new()?;
     let mut marker_scanner = MarkerScanner::new();
     let mut capture = CaptureState::default();
-    let mut capture_suppression_depth = 0;
+    let mut capture_suppression = CaptureSuppression::default();
 
     loop {
 
@@ -637,8 +701,8 @@ fn proxy(
                     }
 
                     MarkerEvent::Start => {
-                        if capture_suppression_depth > 0 {
-                            capture_suppression_depth += 1;
+                        if capture_suppression.active() {
+                            capture_suppression.start();
                             capture.end();
                         } else {
                             capture.start();
@@ -646,8 +710,8 @@ fn proxy(
                     }
 
                     MarkerEvent::End(_status) => {
-                        if capture_suppression_depth > 0 {
-                            capture_suppression_depth -= 1;
+                        if capture_suppression.active() {
+                            capture_suppression.end();
                             capture.end();
                             continue;
                         }
@@ -676,7 +740,7 @@ fn proxy(
                 | nix::poll::PollFlags::POLLERR,
         ) {
             for message in control.receive()? {
-                handle_control_message(message, control, &mut capture_suppression_depth)?;
+                handle_control_message(message, control, &mut capture_suppression)?;
             }
         }
     }
@@ -701,13 +765,13 @@ fn proxy(
 fn handle_control_message(
     message: ControlMessage,
     control: &ControlChannel,
-    capture_suppression_depth: &mut usize,
+    capture_suppression: &mut CaptureSuppression,
 ) -> Result<(), String> {
     match message {
         ControlMessage::Exit => {}
 
         ControlMessage::TargetRequest { id, args } => {
-            *capture_suppression_depth = 1;
+            capture_suppression.start();
 
             let paths = args
                 .into_iter()
