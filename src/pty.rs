@@ -347,11 +347,6 @@ fn proxy(
 
     let mut buffer = [0u8; 8192];
     let mut signal_buffer = [0u8; 64];
-    let mut terminal = vt100::Parser::new(
-        rows,
-        cols,
-        1000,
-    );
     let mut screen_terminal = vt100::Parser::new(
         rows,
         cols,
@@ -426,10 +421,6 @@ fn proxy(
             let _ = read(signal_read.as_fd(), &mut signal_buffer);
 
             let winsize = resize_pty(master, child)?;
-            terminal.screen_mut().set_size(
-                winsize.ws_row,
-                winsize.ws_col,
-            );
             screen_terminal.screen_mut().set_size(
                 winsize.ws_row,
                 winsize.ws_col,
@@ -489,7 +480,6 @@ fn proxy(
                 match event {
                     MarkerEvent::Data(output) => {
                         if capturing {
-                            terminal.process(&output);
                             captured.extend_from_slice(&output);
                         }
                     }
@@ -497,13 +487,16 @@ fn proxy(
                     MarkerEvent::Start => {
                         capturing = true;
                         captured.clear();
-                        terminal = vt100::Parser::new(rows, cols, 1000);
                     }
 
                     MarkerEvent::End(_status) => {
                         capturing = false;
 
-                        let text = screen_to_text(&mut terminal);
+                        let scrollback = captured.len();
+                        let mut renderer = vt100::Parser::new(rows, cols, scrollback);
+                        renderer.process(&captured);
+
+                        let text = screen_to_text(&mut renderer);
                         copy_to_clipboard(&text)?;
                         captured.clear();
                     }
