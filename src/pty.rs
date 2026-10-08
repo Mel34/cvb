@@ -35,6 +35,94 @@ struct MarkerScanner {
     pending: Vec<u8>,
 }
 
+#[derive(Default)]
+struct CaptureState {
+    capturing: bool,
+    captured: Vec<u8>,
+}
+
+impl CaptureState {
+    fn start(&mut self) {
+        if !self.capturing {
+            self.capturing = true;
+            self.captured.clear();
+        }
+    }
+
+    fn push(&mut self, data: &[u8]) {
+        if self.capturing {
+            self.captured.extend_from_slice(data);
+        }
+    }
+
+    fn end(&mut self) -> Vec<u8> {
+        self.capturing = false;
+        std::mem::take(&mut self.captured)
+    }
+}
+
+#[cfg(test)]
+mod capture_state_tests {
+    use super::CaptureState;
+
+    #[test]
+    fn captures_data_between_start_and_end() {
+        let mut capture = CaptureState::default();
+
+        capture.start();
+        capture.push(b"ONE\n");
+        capture.push(b"TWO\n");
+
+        assert_eq!(capture.end(), b"ONE\nTWO\n");
+    }
+
+    #[test]
+    fn repeated_start_keeps_existing_capture() {
+        let mut capture = CaptureState::default();
+
+        capture.start();
+        capture.push(b"ONE\n");
+        capture.start();
+        capture.push(b"TWO\n");
+
+        assert_eq!(capture.end(), b"ONE\nTWO\n");
+    }
+
+    #[test]
+    fn ignores_data_before_start() {
+        let mut capture = CaptureState::default();
+
+        capture.push(b"IGNORED\n");
+
+        assert_eq!(capture.end(), b"");
+    }
+
+    #[test]
+    fn end_returns_capture_and_resets_state() {
+        let mut capture = CaptureState::default();
+
+        capture.start();
+        capture.push(b"ONE\n");
+
+        assert_eq!(capture.end(), b"ONE\n");
+        assert_eq!(capture.end(), b"");
+    }
+
+    #[test]
+    fn new_capture_starts_clean_after_end() {
+        let mut capture = CaptureState::default();
+
+        capture.start();
+        capture.push(b"ONE\n");
+        assert_eq!(capture.end(), b"ONE\n");
+
+        capture.start();
+        capture.push(b"TWO\n");
+
+        assert_eq!(capture.end(), b"TWO\n");
+    }
+}
+
 impl MarkerScanner {
     fn new() -> Self {
         Self {
@@ -102,6 +190,72 @@ impl MarkerScanner {
 
     fn finish(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.pending)
+    }
+}
+
+#[cfg(test)]
+mod marker_scanner_tests {
+    use super::{MarkerEvent, MarkerScanner};
+
+    #[test]
+    fn recognizes_start_and_end_markers() {
+        let mut scanner = MarkerScanner::new();
+
+        let mut events = scanner.process(
+            b"before\x1b]777;CVB;START\x07ONE\x1b]777;CVB;END\x07after",
+        );
+
+        events.push(MarkerEvent::Data(scanner.finish()));
+
+        assert_eq!(
+            events,
+            vec![
+                MarkerEvent::Data(b"before".to_vec()),
+                MarkerEvent::Start,
+                MarkerEvent::Data(b"ONE".to_vec()),
+                MarkerEvent::End(0),
+                MarkerEvent::Data(b"after".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn preserves_data_between_markers() {
+        let mut scanner = MarkerScanner::new();
+
+        let events = scanner.process(
+            b"\x1b]777;CVB;START\x07ONE\nTWO\n\x1b]777;CVB;END\x07",
+        );
+
+        assert_eq!(
+            events,
+            vec![
+                MarkerEvent::Start,
+                MarkerEvent::Data(b"ONE\nTWO\n".to_vec()),
+                MarkerEvent::End(0),
+            ]
+        );
+    }
+
+    #[test]
+    fn recognizes_marker_split_across_reads() {
+        let mut scanner = MarkerScanner::new();
+
+        assert_eq!(
+            scanner.process(b"\x1b]777;CVB;ST"),
+            Vec::<MarkerEvent>::new()
+        );
+
+        let events = scanner.process(b"ART\x07ONE\x1b]777;CVB;END\x07");
+
+        assert_eq!(
+            events,
+            vec![
+                MarkerEvent::Start,
+                MarkerEvent::Data(b"ONE".to_vec()),
+                MarkerEvent::End(0),
+            ]
+        );
     }
 }
 
@@ -356,9 +510,8 @@ fn proxy(
     let mut keyboard = HotkeyMonitor::new(bindings)?;
     let keybind_watcher = KeybindWatcher::new()?;
     let mut marker_scanner = MarkerScanner::new();
-    let mut capturing = false;
+    let mut capture = CaptureState::default();
     let mut capture_suppression_depth = 0;
-    let mut captured = Vec::new();
 
     loop {
 
@@ -480,31 +633,26 @@ fn proxy(
             for event in events {
                 match event {
                     MarkerEvent::Data(output) => {
-                        if capturing {
-                            captured.extend_from_slice(&output);
-                        }
+                        capture.push(&output);
                     }
 
                     MarkerEvent::Start => {
                         if capture_suppression_depth > 0 {
                             capture_suppression_depth += 1;
-                            capturing = false;
-                            captured.clear();
-                        } else if !capturing {
-                            capturing = true;
-                            captured.clear();
+                            capture.end();
+                        } else {
+                            capture.start();
                         }
                     }
 
                     MarkerEvent::End(_status) => {
                         if capture_suppression_depth > 0 {
                             capture_suppression_depth -= 1;
-                            capturing = false;
-                            captured.clear();
+                            capture.end();
                             continue;
                         }
 
-                        capturing = false;
+                        let captured = capture.end();
 
                         let scrollback = captured.len();
                         let mut renderer = vt100::Parser::new(rows, cols, scrollback);
@@ -512,7 +660,6 @@ fn proxy(
 
                         let text = screen_to_text(&mut renderer);
                         copy_to_clipboard(&text)?;
-                        captured.clear();
                     }
                 }
             }
