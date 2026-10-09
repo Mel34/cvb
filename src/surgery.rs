@@ -1156,6 +1156,12 @@ pub(crate) fn apply_operation(
                 return Err(PlanError::Precondition);
             }
 
+            if (matches!(position, InsertPosition::Before) && first == 0)
+                || (matches!(position, InsertPosition::After) && last == original.len())
+            {
+                return Err(PlanError::EndOfFile);
+            }
+
             let insertion_index = match position {
                 InsertPosition::Before => first,
                 InsertPosition::After => last,
@@ -1379,6 +1385,24 @@ pub(crate) fn plan_envelope(
         let mut edits: Vec<(usize, usize, &Operation)> = Vec::new();
 
         for operation in &section.operations {
+            let insertion_at_boundary = match operation {
+                Operation::Insert {
+                    position: InsertPosition::Before,
+                    start,
+                    ..
+                } => *start == 1,
+                Operation::Insert {
+                    position: InsertPosition::After,
+                    end,
+                    ..
+                } => *end == original_lines.len(),
+                _ => false,
+            };
+
+            if insertion_at_boundary {
+                return Err(PlanError::EndOfFile);
+            }
+
             // Validate range, payload preconditions, and operation-specific
             // safety rules against the unchanged original file.
             apply_operation(&original_lines, operation)?;
@@ -1562,6 +1586,42 @@ mod plan_envelope_tests {
         assert_eq!(
             plan_envelope(&envelope, &originals("one\ntwo\nthree\nfour\n")),
             Err(PlanError::Overlap)
+        );
+    }
+
+    #[test]
+    fn rejects_insertion_after_final_line() {
+        let envelope = make_envelope(vec![
+            Operation::Insert {
+                position: InsertPosition::After,
+                start: 3,
+                end: 3,
+                anchor: vec!["three".to_owned()],
+                new: vec!["inserted".to_owned()],
+            },
+        ]);
+
+        assert_eq!(
+            plan_envelope(&envelope, &originals("one\ntwo\nthree\n")),
+            Err(PlanError::EndOfFile)
+        );
+    }
+
+    #[test]
+    fn rejects_insertion_before_first_line() {
+        let envelope = make_envelope(vec![
+            Operation::Insert {
+                position: InsertPosition::Before,
+                start: 1,
+                end: 1,
+                anchor: vec!["one".to_owned()],
+                new: vec!["inserted".to_owned()],
+            },
+        ]);
+
+        assert_eq!(
+            plan_envelope(&envelope, &originals("one\\ntwo\\nthree\\n")),
+            Err(PlanError::EndOfFile)
         );
     }
 
