@@ -7,9 +7,11 @@ license = "GPL-3.0-or-later"
 
 [dependencies]
 libc = "0.2"
+sha2 = "0.10"
 nix = { version = "0.30", features = ["term", "process", "poll", "ioctl", "signal"] }
 vt100 = "0.16.2"
 
 [build-dependencies]
 cc = "1"
 pkg-config = "0.3"
+sha2 = "0.10"

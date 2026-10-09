@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn create_rcfile() -> Result<PathBuf, String> {
+    verify_cvb_bash()?;
     let parent_init =
         env::var_os("CVB_INIT_FILE").ok_or_else(|| "CVB: CVB_INIT_FILE is not set".to_string())?;
 
@@ -64,7 +65,89 @@ pub fn create_rcfile() -> Result<PathBuf, String> {
     Ok(rcfile)
 }
 
+include!(concat!(env!("OUT_DIR"), "/cvb_script_hashes.rs"));
+
+
+fn verify_cvb_bash() -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+
+    let loaded = env::var("CVB_BASH_SHA256")
+        .map_err(|_| "CVB: CVB_BASH_SHA256 is not set; source cvb.bash again".to_string())?;
+
+    if loaded != CVB_BASH_SHA256 {
+        return Err(format!(
+            "CVB: loaded cvb.bash fingerprint mismatch\n  expected: {}\n  loaded:   {}\nRestart the parent shell and rebuild/reinstall CVB.",
+            CVB_BASH_SHA256,
+            loaded,
+        ));
+    }
+
+    let path = env::var_os("CVB_BASH_SOURCE")
+        .map(PathBuf::from)
+        .ok_or_else(|| "CVB: CVB_BASH_SOURCE is not set; source cvb.bash again".to_string())?;
+
+    let contents = fs::read(&path).map_err(|error| {
+        format!(
+            "CVB: unable to read {} for fingerprint verification: {error}",
+            path.display()
+        )
+    })?;
+
+    let actual: String = Sha256::digest(&contents)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+
+    if actual != CVB_BASH_SHA256 {
+        return Err(format!(
+            "CVB: on-disk cvb.bash fingerprint mismatch at {}\n  expected: {}\n  actual:   {}\nRebuild and reinstall CVB, then restart the parent shell.",
+            path.display(),
+            CVB_BASH_SHA256,
+            actual,
+        ));
+    }
+
+    Ok(())
+}
+
 fn control_script() -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+
+    let installed = PathBuf::from("/usr/share/cvb/cvb-control.bash");
+    let development = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("data/cvb-control.bash");
+
+    let path = if installed.is_file() {
+        installed
+    } else if development.is_file() {
+        development
+    } else {
+        return Err(
+            "CVB: unable to verify cvb-control.bash: script file not found".to_string()
+        );
+    };
+
+    let contents = fs::read(&path).map_err(|error| {
+        format!(
+            "CVB: unable to read {} for fingerprint verification: {error}",
+            path.display()
+        )
+    })?;
+
+    let actual: String = Sha256::digest(&contents)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+
+    if actual != CVB_CONTROL_BASH_SHA256 {
+        return Err(format!(
+            "CVB: cvb-control.bash fingerprint mismatch at {}\\n  expected: {}\\n  actual:   {}\\nRebuild and reinstall CVB.",
+            path.display(),
+            CVB_CONTROL_BASH_SHA256,
+            actual
+        ));
+    }
+
     Ok(include_str!("../data/cvb-control.bash").to_string())
 }
 

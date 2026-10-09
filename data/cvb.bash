@@ -1,3 +1,9 @@
+# Fingerprint the integration script loaded into this parent shell.
+CVB_BASH_SOURCE=${BASH_SOURCE[0]}
+CVB_BASH_SHA256=$(sha256sum -- "$CVB_BASH_SOURCE")
+CVB_BASH_SHA256=${CVB_BASH_SHA256%% *}
+export CVB_BASH_SOURCE CVB_BASH_SHA256
+
 cvb() {
     if [[ -z "$1" ]]; then
         if [[ -n ${CVB_ACTIVE:-} ]]; then
