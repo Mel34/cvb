@@ -61,6 +61,14 @@ A capture session ends with:
     exit"
         ),
         cli::Command::Version => println!("cvb {}", env!("CARGO_PKG_VERSION")),
+        cli::Command::Pull(args) => {
+            if args.is_empty() {
+                eprintln!("Usage: cvb pull <search-term>...");
+                std::process::exit(2);
+            }
+
+            eprintln!("CVB Thread Pull is not implemented yet.");
+        }
         cli::Command::Target(args) => {
             if std::env::var_os("CVB_INTERNAL_TARGET").is_some() {
                 run_internal_target(&args);
