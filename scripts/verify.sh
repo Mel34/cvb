@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -u
+
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
+
+run_step() {
+    local label=$1
+    local logfile=$2
+    shift 2
+
+    if "$@" >"$logfile" 2>&1; then
+        return 0
+    else
+        local status=$?
+        printf '\nFAIL: %s (exit %s)\n' "$label" "$status" >&2
+        cat "$logfile" >&2
+        exit "$status"
+    fi
+}
+
+run_step "cargo test" "$tmpdir/test.log" cargo test
+
+summary=$(awk '
+    /test result:/ {
+        passed += $4
+        failed += $6
+        ignored += $8
+        found = 1
+    }
+    END {
+        if (!found) exit 1
+        printf "%d passed, %d failed, %d ignored", passed, failed, ignored
+    }
+' "$tmpdir/test.log") || {
+    printf 'FAIL: Could not parse cargo test summary. Full output follows:\n' >&2
+    cat "$tmpdir/test.log" >&2
+    exit 1
+}
+
+run_step "cargo check" "$tmpdir/check.log" cargo check
+run_step "git diff --check" "$tmpdir/diff.log" git diff --check
+
+printf 'Tests: %s\n' "$summary"
+printf 'cargo check: OK\n'
+printf 'git diff --check: OK\n'
