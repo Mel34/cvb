@@ -981,3 +981,626 @@ CVB::k7Q2xw9R::END ops=0";
     }
 
 }
+
+/// A fully validated proposal. Creating a plan never writes to disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Plan {
+    pub token: String,
+    pub id: String,
+    pub files: Vec<PlannedFile>,
+}
+
+/// Original and proposed contents for one existing file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PlannedFile {
+    pub path: String,
+    pub original: String,
+    pub proposed: String,
+}
+
+/// Failures the pure planner can report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PlanError {
+    InvalidPath,
+    DuplicateFile,
+    MissingFile,
+    InvalidFile,
+    Range,
+    Precondition,
+    Overlap,
+    EndOfFile,
+    NoOp,
+}
+
+
+/// Applies one operation to an original file represented as lines.
+/// All operation ranges are one-based and refer to the original lines.
+pub(crate) fn apply_operation(
+    original: &[String],
+    operation: &Operation,
+) -> Result<Vec<String>, PlanError> {
+    if original.is_empty() {
+        return Err(PlanError::InvalidFile);
+    }
+
+    let mut proposed = original.to_vec();
+
+    match operation {
+        Operation::Replace { start, end, old, new } => {
+            if *start == 0 || start > end || *end > original.len() {
+                return Err(PlanError::Range);
+            }
+            if new.is_empty() {
+                return Err(PlanError::InvalidFile);
+            }
+
+            let first = start - 1;
+            let last = *end;
+
+            if original[first..last] != old[..] {
+                return Err(PlanError::Precondition);
+            }
+            if old == new {
+                return Err(PlanError::NoOp);
+            }
+
+            proposed.splice(first..last, new.iter().cloned());
+        }
+
+        Operation::Delete { start, end, old } => {
+            if *start == 0 || start > end || *end > original.len() {
+                return Err(PlanError::Range);
+            }
+
+            let first = start - 1;
+            let last = *end;
+
+            if original[first..last] != old[..] {
+                return Err(PlanError::Precondition);
+            }
+            if first == 0 && last == original.len() {
+                return Err(PlanError::EndOfFile);
+            }
+
+            proposed.drain(first..last);
+        }
+
+        Operation::Insert { position, start, end, anchor, new } => {
+            if *start == 0 || start > end || *end > original.len() {
+                return Err(PlanError::Range);
+            }
+            if new.is_empty() {
+                return Err(PlanError::InvalidFile);
+            }
+
+            let first = start - 1;
+            let last = *end;
+
+            if original[first..last] != anchor[..] {
+                return Err(PlanError::Precondition);
+            }
+
+            let insertion_index = match position {
+                InsertPosition::Before => first,
+                InsertPosition::After => last,
+            };
+
+            proposed.splice(insertion_index..insertion_index, new.iter().cloned());
+        }
+    }
+
+    Ok(proposed)
+}
+
+#[cfg(test)]
+mod apply_operation_tests {
+    use super::*;
+
+    fn lines(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn applies_replacement_in_memory() {
+        let original = lines(&["one", "old", "three"]);
+        let operation = Operation::Replace {
+            start: 2,
+            end: 2,
+            old: lines(&["old"]),
+            new: lines(&["new"]),
+        };
+
+        assert_eq!(
+            apply_operation(&original, &operation),
+            Ok(lines(&["one", "new", "three"]))
+        );
+        assert_eq!(original, lines(&["one", "old", "three"]));
+    }
+
+    #[test]
+    fn applies_deletion_in_memory() {
+        let original = lines(&["one", "remove", "three"]);
+        let operation = Operation::Delete {
+            start: 2,
+            end: 2,
+            old: lines(&["remove"]),
+        };
+
+        assert_eq!(
+            apply_operation(&original, &operation),
+            Ok(lines(&["one", "three"]))
+        );
+    }
+
+    #[test]
+    fn inserts_before_anchor_in_memory() {
+        let original = lines(&["one", "anchor", "three"]);
+        let operation = Operation::Insert {
+            position: InsertPosition::Before,
+            start: 2,
+            end: 2,
+            anchor: lines(&["anchor"]),
+            new: lines(&["inserted"]),
+        };
+
+        assert_eq!(
+            apply_operation(&original, &operation),
+            Ok(lines(&["one", "inserted", "anchor", "three"]))
+        );
+    }
+
+    #[test]
+    fn inserts_after_anchor_in_memory() {
+        let original = lines(&["one", "anchor", "three"]);
+        let operation = Operation::Insert {
+            position: InsertPosition::After,
+            start: 2,
+            end: 2,
+            anchor: lines(&["anchor"]),
+            new: lines(&["inserted"]),
+        };
+
+        assert_eq!(
+            apply_operation(&original, &operation),
+            Ok(lines(&["one", "anchor", "inserted", "three"]))
+        );
+    }
+
+    #[test]
+    fn rejects_replacement_when_original_text_does_not_match() {
+        let original = lines(&["one", "actual", "three"]);
+        let operation = Operation::Replace {
+            start: 2,
+            end: 2,
+            old: lines(&["expected"]),
+            new: lines(&["replacement"]),
+        };
+
+        assert_eq!(
+            apply_operation(&original, &operation),
+            Err(PlanError::Precondition)
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_operation_ranges() {
+        let original = lines(&["one", "two"]);
+
+        let zero_start = Operation::Delete {
+            start: 0,
+            end: 1,
+            old: lines(&["one"]),
+        };
+        assert_eq!(
+            apply_operation(&original, &zero_start),
+            Err(PlanError::Range)
+        );
+
+        let past_end = Operation::Delete {
+            start: 2,
+            end: 3,
+            old: lines(&["two", "three"]),
+        };
+        assert_eq!(
+            apply_operation(&original, &past_end),
+            Err(PlanError::Range)
+        );
+    }
+
+    #[test]
+    fn rejects_no_op_replacement() {
+        let original = lines(&["one", "unchanged", "three"]);
+        let operation = Operation::Replace {
+            start: 2,
+            end: 2,
+            old: lines(&["unchanged"]),
+            new: lines(&["unchanged"]),
+        };
+
+        assert_eq!(
+            apply_operation(&original, &operation),
+            Err(PlanError::NoOp)
+        );
+    }
+
+    #[test]
+    fn rejects_deleting_the_entire_file() {
+        let original = lines(&["one", "two"]);
+        let operation = Operation::Delete {
+            start: 1,
+            end: 2,
+            old: lines(&["one", "two"]),
+        };
+
+        assert_eq!(
+            apply_operation(&original, &operation),
+            Err(PlanError::EndOfFile)
+        );
+    }
+}
+
+
+/// Builds a complete in-memory plan without writing to disk.
+/// All operation ranges refer to the original contents of each file.
+pub(crate) fn plan_envelope(
+    envelope: &Envelope,
+    originals: &std::collections::HashMap<String, String>,
+) -> Result<Plan, PlanError> {
+    use std::path::{Component, Path};
+
+    let mut seen = std::collections::HashSet::new();
+    let mut planned_files = Vec::with_capacity(envelope.files.len());
+
+    for section in &envelope.files {
+        let file_path = Path::new(&section.path);
+
+        if section.path.is_empty()
+            || section.path.contains('\\')
+            || file_path.is_absolute()
+            || !file_path.components().all(|part| matches!(part, Component::Normal(_)))
+        {
+            return Err(PlanError::InvalidPath);
+        }
+
+        if !seen.insert(section.path.as_str()) {
+            return Err(PlanError::DuplicateFile);
+        }
+
+        let original = originals
+            .get(&section.path)
+            .ok_or(PlanError::MissingFile)?;
+
+        if original.is_empty() {
+            return Err(PlanError::InvalidFile);
+        }
+
+        // Preserve the file's newline convention. Reject mixed line endings
+        // and lone carriage returns instead of silently rewriting the file.
+        let crlf_count = original.matches("\r\n").count();
+        let remaining = original.replace("\r\n", "");
+
+        if remaining.contains('\r')
+            || (crlf_count > 0 && remaining.contains('\n'))
+        {
+            return Err(PlanError::InvalidFile);
+        }
+
+        let newline = if crlf_count > 0 { "\r\n" } else { "\n" };
+        let has_final_newline = original.ends_with(newline);
+        let content = if has_final_newline {
+            original.strip_suffix(newline).unwrap()
+        } else {
+            original.as_str()
+        };
+
+        let original_lines: Vec<String> =
+            content.split(newline).map(str::to_owned).collect();
+
+        // Each edit span is represented as a half-open range of original
+        // line positions. Insertions have an empty range at their insertion
+        // point. Boundary-touching edits are conservatively considered
+        // conflicting to avoid ambiguous ordering.
+        let mut edits: Vec<(usize, usize, &Operation)> = Vec::new();
+
+        for operation in &section.operations {
+            // Validate range, payload preconditions, and operation-specific
+            // safety rules against the unchanged original file.
+            apply_operation(&original_lines, operation)?;
+
+            let span = match operation {
+                Operation::Replace { start, end, .. }
+                | Operation::Delete { start, end, .. } => (*start - 1, *end),
+                Operation::Insert {
+                    position: InsertPosition::Before,
+                    start,
+                    ..
+                } => (*start - 1, *start - 1),
+                Operation::Insert {
+                    position: InsertPosition::After,
+                    end,
+                    ..
+                } => (*end, *end),
+            };
+
+            edits.push((span.0, span.1, operation));
+        }
+
+        for i in 0..edits.len() {
+            for j in (i + 1)..edits.len() {
+                let (a_start, a_end, _) = edits[i];
+                let (b_start, b_end, _) = edits[j];
+
+                let a_insert = a_start == a_end;
+                let b_insert = b_start == b_end;
+
+                let overlaps = match (a_insert, b_insert) {
+                    (true, true) => a_start == b_start,
+                    (true, false) => a_start >= b_start && a_start <= b_end,
+                    (false, true) => b_start >= a_start && b_start <= a_end,
+                    (false, false) => a_start < b_end && b_start < a_end,
+                };
+
+                if overlaps {
+                    return Err(PlanError::Overlap);
+                }
+            }
+        }
+
+        // Work from the bottom upward so every edit retains its original
+        // line coordinates.
+        edits.sort_by(|a, b| b.0.cmp(&a.0));
+
+        let mut proposed_lines = original_lines;
+        for (_, _, operation) in edits {
+            match operation {
+                Operation::Replace { start, end, new, .. } => {
+                    proposed_lines.splice(start - 1..*end, new.iter().cloned());
+                }
+                Operation::Delete { start, end, .. } => {
+                    proposed_lines.drain(start - 1..*end);
+                }
+                Operation::Insert {
+                    position,
+                    start,
+                    end,
+                    new,
+                    ..
+                } => {
+                    let index = match position {
+                        InsertPosition::Before => start - 1,
+                        InsertPosition::After => *end,
+                    };
+                    proposed_lines.splice(index..index, new.iter().cloned());
+                }
+            }
+        }
+
+        let mut proposed = proposed_lines.join(newline);
+        if has_final_newline {
+            proposed.push_str(newline);
+        }
+
+        if proposed == *original {
+            return Err(PlanError::NoOp);
+        }
+
+        planned_files.push(PlannedFile {
+            path: section.path.clone(),
+            original: original.clone(),
+            proposed,
+        });
+    }
+
+    Ok(Plan {
+        token: envelope.token.clone(),
+        id: envelope.id.clone(),
+        files: planned_files,
+    })
+}
+
+#[cfg(test)]
+mod plan_envelope_tests {
+    use super::*;
+
+    fn make_envelope(operations: Vec<Operation>) -> Envelope {
+        Envelope {
+            token: "TOKEN123".to_owned(),
+            id: "plan-test".to_owned(),
+            files: vec![FileSection {
+                path: "example.txt".to_owned(),
+                operations,
+            }],
+        }
+    }
+
+    fn originals(contents: &str) -> std::collections::HashMap<String, String> {
+        [("example.txt".to_owned(), contents.to_owned())]
+            .into_iter()
+            .collect()
+    }
+
+    #[test]
+    fn plans_multiple_operations_against_original_lines() {
+        let envelope = make_envelope(vec![
+            Operation::Replace {
+                start: 1,
+                end: 1,
+                old: vec!["one".to_owned()],
+                new: vec!["ONE".to_owned()],
+            },
+            Operation::Replace {
+                start: 3,
+                end: 3,
+                old: vec!["three".to_owned()],
+                new: vec!["THREE".to_owned()],
+            },
+        ]);
+        let original = originals("one\ntwo\nthree\n");
+
+        let plan = plan_envelope(&envelope, &original).unwrap();
+
+        assert_eq!(plan.files[0].original, "one\ntwo\nthree\n");
+        assert_eq!(plan.files[0].proposed, "ONE\ntwo\nTHREE\n");
+        assert_eq!(original["example.txt"], "one\ntwo\nthree\n");
+    }
+
+    #[test]
+    fn rejects_overlapping_operations() {
+        let envelope = make_envelope(vec![
+            Operation::Replace {
+                start: 1,
+                end: 2,
+                old: vec!["one".to_owned(), "two".to_owned()],
+                new: vec!["combined".to_owned()],
+            },
+            Operation::Delete {
+                start: 2,
+                end: 2,
+                old: vec!["two".to_owned()],
+            },
+        ]);
+
+        assert_eq!(
+            plan_envelope(&envelope, &originals("one\ntwo\nthree\n")),
+            Err(PlanError::Overlap)
+        );
+    }
+
+    #[test]
+    fn rejects_missing_original_file() {
+        let envelope = make_envelope(vec![Operation::Replace {
+            start: 1,
+            end: 1,
+            old: vec!["one".to_owned()],
+            new: vec!["ONE".to_owned()],
+        }]);
+
+        assert_eq!(
+            plan_envelope(&envelope, &std::collections::HashMap::new()),
+            Err(PlanError::MissingFile)
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_file_sections() {
+        let mut envelope = make_envelope(vec![Operation::Replace {
+            start: 1,
+            end: 1,
+            old: vec!["one".to_owned()],
+            new: vec!["ONE".to_owned()],
+        }]);
+        let duplicate = FileSection {
+            path: "example.txt".to_owned(),
+            operations: vec![Operation::Replace {
+                start: 1,
+                end: 1,
+                old: vec!["one".to_owned()],
+                new: vec!["ONE".to_owned()],
+            }],
+        };
+        envelope.files.push(duplicate);
+
+        assert_eq!(
+            plan_envelope(&envelope, &originals("one\n")),
+            Err(PlanError::DuplicateFile)
+        );
+    }
+
+    #[test]
+    fn preserves_trailing_blank_lines() {
+        let envelope = make_envelope(vec![Operation::Replace {
+            start: 1,
+            end: 1,
+            old: vec!["one".to_owned()],
+            new: vec!["ONE".to_owned()],
+        }]);
+
+        let plan = plan_envelope(&envelope, &originals("one\n\n")).unwrap();
+
+        assert_eq!(plan.files[0].proposed, "ONE\n\n");
+    }
+
+    #[test]
+    fn preserves_missing_final_newline() {
+        let envelope = make_envelope(vec![Operation::Replace {
+            start: 1,
+            end: 1,
+            old: vec!["one".to_owned()],
+            new: vec!["ONE".to_owned()],
+        }]);
+
+        let plan = plan_envelope(&envelope, &originals("one\ntwo")).unwrap();
+
+        assert_eq!(plan.files[0].proposed, "ONE\ntwo");
+    }
+
+    #[test]
+    fn preserves_crlf_line_endings() {
+        let envelope = make_envelope(vec![Operation::Replace {
+            start: 1,
+            end: 1,
+            old: vec!["one".to_owned()],
+            new: vec!["ONE".to_owned()],
+        }]);
+
+        let plan = plan_envelope(&envelope, &originals("one\r\ntwo\r\n")).unwrap();
+
+        assert_eq!(plan.files[0].proposed, "ONE\r\ntwo\r\n");
+    }
+
+    #[test]
+    fn rejects_mixed_line_endings() {
+        let envelope = make_envelope(vec![Operation::Replace {
+            start: 1,
+            end: 1,
+            old: vec!["one".to_owned()],
+            new: vec!["ONE".to_owned()],
+        }]);
+
+        assert_eq!(
+            plan_envelope(&envelope, &originals("one\r\ntwo\n")),
+            Err(PlanError::InvalidFile)
+        );
+    }
+
+    #[test]
+    fn preserves_multiple_trailing_blank_lines() {
+        let envelope = make_envelope(vec![Operation::Replace {
+            start: 1,
+            end: 1,
+            old: vec!["one".to_owned()],
+            new: vec!["ONE".to_owned()],
+        }]);
+
+        let plan = plan_envelope(&envelope, &originals("one\n\n\n")).unwrap();
+
+        assert_eq!(plan.files[0].proposed, "ONE\n\n\n");
+    }
+
+
+
+    #[test]
+    fn rejects_insertion_at_edit_boundary() {
+        let envelope = make_envelope(vec![
+            Operation::Replace {
+                start: 1,
+                end: 1,
+                old: vec!["one".to_owned()],
+                new: vec!["ONE".to_owned()],
+            },
+            Operation::Insert {
+                position: InsertPosition::After,
+                start: 1,
+                end: 1,
+                anchor: vec!["one".to_owned()],
+                new: vec!["inserted".to_owned()],
+            },
+        ]);
+
+        assert_eq!(
+            plan_envelope(&envelope, &originals("one\ntwo\n")),
+            Err(PlanError::Overlap)
+        );
+    }
+
+}
