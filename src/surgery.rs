@@ -982,6 +982,82 @@ CVB::k7Q2xw9R::END ops=0";
 
 }
 
+/// Reads the existing target files without modifying them.
+///
+/// Paths must be safe relative paths. Symlinks are rejected so a target cannot
+/// redirect a read outside the supplied root.
+pub(crate) fn load_originals(
+    root: &std::path::Path,
+    envelope: &Envelope,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    use std::path::{Component, Path};
+
+    let mut originals = std::collections::HashMap::new();
+
+    for section in &envelope.files {
+        let relative = Path::new(&section.path);
+
+        if section.path.is_empty()
+            || section.path.contains('\\')
+            || relative.is_absolute()
+            || !relative.components().all(|part| matches!(part, Component::Normal(_)))
+        {
+            return Err(format!("CVB: unsafe target path '{}'", section.path));
+        }
+
+        if originals.contains_key(&section.path) {
+            return Err(format!("CVB: duplicate target path '{}'", section.path));
+        }
+
+        let mut current = root.to_path_buf();
+        for component in relative.components() {
+            current.push(component.as_os_str());
+            let metadata = std::fs::symlink_metadata(&current).map_err(|error| {
+                format!("CVB: unable to inspect '{}': {error}", current.display())
+            })?;
+
+            if metadata.file_type().is_symlink() {
+                return Err(format!("CVB: symlink target is not allowed: '{}'", current.display()));
+            }
+        }
+
+        let metadata = std::fs::metadata(&current)
+            .map_err(|error| format!("CVB: unable to inspect '{}': {error}", current.display()))?;
+        if !metadata.is_file() {
+            return Err(format!("CVB: target is not a regular file: '{}'", current.display()));
+        }
+
+        let contents = std::fs::read_to_string(&current)
+            .map_err(|error| format!("CVB: unable to read '{}': {error}", current.display()))?;
+
+        originals.insert(section.path.clone(), contents);
+    }
+
+    Ok(originals)
+}
+
+/// Error from parsing, loading, or planning a surgery envelope.
+#[derive(Debug)]
+pub(crate) enum PipelineError {
+    Parse(ParseError),
+    Load(String),
+    Plan(PlanError),
+}
+
+/// Parses an envelope, reads its target files, and builds an in-memory plan.
+/// This function never writes to disk.
+pub(crate) fn parse_load_plan(
+    root: &std::path::Path,
+    input: &str,
+) -> Result<(Envelope, Plan), PipelineError> {
+    let envelope = parse_envelope(input).map_err(PipelineError::Parse)?;
+    let originals = load_originals(root, &envelope).map_err(PipelineError::Load)?;
+    let plan =
+        plan_envelope(&envelope, &originals).map_err(PipelineError::Plan)?;
+
+    Ok((envelope, plan))
+}
+
 /// A fully validated proposal. Creating a plan never writes to disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Plan {
@@ -1603,4 +1679,165 @@ mod plan_envelope_tests {
         );
     }
 
+}
+
+
+
+#[cfg(test)]
+mod parse_load_plan_tests {
+    use super::{parse_load_plan, PipelineError};
+    use std::fs;
+    use std::path::PathBuf;
+
+    #[test]
+    fn parse_load_plan_builds_plan_without_modifying_file() {
+        let root: PathBuf = std::env::temp_dir().join(format!(
+            "cvb-parse-load-plan-{}",
+            std::process::id()
+        ));
+
+        if root.exists() {
+            fs::remove_dir_all(&root).unwrap();
+        }
+        fs::create_dir_all(&root).unwrap();
+
+        let file = root.join("example.rs");
+        let original = "fn greet() {\n    println!(\"hello\");\n}\n";
+        fs::write(&file, original).unwrap();
+
+        let input = concat!(
+            "CVB::testtoken123::BEGIN v=1 id=test-id\n",
+            "CVB::testtoken123::FILE path=example.rs\n",
+            "CVB::testtoken123::OP replace lines=2-2\n",
+            "CVB::testtoken123::OLD n=1\n",
+            "    println!(\"hello\");\n",
+            "CVB::testtoken123::NEW n=1\n",
+            "    println!(\"goodbye\");\n",
+            "CVB::testtoken123::ENDOP\n",
+            "CVB::testtoken123::END ops=1",
+        );
+
+        let result = parse_load_plan(&root, input);
+        let (envelope, plan) = match result {
+            Ok(value) => value,
+            Err(PipelineError::Parse(error)) => {
+                panic!("pipeline parsing failed: {error:?}")
+            }
+            Err(PipelineError::Load(error)) => {
+                panic!("pipeline loading failed: {error}")
+            }
+            Err(PipelineError::Plan(error)) => {
+                panic!("pipeline planning failed: {error:?}")
+            }
+        };
+
+        assert_eq!(envelope.id, "test-id");
+        assert_eq!(plan.id, "test-id");
+        assert_eq!(plan.files.len(), 1);
+        assert_eq!(plan.files[0].path, "example.rs");
+        assert_eq!(plan.files[0].original, original);
+        assert_eq!(
+            plan.files[0].proposed,
+            "fn greet() {\n    println!(\"goodbye\");\n}\n"
+        );
+
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            original,
+            "planning must not modify the original file"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod load_originals_tests {
+    use super::{load_originals, Envelope, FileSection};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    fn test_directory(label: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "cvb-load-originals-{}-{label}",
+            std::process::id()
+        ));
+        if path.exists() {
+            fs::remove_dir_all(&path).unwrap();
+        }
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn envelope(path: &str) -> Envelope {
+        Envelope {
+            token: "testtoken123".to_string(),
+            id: "test-id".to_string(),
+            files: vec![FileSection {
+                path: path.to_string(),
+                operations: Vec::new(),
+            }],
+        }
+    }
+
+    #[test]
+    fn reads_existing_relative_file() {
+        let root = test_directory("reads");
+        fs::write(root.join("example.rs"), "fn example() {}\n").unwrap();
+
+        let result = load_originals(&root, &envelope("example.rs")).unwrap();
+
+        assert_eq!(
+            result.get("example.rs").map(String::as_str),
+            Some("fn example() {}\n")
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_missing_file() {
+        let root = test_directory("missing");
+
+        let result = load_originals(&root, &envelope("missing.rs"));
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("unable to inspect"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_unsafe_relative_path() {
+        let root = test_directory("unsafe");
+
+        let result = load_originals(&root, &envelope("../outside.rs"));
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("unsafe target path"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_target() {
+        use std::os::unix::fs::symlink;
+
+        let root = test_directory("symlink");
+        let outside = root.with_extension("outside");
+        fs::write(&outside, "outside contents").unwrap();
+        symlink(&outside, root.join("target.rs")).unwrap();
+
+        let result = load_originals(&root, &envelope("target.rs"));
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("symlink target is not allowed"));
+
+        fs::remove_dir_all(&root).unwrap();
+        fs::remove_file(outside).unwrap();
+    }
+
+    #[allow(dead_code)]
+    fn _assert_path_is_path(_: &Path) {}
 }
