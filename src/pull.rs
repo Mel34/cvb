@@ -385,6 +385,98 @@ fn rust_expansion_ranges(
         .unwrap_or_default()
 }
 
+fn markdown_heading_level(line: &str) -> Option<usize> {
+    let indent = line.bytes().take_while(|byte| *byte == b' ').count();
+    if indent > 3 {
+        return None;
+    }
+    let line = &line[indent..];
+
+    let hashes = line.bytes().take_while(|byte| *byte == b'#').count();
+    if !(1..=6).contains(&hashes) {
+        return None;
+    }
+
+    match line.as_bytes().get(hashes) {
+        None | Some(b' ') | Some(b'\t') => Some(hashes),
+        _ => None,
+    }
+}
+
+fn markdown_section_range(source: &str, match_line: usize) -> Option<(usize, usize)> {
+    let lines: Vec<&str> = source.lines().collect();
+    if match_line == 0 || match_line > lines.len() {
+        return None;
+    }
+
+    let mut headings = Vec::new();
+    let mut fence: Option<(u8, usize)> = None;
+
+    for (index, line) in lines.iter().enumerate() {
+        let indent = line.bytes().take_while(|byte| *byte == b' ').count();
+        if indent > 3 {
+            if fence.is_none() {
+                if let Some(level) = markdown_heading_level(line) {
+                    headings.push((index + 1, level));
+                }
+            }
+            continue;
+        }
+
+        let content = &line[indent..];
+        let bytes = content.as_bytes();
+        let marker = bytes.first().copied();
+        let run = marker.map_or(0, |marker| {
+            bytes.iter().take_while(|byte| **byte == marker).count()
+        });
+
+        if let Some((fence_marker, fence_len)) = fence {
+            if marker == Some(fence_marker)
+                && run >= fence_len
+                && bytes[run..].iter().all(|byte| matches!(byte, b' ' | b'\t'))
+            {
+                fence = None;
+            }
+            continue;
+        }
+
+        if matches!(marker, Some(b'`' | b'~')) && run >= 3 {
+            fence = Some((marker.unwrap(), run));
+            continue;
+        }
+
+        if let Some(level) = markdown_heading_level(line) {
+            headings.push((index + 1, level));
+        }
+    }
+
+    let preceding = headings
+        .iter()
+        .copied()
+        .take_while(|(line, _)| *line <= match_line)
+        .last();
+
+    let (start, level) = match preceding {
+        Some((start, level)) => (start, Some(level)),
+        None => (1, None),
+    };
+
+    let end = headings
+        .iter()
+        .copied()
+        .find(|(line, heading_level)| {
+            *line > match_line
+                && match level {
+                    Some(level) => *heading_level <= level,
+                    None => true,
+                }
+        })
+        .map(|(line, _)| line - 1)
+        .unwrap_or(lines.len());
+
+    (start <= end).then_some((start, end))
+}
+
 fn expand_rust_matches(matches: &str) -> String {
     use std::collections::HashSet;
     use std::fs;
@@ -406,7 +498,8 @@ fn expand_rust_matches(matches: &str) -> String {
 
         let is_rust = path.ends_with(".rs");
         let is_bash = path.ends_with(".bash") || path.ends_with(".sh");
-        if !is_rust && !is_bash {
+        let is_markdown = path.ends_with(".md") || path.ends_with(".markdown");
+        if !is_rust && !is_bash && !is_markdown {
             continue;
         }
 
@@ -416,9 +509,13 @@ fn expand_rust_matches(matches: &str) -> String {
 
         let ranges = if is_rust {
             rust_expansion_ranges(&source, line)
-        } else {
+        } else if is_bash {
             bash_function_range(&source, line)
                 .map(|range| vec![(range, "Bash function")])
+                .unwrap_or_default()
+        } else {
+            markdown_section_range(&source, line)
+                .map(|range| vec![(range, "Markdown section")])
                 .unwrap_or_default()
         };
 
@@ -700,6 +797,140 @@ fn target() {
                 "src/b.rs:2:second needle\n",
             )
         );
+    }
+
+    #[test]
+    fn markdown_expansion_includes_nested_headings_and_deduplicates_section() {
+        use super::expand_rust_matches;
+        use std::fs;
+
+        let path = std::env::temp_dir().join(format!(
+            "cvb-pull-markdown-parent-{}.md",
+            std::process::id()
+        ));
+        let source = concat!(
+            "# Guide\n",
+            "Introduction\n",
+            "## Alpha\n",
+            "first needle\n",
+            "second needle\n",
+            "### Details\n",
+            "Nested detail\n",
+            "## Beta\n",
+            "Sibling section\n",
+        );
+        fs::write(&path, source).unwrap();
+
+        let path_text = path.to_string_lossy();
+        let matches = format!(
+            "{path_text}:4:first needle\n{path_text}:5:second needle\n"
+        );
+
+        let expanded = expand_rust_matches(&matches);
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(expanded.matches("Markdown section:").count(), 1);
+        assert!(expanded.contains(&format!(
+            "Markdown section: {path_text}:3-7"
+        )));
+        assert!(expanded.contains("    6 | ### Details"));
+        assert!(expanded.contains("    7 | Nested detail"));
+        assert!(!expanded.contains("Sibling section"));
+    }
+
+    #[test]
+    fn markdown_expansion_ignores_headings_inside_fenced_code() {
+        use super::markdown_section_range;
+
+        let source = concat!(
+            "## Real section\n",
+            "```markdown\n",
+            "# Not a heading\n",
+            "```\n",
+            "needle\n",
+            "## Next section\n",
+            "other\n",
+        );
+
+        assert_eq!(markdown_section_range(source, 5), Some((1, 5)));
+    }
+
+    #[test]
+    fn markdown_expansion_starts_at_nearest_nested_heading() {
+        use super::expand_rust_matches;
+        use std::fs;
+
+        let path = std::env::temp_dir().join(format!(
+            "cvb-pull-markdown-nested-{}.md",
+            std::process::id()
+        ));
+        let source = concat!(
+            "# Guide\n",
+            "Introduction\n",
+            "## Alpha\n",
+            "Alpha content\n",
+            "### Details\n",
+            "nested needle\n",
+            "More details\n",
+            "## Beta\n",
+            "Sibling section\n",
+        );
+        fs::write(&path, source).unwrap();
+
+        let path_text = path.to_string_lossy();
+        let matches = format!("{path_text}:6:nested needle\n");
+
+        let expanded = expand_rust_matches(&matches);
+        let _ = fs::remove_file(&path);
+
+        assert!(expanded.contains(&format!(
+            "Markdown section: {path_text}:5-7"
+        )));
+        assert!(expanded.contains("    5 | ### Details"));
+        assert!(expanded.contains("    6 | nested needle"));
+        assert!(expanded.contains("    7 | More details"));
+        assert!(!expanded.contains("Alpha content"));
+        assert!(!expanded.contains("Sibling section"));
+    }
+
+    #[test]
+    fn excluded_terms_filter_matches_before_markdown_expansion() {
+        use super::{expand_rust_matches, filter_matches, parse_query};
+        use std::fs;
+
+        let path = std::env::temp_dir().join(format!(
+            "cvb-pull-exclusion-expansion-{}.md",
+            std::process::id()
+        ));
+        let source = concat!(
+            "# Guide\n",
+            "## surgery\n",
+            "surgery techniques\n",
+            "surgery protocol details\n",
+            "More surgery techniques\n",
+            "## Next section\n",
+            "Unrelated content\n",
+        );
+        fs::write(&path, source).unwrap();
+
+        let path_text = path.to_string_lossy();
+        let input = format!(
+            "{path_text}:3:surgery techniques\n\
+             {path_text}:4:surgery protocol details\n\
+             {path_text}:5:More surgery techniques\n"
+        );
+        let query = parse_query(&["+surgery".into(), "-protocol".into()]).unwrap();
+
+        let filtered = filter_matches(&query, &input);
+        assert!(!filtered.contains(":4:surgery protocol details"));
+        assert!(filtered.contains(":3:surgery techniques"));
+        assert!(filtered.contains(":5:More surgery techniques"));
+
+        let expanded = expand_rust_matches(&filtered);
+        let _ = fs::remove_file(&path);
+
+        assert!(expanded.contains("4 | surgery protocol details"));
+        assert!(!expanded.contains("Next section"));
     }
 
     #[test]
