@@ -47,12 +47,14 @@ Capture your terminal session and bridge command output to the clipboard.
 Usage:
     cvb
     cvb <PATH>...
+    cvb pull <search-term>...
     cvb --help
     cvb --version
 
 Modes:
-    cvb              Start a terminal capture session
-    cvb <PATH>...    Capture files or directory inventories
+    cvb                      Start a terminal capture session
+    cvb <PATH>...            Capture files or directory inventories
+    cvb pull <search-term>... Search Git-tracked source files
 
 Options:
     -h, --help       Show this help message
