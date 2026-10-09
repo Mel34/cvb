@@ -104,6 +104,41 @@ pub fn run(args: &[String]) -> i32 {
 }
 
 
+fn bash_function_range(source: &str, hit_line: usize) -> Option<(usize, usize)> {
+    let mut parser = tree_sitter::Parser::new();
+    let language = tree_sitter_bash::LANGUAGE;
+    parser.set_language(&language.into()).ok()?;
+
+    let tree = parser.parse(source, None)?;
+    let root = tree.root_node();
+
+    if root.has_error() {
+        return None;
+    }
+
+    fn collect_ranges(node: tree_sitter::Node<'_>, ranges: &mut Vec<(usize, usize)>) {
+        if node.kind() == "function_definition" {
+            ranges.push((
+                node.start_position().row + 1,
+                node.end_position().row + 1,
+            ));
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            collect_ranges(child, ranges);
+        }
+    }
+
+    let mut ranges = Vec::new();
+    collect_ranges(root, &mut ranges);
+
+    ranges
+        .into_iter()
+        .filter(|(start, end)| *start <= hit_line && hit_line <= *end)
+        .min_by_key(|(start, end)| end - start)
+}
+
 fn rust_function_range(source: &str, hit_line: usize) -> Option<(usize, usize)> {
     fn collect_ranges(items: &[syn::Item], ranges: &mut Vec<(usize, usize)>) {
         use syn::spanned::Spanned;
@@ -170,14 +205,22 @@ fn expand_rust_matches(matches: &str) -> String {
             continue;
         };
 
-        if !path.ends_with(".rs") {
+        let is_rust = path.ends_with(".rs");
+        let is_bash = path.ends_with(".bash") || path.ends_with(".sh");
+        if !is_rust && !is_bash {
             continue;
         }
 
         let Ok(source) = fs::read_to_string(path) else {
             continue;
         };
-        let Some((start, end)) = rust_function_range(&source, line) else {
+
+        let (range, label) = if is_rust {
+            (rust_function_range(&source, line), "Rust function")
+        } else {
+            (bash_function_range(&source, line), "Bash function")
+        };
+        let Some((start, end)) = range else {
             continue;
         };
 
@@ -186,7 +229,7 @@ fn expand_rust_matches(matches: &str) -> String {
             continue;
         }
 
-        output.push_str(&format!("  Rust function: {path}:{start}-{end}\n"));
+        output.push_str(&format!("  {label}: {path}:{start}-{end}\n"));
 
         for (index, source_line) in source.lines().enumerate() {
             let number = index + 1;
@@ -202,6 +245,26 @@ fn expand_rust_matches(matches: &str) -> String {
 #[cfg(test)]
 mod pull_tests {
     use super::rust_function_range;
+
+    #[test]
+    fn bash_function_range_finds_multiline_function_with_nested_control_flow() {
+        let source = "target ()\n{\n    if true; then\n        echo nested\n    fi\n}\n";
+
+        assert_eq!(super::bash_function_range(source, 4), Some((1, 6)));
+    }
+
+    #[test]
+    fn bash_function_range_ignores_lines_outside_functions() {
+        let source = "before() { echo before; }\n\ntarget() {\n    echo inside\n}\n";
+
+        assert_eq!(super::bash_function_range(source, 2), None);
+        assert_eq!(super::bash_function_range(source, 4), Some((3, 5)));
+    }
+
+    #[test]
+    fn bash_function_range_rejects_unparseable_source() {
+        assert_eq!(super::bash_function_range("target() { if then", 1), None);
+    }
 
     #[test]
     fn rust_function_range_finds_multiline_function() {
