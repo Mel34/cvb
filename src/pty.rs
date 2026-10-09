@@ -727,7 +727,12 @@ fn proxy(
                         renderer.process(&captured);
 
                         let text = screen_to_text(&mut renderer);
-                        copy_to_clipboard(&text)?;
+                        let processed = if text.is_empty() {
+                            NO_OUTPUT.to_string()
+                        } else {
+                            text
+                        };
+                        copy_to_clipboard(&processed)?;
                     }
                 }
             }
