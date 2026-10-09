@@ -28,6 +28,88 @@ fn tracked_files() -> Result<Vec<OsString>, String> {
     Ok(files)
 }
 
+
+#[derive(Debug, Default)]
+struct SearchQuery {
+    alternatives: Vec<String>,
+    required: Vec<String>,
+    excluded: Vec<String>,
+}
+
+fn parse_query(args: &[String]) -> Result<SearchQuery, String> {
+    let input = args.join(" ");
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    let mut token_started = false;
+
+    for ch in input.chars() {
+        match ch {
+            '"' => {
+                quoted = !quoted;
+                token_started = true;
+            }
+            c if c.is_whitespace() && !quoted => {
+                if token_started {
+                    tokens.push(std::mem::take(&mut current));
+                    token_started = false;
+                }
+            }
+            c => {
+                current.push(c);
+                token_started = true;
+            }
+        }
+    }
+
+    if quoted {
+        return Err("CVB pull: unmatched quote in search query.".to_string());
+    }
+    if token_started {
+        tokens.push(current);
+    }
+
+    let mut query = SearchQuery::default();
+
+    for token in tokens {
+        let (kind, term) = match token.strip_prefix('+') {
+            Some(term) => ('+', term),
+            None => match token.strip_prefix('-') {
+                Some(term) => ('-', term),
+                None => (' ', token.as_str()),
+            },
+        };
+
+        if term.is_empty() {
+            return Err("CVB pull: search operators must be followed by a term.".to_string());
+        }
+
+        match kind {
+            '+' => query.required.push(term.to_string()),
+            '-' => query.excluded.push(term.to_string()),
+            _ => query.alternatives.push(term.to_string()),
+        }
+    }
+
+    if query.alternatives.is_empty()
+        && query.required.is_empty()
+        && query.excluded.is_empty()
+    {
+        return Err("CVB pull: search query is empty.".to_string());
+    }
+
+    Ok(query)
+}
+
+fn matches_query(query: &SearchQuery, line: &str) -> bool {
+    let has_alternative = query.alternatives.is_empty()
+        || query.alternatives.iter().any(|term| line.contains(term));
+
+    has_alternative
+        && query.required.iter().all(|term| line.contains(term))
+        && query.excluded.iter().all(|term| !line.contains(term))
+}
+
 fn run_search(program: &str, term: &str, files: &[OsString]) -> io::Result<Output> {
     let mut command = Command::new(program);
 
@@ -50,12 +132,52 @@ fn run_search(program: &str, term: &str, files: &[OsString]) -> io::Result<Outpu
     command.output()
 }
 
+fn matching_content(record: &str) -> Option<&str> {
+    let mut separators = record.match_indices(':');
+    while let Some((index, _)) = separators.next() {
+        let rest = &record[index + 1..];
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+
+        if digits > 0 && rest.as_bytes().get(digits) == Some(&b':') {
+            return Some(&rest[digits + 1..]);
+        }
+    }
+    None
+}
+
+
+fn filter_matches(query: &SearchQuery, matches: &str) -> String {
+    let mut seen = std::collections::HashSet::new();
+    let mut filtered = String::new();
+
+    for record in matches.lines() {
+        let Some(content) = matching_content(record) else {
+            continue;
+        };
+
+        if matches_query(query, content) && seen.insert(record.to_string()) {
+            filtered.push_str(record);
+            filtered.push('\n');
+        }
+    }
+
+    filtered
+}
+
 pub fn run(args: &[String]) -> i32 {
-    let term = args.join(" ");
-    if term.is_empty() {
+    if args.is_empty() {
         eprintln!("Usage: cvb pull <search-term>...");
         return 2;
     }
+
+    let term = args.join(" ");
+    let query = match parse_query(args) {
+        Ok(query) => query,
+        Err(error) => {
+            eprintln!("{error}");
+            return 2;
+        }
+    };
 
     let files = match tracked_files() {
         Ok(files) => files,
@@ -65,42 +187,60 @@ pub fn run(args: &[String]) -> i32 {
         }
     };
 
-    let output = match run_search("rg", &term, &files) {
-        Ok(output) => output,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            match run_search("/usr/bin/grep", &term, &files) {
-                Ok(output) => output,
-                Err(error) => {
-                    eprintln!("CVB pull: unable to launch grep: {error}");
-                    return 2;
-                }
-            }
-        }
-        Err(error) => {
-            eprintln!("CVB pull: unable to launch rg: {error}");
-            return 2;
-        }
+    let search_terms: Vec<&str> = if !query.alternatives.is_empty() {
+        query.alternatives.iter().map(String::as_str).collect()
+    } else if let Some(required) = query.required.first() {
+        vec![required.as_str()]
+    } else {
+        vec![""]
     };
 
-    match output.status.code() {
-        Some(0) => {
-            let matches = String::from_utf8_lossy(&output.stdout);
-            print!("{}", expand_rust_matches(&matches));
-            if !output.stderr.is_empty() {
-                eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    let mut combined = String::new();
+    let mut combined_stderr = Vec::new();
+
+    for search_term in search_terms {
+        let output = match run_search("rg", search_term, &files) {
+            Ok(output) => output,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                match run_search("/usr/bin/grep", search_term, &files) {
+                    Ok(output) => output,
+                    Err(error) => {
+                        eprintln!("CVB pull: unable to launch grep: {error}");
+                        return 2;
+                    }
+                }
             }
-            0
+            Err(error) => {
+                eprintln!("CVB pull: unable to launch rg: {error}");
+                return 2;
+            }
+        };
+
+        match output.status.code() {
+            Some(0) => combined.push_str(&String::from_utf8_lossy(&output.stdout)),
+            Some(1) => {}
+            _ => {
+                eprint!("{}", String::from_utf8_lossy(&output.stderr));
+                eprintln!("CVB pull: search failed.");
+                return 2;
+            }
         }
-        Some(1) => {
-            println!("No matches found for: {term}");
-            1
-        }
-        _ => {
-            eprint!("{}", String::from_utf8_lossy(&output.stderr));
-            eprintln!("CVB pull: search failed.");
-            2
-        }
+        combined_stderr.extend_from_slice(&output.stderr);
     }
+
+    let filtered = filter_matches(&query, &combined);
+
+    if !combined_stderr.is_empty() {
+        eprint!("{}", String::from_utf8_lossy(&combined_stderr));
+    }
+
+    if filtered.is_empty() {
+        println!("No matches found for: {term}");
+        return 1;
+    }
+
+    print!("{}", expand_rust_matches(&filtered));
+    0
 }
 
 
@@ -425,6 +565,141 @@ fn target() {
         assert!(output.contains("9 | }"));
 
         std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn query_bare_terms_use_or_semantics() {
+        use super::{matches_query, parse_query};
+
+        let query = parse_query(&["CRLF".into(), "BOM".into()]).unwrap();
+
+        assert!(matches_query(&query, "file uses CRLF endings"));
+        assert!(matches_query(&query, "file contains a BOM"));
+        assert!(!matches_query(&query, "UTF-8 only"));
+    }
+
+    #[test]
+    fn query_plus_terms_are_required() {
+        use super::{matches_query, parse_query};
+
+        let query = parse_query(&["CRLF".into(), "+BOM".into()]).unwrap();
+
+        assert!(matches_query(&query, "CRLF and BOM"));
+        assert!(!matches_query(&query, "CRLF only"));
+        assert!(!matches_query(&query, "BOM only"));
+    }
+
+    #[test]
+    fn query_minus_terms_are_excluded() {
+        use super::{matches_query, parse_query};
+
+        let query = parse_query(&["CRLF".into(), "-tests".into()]).unwrap();
+
+        assert!(matches_query(&query, "CRLF implementation"));
+        assert!(!matches_query(&query, "CRLF tests"));
+    }
+
+    #[test]
+    fn query_combines_or_required_and_excluded_terms() {
+        use super::{matches_query, parse_query};
+
+        let query = parse_query(&[
+            "CRLF".into(),
+            "BOM".into(),
+            "+split_inclusive".into(),
+            "-tests".into(),
+        ])
+        .unwrap();
+
+        assert!(matches_query(&query, "CRLF split_inclusive implementation"));
+        assert!(matches_query(&query, "BOM split_inclusive implementation"));
+        assert!(!matches_query(&query, "CRLF implementation"));
+        assert!(!matches_query(&query, "BOM split_inclusive tests"));
+        assert!(!matches_query(&query, "unrelated split_inclusive"));
+    }
+
+    #[test]
+    fn query_supports_quoted_phrases_with_operators() {
+        use super::{matches_query, parse_query};
+
+        let query = parse_query(&[
+            "\"line ending\"".into(),
+            "+\"invalid UTF-8\"".into(),
+            "-\"unit test\"".into(),
+        ])
+        .unwrap();
+
+        assert!(matches_query(
+            &query,
+            "line ending handling for invalid UTF-8 input"
+        ));
+        assert!(!matches_query(
+            &query,
+            "line ending handling for invalid UTF-8 unit test"
+        ));
+        assert!(!matches_query(
+            &query,
+            "line ending handling for invalid input"
+        ));
+    }
+
+    #[test]
+    fn query_rejects_empty_operator_terms() {
+        use super::parse_query;
+
+        assert!(parse_query(&["+".into()]).is_err());
+        assert!(parse_query(&["-".into()]).is_err());
+        assert!(parse_query(&["\"\"".into()]).is_err());
+    }
+
+    #[test]
+    fn filter_matches_applies_query_to_record_content() {
+        use super::{filter_matches, parse_query};
+
+        let query = parse_query(&[
+            "CRLF".into(),
+            "BOM".into(),
+            "+split_inclusive".into(),
+            "-tests".into(),
+        ])
+        .unwrap();
+
+        let input = concat!(
+            "src/a.rs:10:CRLF with split_inclusive\n",
+            "src/b.rs:20:BOM with split_inclusive\n",
+            "src/c.rs:30:CRLF without required term\n",
+            "src/d.rs:40:BOM split_inclusive tests\n",
+            "src/CRLF.rs:50:unrelated split_inclusive\n",
+        );
+
+        assert_eq!(
+            filter_matches(&query, input),
+            concat!(
+                "src/a.rs:10:CRLF with split_inclusive\n",
+                "src/b.rs:20:BOM with split_inclusive\n",
+            )
+        );
+    }
+
+    #[test]
+    fn filter_matches_deduplicates_records_preserving_order() {
+        use super::{filter_matches, parse_query};
+
+        let query = parse_query(&["needle".into()]).unwrap();
+        let input = concat!(
+            "src/a.rs:1:first needle\n",
+            "src/a.rs:1:first needle\n",
+            "src/b.rs:2:second needle\n",
+            "src/a.rs:1:first needle\n",
+        );
+
+        assert_eq!(
+            filter_matches(&query, input),
+            concat!(
+                "src/a.rs:1:first needle\n",
+                "src/b.rs:2:second needle\n",
+            )
+        );
     }
 
     #[test]
