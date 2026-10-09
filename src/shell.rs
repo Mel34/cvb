@@ -75,10 +75,15 @@ fn verify_cvb_bash() -> Result<(), String> {
         .map_err(|_| "CVB: CVB_BASH_SHA256 is not set; source cvb.bash again".to_string())?;
 
     if loaded != CVB_BASH_SHA256 {
+        let source = env::var_os("CVB_BASH_SOURCE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/usr/share/cvb/cvb.bash"));
+
         return Err(format!(
-            "CVB: loaded cvb.bash fingerprint mismatch\n  expected: {}\n  loaded:   {}\nRestart the parent shell and rebuild/reinstall CVB.",
+            "CVB: the parent shell has an older cvb.bash loaded\n  expected: {}\n  loaded:   {}\nRefresh it in this shell by running:\n  source {}\nAlternatively, start a new shell.",
             CVB_BASH_SHA256,
             loaded,
+            bash_quote(&source),
         ));
     }
 
@@ -100,7 +105,7 @@ fn verify_cvb_bash() -> Result<(), String> {
 
     if actual != CVB_BASH_SHA256 {
         return Err(format!(
-            "CVB: on-disk cvb.bash fingerprint mismatch at {}\n  expected: {}\n  actual:   {}\nRebuild and reinstall CVB, then restart the parent shell.",
+            "CVB: on-disk cvb.bash fingerprint mismatch at {}\n  expected: {}\n  actual:   {}\nRebuild and reinstall CVB so the binary and installed scripts match.\nThen refresh the parent shell with:\n  source /usr/share/cvb/cvb.bash",
             path.display(),
             CVB_BASH_SHA256,
             actual,
