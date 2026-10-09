@@ -1655,6 +1655,37 @@ mod plan_envelope_tests {
     }
 
     #[test]
+    fn allows_insertions_with_overlapping_anchors_at_distinct_gaps() {
+        let envelope = make_envelope(vec![
+            Operation::Insert {
+                position: InsertPosition::After,
+                start: 1,
+                end: 2,
+                anchor: vec!["one".to_owned(), "two".to_owned()],
+                new: vec!["after_two".to_owned()],
+            },
+            Operation::Insert {
+                position: InsertPosition::After,
+                start: 2,
+                end: 3,
+                anchor: vec!["two".to_owned(), "three".to_owned()],
+                new: vec!["after_three".to_owned()],
+            },
+        ]);
+
+        let plan = plan_envelope(
+            &envelope,
+            &originals("one\ntwo\nthree\nfour\n"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.files[0].proposed,
+            "one\ntwo\nafter_two\nthree\nafter_three\nfour\n"
+        );
+    }
+
+    #[test]
     fn rejects_two_insertions_at_same_gap() {
         let envelope = make_envelope(vec![
             Operation::Insert {
