@@ -65,6 +65,8 @@ fi
 PS0=$CVB_START_MARKER
 PROMPT_COMMAND=cvb_control_prompt
 
+printf '\nCVB context initialization ready.\nPaste into your LLM to begin.\n\n'
+
 CVB_SAVED_PS1=$PS1
 PS1='\[\e[31m\]●\[\e[0m\] '"$CVB_SAVED_PS1"
 
