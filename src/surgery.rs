@@ -1469,7 +1469,13 @@ pub(crate) fn plan_envelope(
 
         // Work from the bottom upward so every edit retains its original
         // line coordinates.
-        edits.sort_by(|a, b| b.0.cmp(&a.0));
+        edits.sort_by(|a, b| {
+            b.0.cmp(&a.0).then_with(|| {
+                let a_insert = a.0 == a.1;
+                let b_insert = b.0 == b.1;
+                a_insert.cmp(&b_insert)
+            })
+        });
 
         let mut proposed_lines = original_lines;
         for (_, _, operation) in edits {
@@ -1626,6 +1632,115 @@ mod plan_envelope_tests {
     }
 
     #[test]
+    fn rejects_insert_anchor_overlapping_deleted_lines() {
+        let envelope = make_envelope(vec![
+            Operation::Delete {
+                start: 2,
+                end: 2,
+                old: vec!["two".to_owned()],
+            },
+            Operation::Insert {
+                position: InsertPosition::After,
+                start: 1,
+                end: 2,
+                anchor: vec!["one".to_owned(), "two".to_owned()],
+                new: vec!["inserted".to_owned()],
+            },
+        ]);
+
+        assert_eq!(
+            plan_envelope(&envelope, &originals("one\ntwo\nthree\nfour\n")),
+            Err(PlanError::Overlap)
+        );
+    }
+
+    #[test]
+    fn rejects_two_insertions_at_same_gap() {
+        let envelope = make_envelope(vec![
+            Operation::Insert {
+                position: InsertPosition::After,
+                start: 1,
+                end: 1,
+                anchor: vec!["one".to_owned()],
+                new: vec!["first".to_owned()],
+            },
+            Operation::Insert {
+                position: InsertPosition::After,
+                start: 1,
+                end: 1,
+                anchor: vec!["one".to_owned()],
+                new: vec!["second".to_owned()],
+            },
+        ]);
+
+        assert_eq!(
+            plan_envelope(&envelope, &originals("one\ntwo\nthree\n")),
+            Err(PlanError::Overlap)
+        );
+    }
+
+    #[test]
+    fn rejects_insertion_inside_deleted_range() {
+        let envelope = make_envelope(vec![
+            Operation::Delete {
+                start: 2,
+                end: 4,
+                old: vec![
+                    "two".to_owned(),
+                    "three".to_owned(),
+                    "four".to_owned(),
+                ],
+            },
+            Operation::Insert {
+                position: InsertPosition::After,
+                start: 2,
+                end: 3,
+                anchor: vec!["two".to_owned(), "three".to_owned()],
+                new: vec!["inserted".to_owned()],
+            },
+        ]);
+
+        assert_eq!(
+            plan_envelope(
+                &envelope,
+                &originals("one\ntwo\nthree\nfour\nfive\n"),
+            ),
+            Err(PlanError::Overlap)
+        );
+    }
+
+    #[test]
+    fn rejects_insertion_inside_replaced_range() {
+        let envelope = make_envelope(vec![
+            Operation::Replace {
+                start: 2,
+                end: 4,
+                old: vec![
+                    "two".to_owned(),
+                    "three".to_owned(),
+                    "four".to_owned(),
+                ],
+                new: vec!["combined".to_owned()],
+            },
+            Operation::Insert {
+                position: InsertPosition::After,
+                start: 2,
+                end: 3,
+                anchor: vec!["two".to_owned(), "three".to_owned()],
+                new: vec!["inserted".to_owned()],
+            },
+        ]);
+
+        assert_eq!(
+            plan_envelope(
+                &envelope,
+                &originals("one\ntwo\nthree\nfour\nfive\n"),
+            ),
+            Err(PlanError::Overlap)
+        );
+    }
+
+    #[test]
     fn rejects_overlapping_operations() {
         let envelope = make_envelope(vec![
             Operation::Replace {
@@ -1758,7 +1873,35 @@ mod plan_envelope_tests {
         assert_eq!(plan.files[0].proposed, "ONE\n\n\n");
     }
 
+    #[test]
+    fn allows_insertion_before_edit_boundary() {
+        let envelope = make_envelope(vec![
+            Operation::Insert {
+                position: InsertPosition::After,
+                start: 1,
+                end: 2,
+                anchor: vec!["one".to_owned(), "two".to_owned()],
+                new: vec!["inserted".to_owned()],
+            },
+            Operation::Replace {
+                start: 3,
+                end: 3,
+                old: vec!["three".to_owned()],
+                new: vec!["THREE".to_owned()],
+            },
+        ]);
 
+        let plan = plan_envelope(
+            &envelope,
+            &originals("one\ntwo\nthree\nfour\n"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.files[0].proposed,
+            "one\ntwo\ninserted\nTHREE\nfour\n"
+        );
+    }
 
     #[test]
     fn allows_insertion_at_edit_boundary() {
