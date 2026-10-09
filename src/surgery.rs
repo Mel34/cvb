@@ -1685,7 +1685,7 @@ mod plan_envelope_tests {
 
 #[cfg(test)]
 mod parse_load_plan_tests {
-    use super::{parse_load_plan, PipelineError};
+    use super::{parse_load_plan, ParseError, PipelineError};
     use std::fs;
     use std::path::PathBuf;
 
@@ -1749,19 +1749,547 @@ mod parse_load_plan_tests {
 
         fs::remove_dir_all(root).unwrap();
     }
+
+
+    #[test]
+    fn parse_load_plan_rejects_malformed_envelope_without_modifying_file() {
+        let root: PathBuf = std::env::temp_dir().join(format!(
+            "cvb-parse-load-plan-malformed-{}",
+            std::process::id()
+        ));
+
+        if root.exists() {
+            fs::remove_dir_all(&root).unwrap();
+        }
+        fs::create_dir_all(&root).unwrap();
+
+        let file = root.join("example.rs");
+        let original = "keep this file unchanged\n";
+        fs::write(&file, original).unwrap();
+
+        match parse_load_plan(&root, "not an envelope") {
+            Err(PipelineError::Parse(ParseError::NoEnvelope)) => {}
+            other => panic!("expected missing-envelope parse error, got {other:?}"),
+        }
+
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            original,
+            "a parse failure must not modify the target file"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn parse_load_plan_rejects_missing_target_without_modifying_other_files() {
+        let root: PathBuf = std::env::temp_dir().join(format!(
+            "cvb-parse-load-plan-missing-{}",
+            std::process::id()
+        ));
+
+        if root.exists() {
+            fs::remove_dir_all(&root).unwrap();
+        }
+        fs::create_dir_all(&root).unwrap();
+
+        let file = root.join("keep.rs");
+        let original = "leave this file untouched\n";
+        fs::write(&file, original).unwrap();
+
+        let input = concat!(
+            "CVB::testtoken123::BEGIN v=1 id=missing-target\n",
+            "CVB::testtoken123::FILE path=missing.rs\n",
+            "CVB::testtoken123::OP replace lines=1-1\n",
+            "CVB::testtoken123::OLD n=1\n",
+            "old\n",
+            "CVB::testtoken123::NEW n=1\n",
+            "new\n",
+            "CVB::testtoken123::ENDOP\n",
+            "CVB::testtoken123::END ops=1",
+        );
+
+        match parse_load_plan(&root, input) {
+            Err(PipelineError::Load(_)) => {}
+            other => panic!("expected target-file load error, got {other:?}"),
+        }
+
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            original,
+            "a load failure must not modify other files"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn parse_load_plan_rejects_plan_error_without_modifying_file() {
+        let root: PathBuf = std::env::temp_dir().join(format!(
+            "cvb-parse-load-plan-plan-error-{}",
+            std::process::id()
+        ));
+
+        if root.exists() {
+            fs::remove_dir_all(&root).unwrap();
+        }
+        fs::create_dir_all(&root).unwrap();
+
+        let file = root.join("example.rs");
+        let original = "actual contents\n";
+        fs::write(&file, original).unwrap();
+
+        let input = concat!(
+            "CVB::testtoken123::BEGIN v=1 id=plan-error\n",
+            "CVB::testtoken123::FILE path=example.rs\n",
+            "CVB::testtoken123::OP replace lines=1-1\n",
+            "CVB::testtoken123::OLD n=1\n",
+            "different contents\n",
+            "CVB::testtoken123::NEW n=1\n",
+            "replacement contents\n",
+            "CVB::testtoken123::ENDOP\n",
+            "CVB::testtoken123::END ops=1",
+        );
+
+        match parse_load_plan(&root, input) {
+            Err(PipelineError::Plan(_)) => {}
+            other => panic!("expected planning error, got {other:?}"),
+        }
+
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            original,
+            "a planning failure must not modify the target file"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn parse_load_plan_rejects_later_file_plan_error_without_modifying_either_file() {
+        let root: PathBuf = std::env::temp_dir().join(format!(
+            "cvb-parse-load-plan-multi-plan-error-{}",
+            std::process::id()
+        ));
+
+        if root.exists() {
+            fs::remove_dir_all(&root).unwrap();
+        }
+        fs::create_dir_all(&root).unwrap();
+
+        let first_file = root.join("first.rs");
+        let second_file = root.join("second.rs");
+        let first_original = "first actual contents\n";
+        let second_original = "second actual contents\n";
+
+        fs::write(&first_file, first_original).unwrap();
+        fs::write(&second_file, second_original).unwrap();
+
+        let input = concat!(
+            "CVB::testtoken123::BEGIN v=1 id=multi-plan-error\n",
+            "CVB::testtoken123::FILE path=first.rs\n",
+            "CVB::testtoken123::OP replace lines=1-1\n",
+            "CVB::testtoken123::OLD n=1\n",
+            "first actual contents\n",
+            "CVB::testtoken123::NEW n=1\n",
+            "first replacement contents\n",
+            "CVB::testtoken123::ENDOP\n",
+            "CVB::testtoken123::FILE path=second.rs\n",
+            "CVB::testtoken123::OP replace lines=1-1\n",
+            "CVB::testtoken123::OLD n=1\n",
+            "wrong second contents\n",
+            "CVB::testtoken123::NEW n=1\n",
+            "second replacement contents\n",
+            "CVB::testtoken123::ENDOP\n",
+            "CVB::testtoken123::END ops=2",
+        );
+
+        match parse_load_plan(&root, input) {
+            Err(PipelineError::Plan(_)) => {}
+            other => panic!("expected planning error, got {other:?}"),
+        }
+
+        assert_eq!(
+            fs::read_to_string(&first_file).unwrap(),
+            first_original,
+            "an earlier valid operation must not modify its target"
+        );
+        assert_eq!(
+            fs::read_to_string(&second_file).unwrap(),
+            second_original,
+            "a later planning failure must not modify its target"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn parse_load_plan_rejects_duplicate_target_without_modifying_file() {
+        let root: PathBuf = std::env::temp_dir().join(format!(
+            "cvb-parse-load-plan-duplicate-target-{}",
+            std::process::id()
+        ));
+
+        if root.exists() {
+            fs::remove_dir_all(&root).unwrap();
+        }
+        fs::create_dir_all(&root).unwrap();
+
+        let file = root.join("example.rs");
+        let original = "original contents\n";
+        fs::write(&file, original).unwrap();
+
+        let input = concat!(
+            "CVB::testtoken123::BEGIN v=1 id=duplicate-target\n",
+            "CVB::testtoken123::FILE path=example.rs\n",
+            "CVB::testtoken123::OP replace lines=1-1\n",
+            "CVB::testtoken123::OLD n=1\n",
+            "original contents\n",
+            "CVB::testtoken123::NEW n=1\n",
+            "first replacement\n",
+            "CVB::testtoken123::ENDOP\n",
+            "CVB::testtoken123::FILE path=example.rs\n",
+            "CVB::testtoken123::OP replace lines=1-1\n",
+            "CVB::testtoken123::OLD n=1\n",
+            "original contents\n",
+            "CVB::testtoken123::NEW n=1\n",
+            "second replacement\n",
+            "CVB::testtoken123::ENDOP\n",
+            "CVB::testtoken123::END ops=2",
+        );
+
+        match parse_load_plan(&root, input) {
+            Err(PipelineError::Parse(ParseError::DuplicateFile)) => {}
+            other => panic!("expected duplicate-file parse error, got {other:?}"),
+        }
+
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            original,
+            "duplicate target rejection must not modify the file"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn parse_load_plan_rejects_parent_traversal_without_touching_outside_file() {
+        let base: PathBuf = std::env::temp_dir().join(format!(
+            "cvb-parse-load-plan-traversal-{}",
+            std::process::id()
+        ));
+        let root = base.join("project");
+        let outside = base.join("outside.rs");
+
+        if base.exists() {
+            fs::remove_dir_all(&base).unwrap();
+        }
+        fs::create_dir_all(&root).unwrap();
+
+        let sentinel = "outside sentinel\n";
+        fs::write(&outside, sentinel).unwrap();
+
+        let input = concat!(
+            "CVB::testtoken123::BEGIN v=1 id=parent-traversal\n",
+            "CVB::testtoken123::FILE path=../outside.rs\n",
+            "CVB::testtoken123::OP replace lines=1-1\n",
+            "CVB::testtoken123::OLD n=1\n",
+            "outside sentinel\n",
+            "CVB::testtoken123::NEW n=1\n",
+            "changed contents\n",
+            "CVB::testtoken123::ENDOP\n",
+            "CVB::testtoken123::END ops=1",
+        );
+
+        match parse_load_plan(&root, input) {
+            Err(PipelineError::Parse(ParseError::InvalidPath)) => {}
+            other => panic!("expected invalid-path parse error, got {other:?}"),
+        }
+
+        assert_eq!(
+            fs::read_to_string(&outside).unwrap(),
+            sentinel,
+            "parent traversal must not modify a file outside the project"
+        );
+
+        fs::remove_dir_all(base).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn parse_load_plan_rejects_symlink_target_without_modifying_outside_file() {
+        use std::os::unix::fs::symlink;
+
+        let base: PathBuf = std::env::temp_dir().join(format!(
+            "cvb-parse-load-plan-symlink-{}",
+            std::process::id()
+        ));
+        let root = base.join("project");
+        let outside = base.join("outside.rs");
+        let link = root.join("linked.rs");
+
+        if base.exists() {
+            fs::remove_dir_all(&base).unwrap();
+        }
+        fs::create_dir_all(&root).unwrap();
+
+        let sentinel = "outside sentinel\n";
+        fs::write(&outside, sentinel).unwrap();
+        symlink(&outside, &link).unwrap();
+
+        let input = concat!(
+            "CVB::testtoken123::BEGIN v=1 id=symlink-target\n",
+            "CVB::testtoken123::FILE path=linked.rs\n",
+            "CVB::testtoken123::OP replace lines=1-1\n",
+            "CVB::testtoken123::OLD n=1\n",
+            "outside sentinel\n",
+            "CVB::testtoken123::NEW n=1\n",
+            "changed contents\n",
+            "CVB::testtoken123::ENDOP\n",
+            "CVB::testtoken123::END ops=1",
+        );
+
+        match parse_load_plan(&root, input) {
+            Err(PipelineError::Load(_)) => {}
+            other => panic!("expected load error for symlink target, got {other:?}"),
+        }
+
+        assert_eq!(
+            fs::read_to_string(&outside).unwrap(),
+            sentinel,
+            "rejecting a symlink target must not modify its destination"
+        );
+
+        fs::remove_dir_all(base).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn parse_load_plan_rejects_symlink_parent_without_modifying_outside_file() {
+        use std::os::unix::fs::symlink;
+
+        let base: PathBuf = std::env::temp_dir().join(format!(
+            "cvb-parse-load-plan-symlink-parent-{}",
+            std::process::id()
+        ));
+        let root = base.join("project");
+        let outside_dir = base.join("outside");
+        let outside_file = outside_dir.join("example.rs");
+
+        if base.exists() {
+            fs::remove_dir_all(&base).unwrap();
+        }
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside_dir).unwrap();
+
+        let sentinel = "outside sentinel\n";
+        fs::write(&outside_file, sentinel).unwrap();
+        symlink(&outside_dir, root.join("src")).unwrap();
+
+        let input = concat!(
+            "CVB::testtoken123::BEGIN v=1 id=symlink-parent\n",
+            "CVB::testtoken123::FILE path=src/example.rs\n",
+            "CVB::testtoken123::OP replace lines=1-1\n",
+            "CVB::testtoken123::OLD n=1\n",
+            "outside sentinel\n",
+            "CVB::testtoken123::NEW n=1\n",
+            "changed contents\n",
+            "CVB::testtoken123::ENDOP\n",
+            "CVB::testtoken123::END ops=1",
+        );
+
+        match parse_load_plan(&root, input) {
+            Err(PipelineError::Load(_)) => {}
+            other => panic!(
+                "expected load error for symlinked parent directory, got {other:?}"
+            ),
+        }
+
+        assert_eq!(
+            fs::read_to_string(&outside_file).unwrap(),
+            sentinel,
+            "rejecting a symlinked parent must not modify the outside file"
+        );
+
+        fs::remove_dir_all(base).unwrap();
+    }
+    #[test]
+    fn parse_load_plan_rejects_directory_target_without_modifying_directory() {
+        let root: PathBuf = std::env::temp_dir().join(format!(
+            "cvb-parse-load-plan-directory-target-{}",
+            std::process::id()
+        ));
+
+        if root.exists() {
+            fs::remove_dir_all(&root).unwrap();
+        }
+        fs::create_dir_all(&root).unwrap();
+
+        let target_dir = root.join("target");
+        fs::create_dir_all(&target_dir).unwrap();
+        let sentinel_file = target_dir.join("keep.txt");
+        fs::write(&sentinel_file, "keep me\n").unwrap();
+
+        let input = concat!(
+            "CVB::testtoken123::BEGIN v=1 id=directory-target\n",
+            "CVB::testtoken123::FILE path=target\n",
+            "CVB::testtoken123::OP replace lines=1-1\n",
+            "CVB::testtoken123::OLD n=1\n",
+            "placeholder\n",
+            "CVB::testtoken123::NEW n=1\n",
+            "changed contents\n",
+            "CVB::testtoken123::ENDOP\n",
+            "CVB::testtoken123::END ops=1",
+        );
+
+        match parse_load_plan(&root, input) {
+            Err(PipelineError::Load(_)) => {}
+            other => panic!("expected load error for directory target, got {other:?}"),
+        }
+
+        assert!(target_dir.is_dir(), "target directory must remain intact");
+        assert_eq!(
+            fs::read_to_string(&sentinel_file).unwrap(),
+            "keep me\n",
+            "rejecting a directory target must preserve its contents"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn parse_load_plan_rejects_invalid_utf8_without_modifying_file() {
+        let root: PathBuf = std::env::temp_dir().join(format!(
+            "cvb-parse-load-plan-invalid-utf8-{}",
+            std::process::id()
+        ));
+
+        if root.exists() {
+            fs::remove_dir_all(&root).unwrap();
+        }
+        fs::create_dir_all(&root).unwrap();
+
+        let file = root.join("invalid.rs");
+        let original: &[u8] = b"valid prefix\n\xff\xfe\n";
+        fs::write(&file, original).unwrap();
+
+        let input = concat!(
+            "CVB::testtoken123::BEGIN v=1 id=invalid-utf8\n",
+            "CVB::testtoken123::FILE path=invalid.rs\n",
+            "CVB::testtoken123::OP replace lines=1-1\n",
+            "CVB::testtoken123::OLD n=1\n",
+            "valid prefix\n",
+            "CVB::testtoken123::NEW n=1\n",
+            "replacement\n",
+            "CVB::testtoken123::ENDOP\n",
+            "CVB::testtoken123::END ops=1",
+        );
+
+        match parse_load_plan(&root, input) {
+            Err(PipelineError::Load(_)) => {}
+            other => panic!("expected load error for invalid UTF-8, got {other:?}"),
+        }
+
+        assert_eq!(
+            fs::read(&file).unwrap(),
+            original,
+            "rejecting invalid UTF-8 must preserve the original bytes"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn parse_load_plan_rejects_replacement_in_empty_file_without_modifying_file() {
+        let root: PathBuf = std::env::temp_dir().join(format!(
+            "cvb-parse-load-plan-empty-file-{}",
+            std::process::id()
+        ));
+
+        if root.exists() {
+            fs::remove_dir_all(&root).unwrap();
+        }
+        fs::create_dir_all(&root).unwrap();
+
+        let file = root.join("empty.rs");
+        let original: &[u8] = b"";
+        fs::write(&file, original).unwrap();
+
+        let input = concat!(
+            "CVB::testtoken123::BEGIN v=1 id=empty-file\n",
+            "CVB::testtoken123::FILE path=empty.rs\n",
+            "CVB::testtoken123::OP replace lines=1-1\n",
+            "CVB::testtoken123::OLD n=1\n",
+            "placeholder\n",
+            "CVB::testtoken123::NEW n=1\n",
+            "replacement\n",
+            "CVB::testtoken123::ENDOP\n",
+            "CVB::testtoken123::END ops=1",
+        );
+
+        match parse_load_plan(&root, input) {
+            Err(PipelineError::Plan(_)) => {}
+            other => panic!("expected planning error for replacement in empty file, got {other:?}"),
+        }
+
+        assert_eq!(
+            fs::read(&file).unwrap(),
+            original,
+            "a rejected operation must leave an empty file empty"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn parse_load_plan_rejects_insertion_into_empty_file_without_modifying_file() {
+        let root: PathBuf = std::env::temp_dir().join(format!(
+            "cvb-parse-load-plan-empty-insert-{}",
+            std::process::id()
+        ));
+
+        if root.exists() {
+            fs::remove_dir_all(&root).unwrap();
+        }
+        fs::create_dir_all(&root).unwrap();
+
+        let file = root.join("empty.rs");
+        let original: &[u8] = b"";
+        fs::write(&file, original).unwrap();
+
+        let input = concat!(
+            "CVB::testtoken123::BEGIN v=1 id=empty-insert\n",
+            "CVB::testtoken123::FILE path=empty.rs\n",
+            "CVB::testtoken123::OP insert before=1-1\n",
+            "CVB::testtoken123::ANCHOR n=1\n",
+            "placeholder\n",
+            "CVB::testtoken123::NEW n=1\n",
+            "inserted line\n",
+            "CVB::testtoken123::ENDOP\n",
+            "CVB::testtoken123::END ops=1",
+        );
+
+        match parse_load_plan(&root, input) {
+            Err(PipelineError::Plan(super::PlanError::InvalidFile)) => {}
+            other => panic!(
+                "expected InvalidFile planning error for empty target, got {other:?}"
+            ),
+        }
+
+        assert_eq!(
+            fs::read(&file).unwrap(),
+            original,
+            "rejecting insertion into an empty file must preserve its zero-byte contents"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
 }
+
 
 #[cfg(test)]
 mod load_originals_tests {
     use super::{load_originals, Envelope, FileSection};
     use std::fs;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
-    fn test_directory(label: &str) -> PathBuf {
+    fn test_directory(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
-            "cvb-load-originals-{}-{label}",
+            "cvb-load-originals-{name}-{}",
             std::process::id()
         ));
+
         if path.exists() {
             fs::remove_dir_all(&path).unwrap();
         }
@@ -1771,11 +2299,11 @@ mod load_originals_tests {
 
     fn envelope(path: &str) -> Envelope {
         Envelope {
-            token: "testtoken123".to_string(),
-            id: "test-id".to_string(),
+            token: "TOKEN123".to_owned(),
+            id: "load-test".to_owned(),
             files: vec![FileSection {
-                path: path.to_string(),
-                operations: Vec::new(),
+                path: path.to_owned(),
+                operations: vec![],
             }],
         }
     }
@@ -1833,11 +2361,9 @@ mod load_originals_tests {
 
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("symlink target is not allowed"));
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "outside contents");
 
         fs::remove_dir_all(&root).unwrap();
         fs::remove_file(outside).unwrap();
     }
-
-    #[allow(dead_code)]
-    fn _assert_path_is_path(_: &Path) {}
 }
