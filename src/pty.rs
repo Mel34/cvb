@@ -716,6 +716,10 @@ fn proxy(
                             continue;
                         }
 
+                        if !capture.capturing {
+                            continue;
+                        }
+
                         let captured = capture.end();
 
                         let scrollback = captured.len();

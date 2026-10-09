@@ -11,6 +11,22 @@ cvb() {
             return 1
         fi
 
+        local wrapper_dir
+        wrapper_dir=$(cd -- "$(dirname -- "$CVB_BASH_SOURCE")" && pwd)
+        local manual_file="$wrapper_dir/manual.md"
+
+        if [[ ! -f $manual_file ]]; then
+            manual_file="$wrapper_dir/../manual.md"
+        fi
+
+        if [[ -f $manual_file ]]; then
+            command cvb "$manual_file" || {
+                printf 'CVB: warning: unable to copy manual to clipboard\n' >&2
+            }
+        else
+            printf 'CVB: warning: manual not found: %s\n' "$manual_file" >&2
+        fi
+
         local runtime_dir="${XDG_RUNTIME_DIR:-/tmp}/cvb"
         local init_file
         local history_file
