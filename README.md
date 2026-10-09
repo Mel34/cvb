@@ -85,7 +85,7 @@ Press the configured screen-capture hotkey to copy the currently visible termina
 The default binding is:
 
 ```text
-Ctrl+Shift+B
+Ctrl+Shift+Space
 ```
 
 Screen capture works for both ordinary shell sessions and full-screen interactive terminal applications such as `htop` and `micro`.
@@ -113,7 +113,7 @@ Each non-empty, non-comment line defines one screen-capture binding. Multiple bi
 For example:
 
 ```text
-Ctrl+Shift+B
+Ctrl+Shift+Space
 Ctrl+Shift+N
 ```
 

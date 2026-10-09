@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-const DEFAULT_KEYBIND: &str = "Ctrl+Shift+B";
+const DEFAULT_KEYBIND: &str = "Ctrl+Shift+Space";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyBinding {
@@ -338,15 +338,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_ctrl_shift_b() {
+    fn parses_ctrl_shift_space() {
         assert_eq!(
-            parse("Ctrl+Shift+B").unwrap(),
+            parse("Ctrl+Shift+Space").unwrap(),
             KeyBinding {
                 ctrl: true,
                 shift: true,
                 alt: false,
                 super_key: false,
-                key: Key::Character('B'),
+                key: Key::Space,
             }
         );
     }
