@@ -11,6 +11,7 @@ mod pty;
 mod pull;
 mod shell;
 mod sound;
+mod surgery;
 
 const DEFAULT_IGNORE_LIST: &str = "\
 # This file contains directory names that CVB excludes from directory inventories.
@@ -71,6 +72,9 @@ A capture session ends with:
             }
 
             std::process::exit(pull::run(&args));
+        }
+        cli::Command::Surgery => {
+            println!("Paste CSL block");
         }
         cli::Command::Target(args) => {
             if std::env::var_os("CVB_INTERNAL_TARGET").is_some() {
