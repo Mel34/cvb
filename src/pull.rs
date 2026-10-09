@@ -149,6 +149,14 @@ fn rust_function_range(source: &str, hit_line: usize) -> Option<(usize, usize)> 
                     let span = function.span();
                     ranges.push((span.start().line, span.end().line));
                 }
+                syn::Item::Struct(item) => {
+                    let span = item.span();
+                    ranges.push((span.start().line, span.end().line));
+                }
+                syn::Item::Enum(item) => {
+                    let span = item.span();
+                    ranges.push((span.start().line, span.end().line));
+                }
                 syn::Item::Impl(implementation) => {
                     for item in &implementation.items {
                         if let syn::ImplItem::Fn(function) = item {
@@ -186,6 +194,57 @@ fn rust_function_range(source: &str, hit_line: usize) -> Option<(usize, usize)> 
 }
 
 
+fn rust_expansion_ranges(
+    source: &str,
+    hit_line: usize,
+) -> Vec<((usize, usize), &'static str)> {
+    use syn::spanned::Spanned;
+
+    let Ok(file) = syn::parse_file(source) else {
+        return Vec::new();
+    };
+
+    let matched_type = file.items.iter().find_map(|item| {
+        let (name, span, label) = match item {
+            syn::Item::Struct(item) => (&item.ident, item.span(), "Rust struct"),
+            syn::Item::Enum(item) => (&item.ident, item.span(), "Rust enum"),
+            _ => return None,
+        };
+
+        (span.start().line <= hit_line && hit_line <= span.end().line)
+            .then(|| (name.to_string(), (span.start().line, span.end().line), label))
+    });
+
+    if let Some((name, declaration, label)) = matched_type {
+        let mut ranges = vec![(declaration, label)];
+
+        for item in &file.items {
+            let syn::Item::Impl(implementation) = item else {
+                continue;
+            };
+            let syn::Type::Path(self_type) = implementation.self_ty.as_ref() else {
+                continue;
+            };
+
+            if self_type.qself.is_some()
+                || self_type.path.segments.last().map(|segment| segment.ident.to_string()).as_deref()
+                    != Some(name.as_str())
+            {
+                continue;
+            }
+
+            let span = implementation.span();
+            ranges.push(((span.start().line, span.end().line), "Rust impl"));
+        }
+
+        return ranges;
+    }
+
+    rust_function_range(source, hit_line)
+        .map(|range| vec![(range, "Rust function")])
+        .unwrap_or_default()
+}
+
 fn expand_rust_matches(matches: &str) -> String {
     use std::collections::HashSet;
     use std::fs;
@@ -215,26 +274,27 @@ fn expand_rust_matches(matches: &str) -> String {
             continue;
         };
 
-        let (range, label) = if is_rust {
-            (rust_function_range(&source, line), "Rust function")
+        let ranges = if is_rust {
+            rust_expansion_ranges(&source, line)
         } else {
-            (bash_function_range(&source, line), "Bash function")
+            bash_function_range(&source, line)
+                .map(|range| vec![(range, "Bash function")])
+                .unwrap_or_default()
         };
-        let Some((start, end)) = range else {
-            continue;
-        };
 
-        let key = (path.to_string(), start, end);
-        if !shown_functions.insert(key) {
-            continue;
-        }
+        for ((start, end), label) in ranges {
+            let key = (path.to_string(), start, end);
+            if !shown_functions.insert(key) {
+                continue;
+            }
 
-        output.push_str(&format!("  {label}: {path}:{start}-{end}\n"));
+            output.push_str(&format!("  {label}: {path}:{start}-{end}\n"));
 
-        for (index, source_line) in source.lines().enumerate() {
-            let number = index + 1;
-            if start <= number && number <= end {
-                output.push_str(&format!("  {number:>5} | {source_line}\n"));
+            for (index, source_line) in source.lines().enumerate() {
+                let number = index + 1;
+                if start <= number && number <= end {
+                    output.push_str(&format!("  {number:>5} | {source_line}\n"));
+                }
             }
         }
     }
@@ -284,6 +344,17 @@ fn after() {}
     }
 
     #[test]
+    fn rust_function_range_finds_multiline_struct() {
+        let source = r#"struct CaptureState {
+    capturing: bool,
+    captured: Vec<u8>,
+}
+"#;
+
+        assert_eq!(rust_function_range(source, 3), Some((1, 4)));
+    }
+
+    #[test]
     fn rust_function_range_finds_impl_method() {
         let source = r#"struct Example;
 
@@ -327,6 +398,34 @@ fn target() {
         assert_eq!(rust_function_range("fn broken( {", 1), None);
     }
 
+
+    #[test]
+    fn expansion_includes_impl_for_matched_struct() {
+        let directory = std::env::temp_dir().join(format!(
+            "cvb-pull-struct-impl-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+
+        let file = directory.join("example.rs");
+        let source = "struct Example {\n    value: usize,\n}\n\nimpl Example {\n    fn get(&self) -> usize {\n        self.value\n    }\n}\n";
+        std::fs::write(&file, source).unwrap();
+
+        let matches = format!("{}:1:struct Example {{", file.display());
+        let output = super::expand_rust_matches(&matches);
+
+        assert!(
+            output.contains("Rust struct: ") && output.contains("1 | struct Example {"),
+            "missing struct expansion:\n{output}"
+        );
+        assert!(
+            output.contains("Rust impl: ") && output.contains("5 | impl Example {"),
+            "missing associated impl expansion:\n{output}"
+        );
+        assert!(output.contains("9 | }"));
+
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
 
     #[test]
     fn expansion_deduplicates_function_blocks_and_preserves_matches() {
