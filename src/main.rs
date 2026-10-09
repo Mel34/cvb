@@ -8,6 +8,7 @@ mod control;
 mod keyboard;
 mod keybind;
 mod pty;
+mod pull;
 mod shell;
 mod sound;
 
@@ -67,7 +68,7 @@ A capture session ends with:
                 std::process::exit(2);
             }
 
-            eprintln!("CVB Thread Pull is not implemented yet.");
+            std::process::exit(pull::run(&args));
         }
         cli::Command::Target(args) => {
             if std::env::var_os("CVB_INTERNAL_TARGET").is_some() {
