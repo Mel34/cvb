@@ -1403,16 +1403,37 @@ pub(crate) fn plan_envelope(
 
         for i in 0..edits.len() {
             for j in (i + 1)..edits.len() {
-                let (a_start, a_end, _) = edits[i];
-                let (b_start, b_end, _) = edits[j];
+                let (a_start, a_end, a_operation) = edits[i];
+                let (b_start, b_end, b_operation) = edits[j];
 
                 let a_insert = a_start == a_end;
                 let b_insert = b_start == b_end;
 
+                let anchor_overlaps = |insert: &Operation, edit: &Operation| {
+                    let (anchor_start, anchor_end) = match insert {
+                        Operation::Insert { start, end, .. } => (*start - 1, *end),
+                        _ => return false,
+                    };
+
+                    let (edit_start, edit_end) = match edit {
+                        Operation::Replace { start, end, .. }
+                        | Operation::Delete { start, end, .. } => (*start - 1, *end),
+                        _ => return false,
+                    };
+
+                    anchor_start < edit_end && edit_start < anchor_end
+                };
+
+                if (a_insert && anchor_overlaps(a_operation, b_operation))
+                    || (b_insert && anchor_overlaps(b_operation, a_operation))
+                {
+                    return Err(PlanError::Overlap);
+                }
+
                 let overlaps = match (a_insert, b_insert) {
                     (true, true) => a_start == b_start,
-                    (true, false) => a_start >= b_start && a_start <= b_end,
-                    (false, true) => b_start >= a_start && b_start <= a_end,
+                    (true, false) => a_start > b_start && a_start < b_end,
+                    (false, true) => b_start > a_start && b_start < a_end,
                     (false, false) => a_start < b_end && b_start < a_end,
                 };
 
@@ -1518,6 +1539,30 @@ mod plan_envelope_tests {
         assert_eq!(plan.files[0].original, "one\ntwo\nthree\n");
         assert_eq!(plan.files[0].proposed, "ONE\ntwo\nTHREE\n");
         assert_eq!(original["example.txt"], "one\ntwo\nthree\n");
+    }
+
+    #[test]
+    fn rejects_insert_anchor_overlapping_replaced_lines() {
+        let envelope = make_envelope(vec![
+            Operation::Replace {
+                start: 2,
+                end: 2,
+                old: vec!["two".to_owned()],
+                new: vec!["TWO".to_owned()],
+            },
+            Operation::Insert {
+                position: InsertPosition::After,
+                start: 1,
+                end: 2,
+                anchor: vec!["one".to_owned(), "two".to_owned()],
+                new: vec!["inserted".to_owned()],
+            },
+        ]);
+
+        assert_eq!(
+            plan_envelope(&envelope, &originals("one\ntwo\nthree\nfour\n")),
+            Err(PlanError::Overlap)
+        );
     }
 
     #[test]
@@ -1656,26 +1701,32 @@ mod plan_envelope_tests {
 
 
     #[test]
-    fn rejects_insertion_at_edit_boundary() {
+    fn allows_insertion_at_edit_boundary() {
         let envelope = make_envelope(vec![
             Operation::Replace {
-                start: 1,
-                end: 1,
-                old: vec!["one".to_owned()],
-                new: vec!["ONE".to_owned()],
+                start: 2,
+                end: 3,
+                old: vec!["two".to_owned(), "three".to_owned()],
+                new: vec!["TWO".to_owned(), "THREE".to_owned()],
             },
             Operation::Insert {
-                position: InsertPosition::After,
-                start: 1,
-                end: 1,
-                anchor: vec!["one".to_owned()],
+                position: InsertPosition::Before,
+                start: 4,
+                end: 4,
+                anchor: vec!["four".to_owned()],
                 new: vec!["inserted".to_owned()],
             },
         ]);
 
+        let plan = plan_envelope(
+            &envelope,
+            &originals("one\ntwo\nthree\nfour\nfive\n"),
+        )
+        .unwrap();
+
         assert_eq!(
-            plan_envelope(&envelope, &originals("one\ntwo\n")),
-            Err(PlanError::Overlap)
+            plan.files[0].proposed,
+            "one\nTWO\nTHREE\ninserted\nfour\nfive\n"
         );
     }
 
