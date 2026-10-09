@@ -107,19 +107,30 @@ Use a directory inventory to share project structure. Capture individual files w
 
 Run the command from inside the Git repository you want to search.
 
-    cvb pull HotkeyMonitor
+    cvb pull surgery
 
-CVB searches Git-tracked files and returns matching lines with file and line information. For Rust and Bash source, it also attempts to include the enclosing function or method.
+CVB searches Git-tracked files and returns matching lines with file and line information. For supported source files, it can include the enclosing function or method. For Markdown, it expands matches to their surrounding section.
 
-Search terms are literal. Multiple arguments are joined into one phrase, not treated as separate searches.
+### Query operators
 
-For separate searches, run separate commands:
+- **Bare terms** are alternatives: a result can match any bare term.
+- **`+term`** requires that term to be present.
+- **`-term`** excludes results containing that term.
+- **Quoted phrases** let you search for a phrase, including when using an operator.
 
-    cvb pull HotkeyMonitor
-    cvb pull keybind::load
-    cvb pull CVB_START_MARKER
+For example:
 
-Untracked files are not included. To share an untracked file, capture it directly instead.
+    cvb pull surgery protocol
+    cvb pull +surgery +protocol
+    cvb pull +surgery -protocol
+    cvb pull '"line ending"'
+    cvb pull +'"line ending"' +UTF-8
+
+The first query matches either `surgery` or `protocol`. The second requires both terms. The third requires `surgery` and excludes matches containing `protocol`.
+
+Filtering applies to matching records before surrounding Markdown sections are expanded. As a result, an expanded section may still display the excluded word in its surrounding context; that does not necessarily mean a line containing the excluded term matched.
+
+Search terms are literal, and only Git-tracked files are searched. Untracked files are not included. To share an untracked file, capture it directly instead.
 
 ## 6. Using CVB with an LLM
 
