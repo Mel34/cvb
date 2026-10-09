@@ -105,20 +105,28 @@ Use a directory inventory to share project structure. Capture individual files w
 
 ## 5. Search source with cvb pull
 
-Run the command from inside the Git repository you want to search.
+Use `cvb pull` to find relevant code or documentation in the current Git
+repository. It returns matching lines with file and line information, and can
+expand those matches to useful surrounding context. This lets an LLM locate
+definitions and documentation without needing the entire repository pasted
+into the conversation.
+
+Run the command from inside the repository you want to search:
 
     cvb pull surgery
 
-CVB searches Git-tracked files and returns matching lines with file and line information. For supported source files, it can include the enclosing function or method. For Markdown, it expands matches to their surrounding section.
-
 ### Query operators
 
-- **Bare terms** are alternatives: a result can match any bare term.
-- **`+term`** requires that term to be present.
-- **`-term`** excludes results containing that term.
-- **Quoted phrases** let you search for a phrase, including when using an operator.
+Queries are case-sensitive and use literal terms and phrases.
 
-For example:
+- **Bare terms** are alternatives: a result can match any bare term.
+- **`+term`** makes a term required.
+- **`-term`** excludes matching records containing that term.
+- **Quoted phrases** search for a phrase rather than treating its words as
+  independent terms.
+- Operators can be combined in one query.
+
+Examples:
 
     cvb pull surgery protocol
     cvb pull +surgery +protocol
@@ -126,11 +134,76 @@ For example:
     cvb pull '"line ending"'
     cvb pull +'"line ending"' +UTF-8
 
-The first query matches either `surgery` or `protocol`. The second requires both terms. The third requires `surgery` and excludes matches containing `protocol`.
+Interpret these queries as follows:
 
-Filtering applies to matching records before surrounding Markdown sections are expanded. As a result, an expanded section may still display the excluded word in its surrounding context; that does not necessarily mean a line containing the excluded term matched.
+- `surgery protocol` searches for either term.
+- `+surgery +protocol` requires both terms.
+- `+surgery -protocol` requires `surgery` and excludes matches containing
+  `protocol`.
+- `'"line ending"'` searches for the phrase `line ending`.
+- `+'"line ending"' +UTF-8` requires both the phrase and `UTF-8`.
 
-Search terms are literal, and only Git-tracked files are searched. Untracked files are not included. To share an untracked file, capture it directly instead.
+Quote phrases so the shell passes them to CVB as a single query phrase.
+Keep the operator attached to the term or quoted phrase it modifies.
+
+### Context expansion
+
+A match can be more useful when returned with the code or documentation around
+it. CVB supports context expansion for recognized source constructs and
+Markdown sections.
+
+- **Rust and shell source:** where supported, a match can expand to its
+  enclosing function or method.
+- **Markdown (`.md` and `.markdown`):** a match expands to its enclosing
+  section, starting at the nearest heading at or above the match and continuing
+  through that section's nested subsections until the next heading of equal or
+  higher level.
+- **Fenced code blocks in Markdown:** heading-like lines inside fenced code
+  blocks are not treated as section boundaries.
+- **Repeated matches:** matches that resolve to the same Markdown section are
+  deduplicated rather than returning that section repeatedly.
+
+For example:
+
+    cvb pull PS0
+    cvb pull +history -duplicate
+    cvb pull '"query operators"'
+
+Use a narrow query to find the relevant definition, implementation, or
+documentation. Context expansion provides nearby structure, but it does not
+guarantee that every dependency or caller is included.
+
+### Filtering and search scope
+
+Filtering is applied to matching records before Markdown sections are expanded.
+An expanded section may therefore contain surrounding context with a word
+excluded by `-term`. That does not mean a line containing the excluded term
+matched the query.
+
+Search is limited to Git-tracked files in the current repository. Untracked
+files and files outside that repository are not searched. To share an
+untracked file or a known file's complete contents, capture it directly:
+
+    cvb path/to/file
+
+### Recommended workflow for an LLM
+
+1. **Start with the question.** Search for a distinctive function, symbol,
+   error message, protocol name, or documentation phrase.
+2. **Combine terms when useful.** Use required terms to narrow the search,
+   alternatives to explore related names, and exclusions to remove unwanted
+   matches.
+3. **Read the returned context.** Use the enclosing function or Markdown
+   section to understand the match before proposing a change.
+4. **Refine the query.** If the result is too broad or incomplete, search for
+   a more specific symbol or phrase.
+5. **Capture complete files when needed.** If the relevant logic spans multiple
+   functions or files, inspect those files directly rather than assuming the
+   search result contains the entire implementation.
+
+Treat `cvb pull` as a repository navigation and context-retrieval tool. Search
+results are evidence to inspect, not a substitute for checking the relevant
+implementation, callers, tests, and actual command output.
 
 ## 6. Using CVB with an LLM
 
