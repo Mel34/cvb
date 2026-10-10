@@ -1027,8 +1027,19 @@ pub(crate) fn load_originals(
             return Err(format!("CVB: target is not a regular file: '{}'", current.display()));
         }
 
-        let contents = std::fs::read_to_string(&current)
+        let bytes = std::fs::read(&current)
             .map_err(|error| format!("CVB: unable to read '{}': {error}", current.display()))?;
+
+        let contents = String::from_utf8(bytes)
+            .map_err(|_| format!("CVB: invalid UTF-8 in '{}'", current.display()))?;
+
+        if contents.contains('\0') {
+            return Err(format!("CVB: NUL byte is not allowed: '{}'", current.display()));
+        }
+
+        if contents.starts_with('\u{FEFF}') {
+            return Err(format!("CVB: UTF-8 BOM is not allowed: '{}'", current.display()));
+        }
 
         originals.insert(section.path.clone(), contents);
     }
@@ -2464,7 +2475,12 @@ mod parse_load_plan_tests {
         );
 
         match parse_load_plan(&root, input) {
-            Err(PipelineError::Load(_)) => {}
+            Err(PipelineError::Load(message)) => {
+                assert!(
+                    message.contains("invalid UTF-8"),
+                    "expected an invalid UTF-8 error message, got: {message}"
+                );
+            }
             other => panic!("expected load error for invalid UTF-8, got {other:?}"),
         }
 
@@ -2651,4 +2667,41 @@ mod load_originals_tests {
         fs::remove_dir_all(&root).unwrap();
         fs::remove_file(outside).unwrap();
     }
+
+    #[test]
+    fn rejects_utf8_bom() {
+        let root = test_directory("bom");
+        let original: &[u8] = b"\xEF\xBB\xBFfn example() {}\n";
+        fs::write(root.join("example.rs"), original).unwrap();
+
+        let result = load_originals(&root, &envelope("example.rs"));
+
+        assert!(result.is_err(), "UTF-8 BOM must be rejected");
+        assert_eq!(
+            fs::read(root.join("example.rs")).unwrap(),
+            original,
+            "rejecting a BOM must preserve the original bytes"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_nul_byte() {
+        let root = test_directory("nul");
+        let original: &[u8] = b"fn example() {}\0\n";
+        fs::write(root.join("example.rs"), original).unwrap();
+
+        let result = load_originals(&root, &envelope("example.rs"));
+
+        assert!(result.is_err(), "NUL bytes must be rejected");
+        assert_eq!(
+            fs::read(root.join("example.rs")).unwrap(),
+            original,
+            "rejecting NUL bytes must preserve the original bytes"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
 }
