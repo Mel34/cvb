@@ -1041,6 +1041,39 @@ pub(crate) fn load_originals(
             return Err(format!("CVB: UTF-8 BOM is not allowed: '{}'", current.display()));
         }
 
+        let bytes = contents.as_bytes();
+        let mut has_lf = false;
+        let mut has_crlf = false;
+        let mut index = 0;
+
+        while index < bytes.len() {
+            match bytes[index] {
+                b'\r' => {
+                    if bytes.get(index + 1) == Some(&b'\n') {
+                        has_crlf = true;
+                        index += 2;
+                    } else {
+                        return Err(format!(
+                            "CVB: lone CR is not allowed: '{}'",
+                            current.display()
+                        ));
+                    }
+                }
+                b'\n' => {
+                    has_lf = true;
+                    index += 1;
+                }
+                _ => index += 1,
+            }
+        }
+
+        if has_lf && has_crlf {
+            return Err(format!(
+                "CVB: mixed LF/CRLF line endings: '{}'",
+                current.display()
+            ));
+        }
+
         originals.insert(section.path.clone(), contents);
     }
 
@@ -1873,6 +1906,20 @@ mod plan_envelope_tests {
     }
 
     #[test]
+    fn preserves_crlf_without_final_newline() {
+        let envelope = make_envelope(vec![Operation::Replace {
+            start: 1,
+            end: 1,
+            old: vec!["one".to_owned()],
+            new: vec!["ONE".to_owned()],
+        }]);
+
+        let plan = plan_envelope(&envelope, &originals("one\r\ntwo")).unwrap();
+
+        assert_eq!(plan.files[0].proposed, "ONE\r\ntwo");
+    }
+
+    #[test]
     fn preserves_crlf_line_endings() {
         let envelope = make_envelope(vec![Operation::Replace {
             start: 1,
@@ -2699,6 +2746,58 @@ mod load_originals_tests {
             fs::read(root.join("example.rs")).unwrap(),
             original,
             "rejecting NUL bytes must preserve the original bytes"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reads_crlf_file() {
+        let root = test_directory("crlf");
+        let original = "first line\r\nsecond line\r\n";
+        fs::write(root.join("example.rs"), original).unwrap();
+
+        let result = load_originals(&root, &envelope("example.rs")).unwrap();
+
+        assert_eq!(
+            result.get("example.rs").map(String::as_str),
+            Some(original)
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_mixed_line_endings() {
+        let root = test_directory("mixed-line-endings");
+        let original: &[u8] = b"first line\nsecond line\r\n";
+        fs::write(root.join("example.rs"), original).unwrap();
+
+        let result = load_originals(&root, &envelope("example.rs"));
+
+        assert!(result.is_err(), "mixed LF/CRLF endings must be rejected");
+        assert_eq!(
+            fs::read(root.join("example.rs")).unwrap(),
+            original,
+            "rejecting mixed line endings must preserve the original bytes"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_lone_carriage_return() {
+        let root = test_directory("lone-carriage-return");
+        let original: &[u8] = b"first line\rsecond line\n";
+        fs::write(root.join("example.rs"), original).unwrap();
+
+        let result = load_originals(&root, &envelope("example.rs"));
+
+        assert!(result.is_err(), "a lone CR must be rejected");
+        assert_eq!(
+            fs::read(root.join("example.rs")).unwrap(),
+            original,
+            "rejecting a lone CR must preserve the original bytes"
         );
 
         fs::remove_dir_all(root).unwrap();
