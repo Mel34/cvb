@@ -122,8 +122,10 @@ fn parse_share_url(body: &[u8]) -> Result<String, String> {
         || url.password().is_some()
         || url.query().is_some()
         || url.fragment().is_some()
-        || path.is_empty()
-        || path.contains('/')
+        || path.len() != 12
+        || !path.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
+        })
     {
         return Err("CVB: NullPaste returned an unexpected share URL".to_string());
     }
@@ -261,6 +263,20 @@ mod tests {
     #[test]
     fn rejects_share_url_from_another_host() {
         let body = br#"{"url":"https://example.com/AbC123xYz012"}"#;
+
+        assert!(super::parse_share_url(body).is_err());
+    }
+
+    #[test]
+    fn rejects_share_url_with_wrong_id_length() {
+        let body = br#"{"url":"https://nullpaste.org/AbC123xYz01"}"#;
+
+        assert!(super::parse_share_url(body).is_err());
+    }
+
+    #[test]
+    fn rejects_share_url_with_invalid_id_character() {
+        let body = br#"{"url":"https://nullpaste.org/AbC123xYz0.2"}"#;
 
         assert!(super::parse_share_url(body).is_err());
     }
