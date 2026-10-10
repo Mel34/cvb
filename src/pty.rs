@@ -732,7 +732,9 @@ fn proxy(
                         } else {
                             text
                         };
-                        copy_to_clipboard(&processed)?;
+                        let buffer =
+                            crate::clipboard::ClipboardBuffer::new(processed.into_bytes());
+                        crate::clipboard::process(&buffer)?;
                     }
                 }
             }
@@ -818,31 +820,8 @@ fn capture_screen(terminal: &mut vt100::Parser) -> Result<(), String> {
         text
     };
 
-    copy_to_clipboard(&processed)?;
-
-    Ok(())
-}
-
-fn copy_to_clipboard(text: &str) -> Result<(), String> {
-    let mut clipboard = std::process::Command::new("wl-copy").arg("--type").arg("text/plain")
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("CVB: unable to start wl-copy: {error}"))?;
-
-    clipboard
-        .stdin
-        .take()
-        .ok_or_else(|| "CVB: unable to open wl-copy stdin".to_string())?
-        .write_all(text.as_bytes())
-        .map_err(|error| format!("CVB: unable to write to wl-copy: {error}"))?;
-
-    let status = clipboard
-        .wait()
-        .map_err(|error| format!("CVB: unable to wait for wl-copy: {error}"))?;
-
-    if !status.success() {
-        return Err("CVB: wl-copy failed".to_string());
-    }
+    let buffer = crate::clipboard::ClipboardBuffer::new(processed.into_bytes());
+    crate::clipboard::process(&buffer)?;
 
     Ok(())
 }

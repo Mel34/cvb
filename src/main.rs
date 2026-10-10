@@ -1,9 +1,9 @@
 use std::fmt::Write as FmtWrite;
-use std::io::Write as IoWrite;
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 mod cli;
+pub(crate) mod clipboard;
 mod control;
 mod keyboard;
 mod keybind;
@@ -198,7 +198,8 @@ pub(crate) fn bridge_paths(paths: &[std::path::PathBuf]) -> Result<String, Strin
 
             let entry_count = output.lines().skip(1).count();
 
-            copy_to_clipboard(output.as_bytes())?;
+            let buffer = clipboard::ClipboardBuffer::new(output.into_bytes());
+            clipboard::process(&buffer)?;
 
             return Ok(format!(
                 "CVB: captured directory inventory '{}' ({} {})",
@@ -210,7 +211,8 @@ pub(crate) fn bridge_paths(paths: &[std::path::PathBuf]) -> Result<String, Strin
     }
 
     let output = build_paths_output(paths)?;
-    copy_to_clipboard(output.as_bytes())?;
+    let buffer = clipboard::ClipboardBuffer::new(output.into_bytes());
+    clipboard::process(&buffer)?;
 
     Ok(format!("CVB: captured {} paths", paths.len()))
 }
@@ -251,31 +253,10 @@ fn bridge_file(path: &Path) -> Result<(), String> {
     let contents = std::fs::read(path)
         .map_err(|error| format!("CVB: unable to read {}: {error}", path.display()))?;
 
-    copy_to_clipboard(&contents)
+    let buffer = clipboard::ClipboardBuffer::new(contents);
+    clipboard::process(&buffer)
 }
 
-fn copy_to_clipboard(contents: &[u8]) -> Result<(), String> {
-    let mut child = std::process::Command::new("wl-copy")
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("CVB: unable to start wl-copy: {error}"))?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(contents)
-            .map_err(|error| format!("CVB: unable to write to wl-copy: {error}"))?;
-    }
-
-    let status = child
-        .wait()
-        .map_err(|error| format!("CVB: unable to wait for wl-copy: {error}"))?;
-
-    if !status.success() {
-        return Err(format!("CVB: wl-copy exited with status {status}"));
-    }
-
-    Ok(())
-}
 
 fn parse_ignore_list(contents: &str) -> Vec<String> {
     contents
