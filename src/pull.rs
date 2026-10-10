@@ -29,8 +29,75 @@ fn tracked_files() -> Result<Vec<OsString>, String> {
 }
 
 
-fn extract_file_scope(args: &[String]) -> Result<(Option<String>, Vec<String>), String> {
+fn parse_line_range(range: &str) -> Result<(usize, usize), String> {
+    let Some((start, end)) = range.split_once('-') else {
+        let line = range.parse::<usize>().map_err(|_| {
+            format!(
+                "CVB pull: invalid line selector '{range}'; expected LINE or START-END."
+            )
+        })?;
+
+        if line == 0 {
+            return Err(
+                "CVB pull: invalid line selector '0'; line numbers start at 1.".to_string(),
+            );
+        }
+
+        return Ok((line, line));
+    };
+
+    let start = start.parse::<usize>().map_err(|_| {
+        format!("CVB pull: invalid line range '{range}'; START must be a positive line number.")
+    })?;
+    let end = end.parse::<usize>().map_err(|_| {
+        format!("CVB pull: invalid line range '{range}'; END must be a positive line number.")
+    })?;
+
+    if start == 0 || end == 0 {
+        return Err(format!(
+            "CVB pull: invalid line range '{range}'; line numbers start at 1."
+        ));
+    }
+
+    if start > end {
+        return Err(format!(
+            "CVB pull: invalid line range '{range}'; START must not exceed END."
+        ));
+    }
+
+    Ok((start, end))
+}
+
+fn read_line_range(path: &str, start: usize, end: usize) -> Result<String, String> {
+    let source = std::fs::read_to_string(path)
+        .map_err(|error| format!("CVB pull: unable to read {path}: {error}"))?;
+    let lines: Vec<&str> = source.lines().collect();
+
+    if start == 0 || end == 0 || start > end {
+        return Err("CVB pull: invalid line range; expected positive START not exceeding END."
+            .to_string());
+    }
+
+    if end > lines.len() {
+        return Err(format!(
+            "CVB pull: line range {start}-{end} exceeds {path}, which has {} lines.",
+            lines.len()
+        ));
+    }
+
+    let mut output = String::new();
+    for number in start..=end {
+        output.push_str(&format!("{path}:{number}: {}\n", lines[number - 1]));
+    }
+
+    Ok(output)
+}
+
+fn extract_file_scope(
+    args: &[String],
+) -> Result<(Option<String>, Option<(usize, usize)>, Vec<String>), String> {
     let mut scope = None;
+    let mut line_range = None;
     let mut query_args = Vec::new();
 
     for arg in args {
@@ -42,16 +109,25 @@ fn extract_file_scope(args: &[String]) -> Result<(Option<String>, Vec<String>), 
                 return Err("CVB pull: only one file: scope is allowed.".to_string());
             }
             scope = Some(path.to_string());
+        } else if let Some(range) = arg.strip_prefix("lines:") {
+            if line_range.is_some() {
+                return Err("CVB pull: only one lines: selector is allowed.".to_string());
+            }
+            line_range = Some(parse_line_range(range)?);
         } else {
             query_args.push(arg.clone());
         }
     }
 
-    if query_args.is_empty() {
+    if line_range.is_some() && scope.is_none() {
+        return Err("CVB pull: lines: requires a file: scope.".to_string());
+    }
+
+    if query_args.is_empty() && line_range.is_none() {
         return Err("CVB pull: search query is empty.".to_string());
     }
 
-    Ok((scope, query_args))
+    Ok((scope, line_range, query_args))
 }
 
 fn filter_file_scope(
@@ -214,11 +290,12 @@ fn filter_matches(query: &SearchQuery, matches: &str) -> String {
 pub fn run(args: &[String]) -> i32 {
     if args.is_empty() {
         eprintln!("Usage: cvb pull [file:PATH] <search-term>...");
+        eprintln!("       cvb pull file:PATH lines:LINE|START-END");
         return 2;
     }
 
     let term = args.join(" ");
-    let (scope, query_args) = match extract_file_scope(args) {
+    let (scope, line_range, query_args) = match extract_file_scope(args) {
         Ok(parsed) => parsed,
         Err(error) => {
             eprintln!("{error}");
@@ -226,11 +303,20 @@ pub fn run(args: &[String]) -> i32 {
         }
     };
 
-    let query = match parse_query(&query_args) {
-        Ok(query) => query,
-        Err(error) => {
-            eprintln!("{error}");
-            return 2;
+    if line_range.is_some() && !query_args.is_empty() {
+        eprintln!("CVB pull: lines: cannot be combined with search terms.");
+        return 2;
+    }
+
+    let query = if line_range.is_some() {
+        SearchQuery::default()
+    } else {
+        match parse_query(&query_args) {
+            Ok(query) => query,
+            Err(error) => {
+                eprintln!("{error}");
+                return 2;
+            }
         }
     };
 
@@ -249,6 +335,17 @@ pub fn run(args: &[String]) -> i32 {
             return 2;
         }
     };
+
+    if let (Some(path), Some((start, end))) = (scope.as_deref(), line_range) {
+        match read_line_range(path, start, end) {
+            Ok(output) => print!("{output}"),
+            Err(error) => {
+                eprintln!("{error}");
+                return 2;
+            }
+        }
+        return 0;
+    }
 
     let search_terms: Vec<&str> = if !query.alternatives.is_empty() {
         query.alternatives.iter().map(String::as_str).collect()
@@ -767,6 +864,68 @@ fn target() {
     }
 
     #[test]
+    fn read_line_range_returns_requested_lines_with_original_numbers() {
+        use super::read_line_range;
+
+        let path = std::env::temp_dir().join(format!(
+            "cvb-pull-lines-{}.txt",
+            std::process::id()
+        ));
+        std::fs::write(&path, "alpha\nbeta\ngamma\n").unwrap();
+        let path_text = path.to_string_lossy();
+
+        let single = read_line_range(&path_text, 2, 2).unwrap();
+        assert_eq!(single, format!("{path_text}:2: beta\n"));
+
+        let multiple = read_line_range(&path_text, 1, 3).unwrap();
+        assert_eq!(
+            multiple,
+            format!(
+                "{path_text}:1: alpha\n{path_text}:2: beta\n{path_text}:3: gamma\n"
+            )
+        );
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn read_line_range_rejects_invalid_or_out_of_bounds_ranges() {
+        use super::read_line_range;
+
+        let path = std::env::temp_dir().join(format!(
+            "cvb-pull-lines-bounds-{}.txt",
+            std::process::id()
+        ));
+        std::fs::write(&path, "alpha\nbeta\n").unwrap();
+        let path_text = path.to_string_lossy();
+
+        assert!(read_line_range(&path_text, 0, 1).is_err());
+        assert!(read_line_range(&path_text, 2, 1).is_err());
+        assert!(read_line_range(&path_text, 1, 3).is_err());
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn parse_line_range_accepts_valid_inclusive_ranges() {
+        use super::parse_line_range;
+
+        assert_eq!(parse_line_range("155").unwrap(), (155, 155));
+        assert_eq!(parse_line_range("1").unwrap(), (1, 1));
+        assert_eq!(parse_line_range("155-215").unwrap(), (155, 215));
+        assert_eq!(parse_line_range("1-1").unwrap(), (1, 1));
+    }
+
+    #[test]
+    fn parse_line_range_rejects_invalid_ranges() {
+        use super::parse_line_range;
+
+        for range in ["", "0-10", "1-0", "20-10", "abc-20", "1-", "-10", "1-2-3"] {
+            assert!(parse_line_range(range).is_err(), "accepted: {range}");
+        }
+    }
+
+    #[test]
     fn extract_file_scope_preserves_query_operators() {
         use super::extract_file_scope;
 
@@ -777,13 +936,49 @@ fn target() {
             "-example".into(),
         ];
 
-        let (scope, query) = extract_file_scope(&args).unwrap();
+        let (scope, lines, query) = extract_file_scope(&args).unwrap();
 
         assert_eq!(scope.as_deref(), Some("src/pull.rs"));
+        assert_eq!(lines, None);
         assert_eq!(
             query,
             vec!["protocol", "+line-endings", "-example"]
         );
+    }
+
+    #[test]
+    fn extract_file_scope_parses_line_ranges() {
+        use super::extract_file_scope;
+
+        let args = vec![
+            "file:src/pull.rs".into(),
+            "lines:96-110".into(),
+        ];
+
+        let (scope, lines, query) = extract_file_scope(&args).unwrap();
+
+        assert_eq!(scope.as_deref(), Some("src/pull.rs"));
+        assert_eq!(lines, Some((96, 110)));
+        assert!(query.is_empty());
+
+        let single_line = vec![
+            "file:manual.md".into(),
+            "lines:155".into(),
+        ];
+
+        let (scope, lines, query) = extract_file_scope(&single_line).unwrap();
+
+        assert_eq!(scope.as_deref(), Some("manual.md"));
+        assert_eq!(lines, Some((155, 155)));
+        assert!(query.is_empty());
+
+        assert!(extract_file_scope(&[
+            "file:src/pull.rs".into(),
+            "lines:1-3".into(),
+            "lines:5-8".into(),
+        ]).is_err());
+
+        assert!(extract_file_scope(&["lines:1-3".into()]).is_err());
     }
 
     #[test]

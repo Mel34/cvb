@@ -193,6 +193,13 @@ the path must match a Git-tracked file exactly. A missing path produces an
 error rather than falling back to a repository-wide search. Directory prefixes
 and glob patterns are not supported as file scopes.
 
+To print a specific inclusive line range from one tracked file, use `lines:START-END`.
+A single line can be selected with `lines:LINE`. Line numbers start at 1, and
+`lines:` cannot be combined with search terms:
+
+    cvb pull file:src/pull.rs lines:96-110
+    cvb pull file:manual.md lines:155
+
 Untracked files and files outside the repository are not searched. To share an
 untracked file or a known file's complete contents, capture it directly:
 
