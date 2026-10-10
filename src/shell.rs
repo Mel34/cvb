@@ -146,7 +146,7 @@ fn control_script() -> Result<String, String> {
 
     if actual != CVB_CONTROL_BASH_SHA256 {
         return Err(format!(
-            "CVB: cvb-control.bash fingerprint mismatch at {}\\n  expected: {}\\n  actual:   {}\\nRebuild and reinstall CVB.",
+            "CVB: cvb-control.bash fingerprint mismatch at {}\n  expected: {}\n  actual:   {}\nRebuild and reinstall CVB.",
             path.display(),
             CVB_CONTROL_BASH_SHA256,
             actual
