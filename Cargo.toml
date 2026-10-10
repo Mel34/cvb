@@ -12,6 +12,8 @@ nix = { version = "0.30", features = ["term", "process", "poll", "ioctl", "signa
 vt100 = "0.16.2"
 syn = { version = "2", features = ["full", "visit"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+serde_json = "1"
 tree-sitter = "0.25"
 tree-sitter-bash = "0.25.1"
 
