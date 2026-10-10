@@ -173,6 +173,36 @@ Use a narrow query to find the relevant definition, implementation, or
 documentation. Context expansion provides nearby structure, but it does not
 guarantee that every dependency or caller is included.
 
+### Caller discovery
+
+Use `callers:NAME` to find syntactic call sites for a Rust function or method
+name across tracked Rust source files:
+
+    cvb pull callers:run
+
+Restrict the scan to one tracked Rust file with `file:PATH`:
+
+    cvb pull file:src/main.rs callers:run
+
+Results include the file, line, and enclosing function when available.
+Function calls are matched by the final name in a path. Method calls are
+reported as **method-call candidates**. These are syntactic matches, not
+semantic proof that a particular implementation is invoked. Results can
+include false positives and may miss indirect calls.
+
+Unreadable or unparseable Rust files produce warnings. Matches are still
+reported if the scan is incomplete. If no matches are found during an
+incomplete scan, CVB warns that no reliable conclusion can be drawn.
+
+`callers:` accepts one target and an optional `file:PATH` scope. It cannot
+be combined with `lines:` or ordinary search terms.
+
+Exit status:
+
+- `0`: at least one caller match was found.
+- `1`: the scan completed without finding a match.
+- `2`: invalid arguments, a scan failure, or no matches from an incomplete scan.
+
 ### Filtering and search scope
 
 Filtering is applied to matching records before Markdown sections are expanded.

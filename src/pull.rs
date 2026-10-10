@@ -287,7 +287,163 @@ fn filter_matches(query: &SearchQuery, matches: &str) -> String {
     filtered
 }
 
+fn extract_callers_scope(
+    args: &[String],
+) -> Result<Option<(String, Option<String>)>, String> {
+    let selectors: Vec<&String> = args
+        .iter()
+        .filter(|arg| arg.starts_with("callers:"))
+        .collect();
+
+    if selectors.is_empty() {
+        return Ok(None);
+    }
+    if selectors.len() != 1 {
+        return Err("CVB pull: only one callers: selector is allowed.".to_string());
+    }
+
+    let target = selectors[0]
+        .strip_prefix("callers:")
+        .expect("selector prefix was checked");
+
+    if target.is_empty() || syn::parse_str::<syn::Ident>(target).is_err() {
+        return Err(
+            "CVB pull: callers: must be followed by a Rust function or method name."
+                .to_string(),
+        );
+    }
+
+    let mut scope = None;
+
+    for arg in args {
+        if arg == selectors[0] {
+            continue;
+        }
+
+        if let Some(path) = arg.strip_prefix("file:") {
+            if path.is_empty() {
+                return Err("CVB pull: file: must be followed by a path.".to_string());
+            }
+            if scope.is_some() {
+                return Err("CVB pull: only one file: scope is allowed.".to_string());
+            }
+            if std::path::Path::new(path).extension() != Some(OsStr::new("rs")) {
+                return Err("CVB pull: callers: file scope must be a Rust .rs file.".to_string());
+            }
+            scope = Some(path.to_string());
+        } else if arg.starts_with("lines:") {
+            return Err("CVB pull: callers: cannot be combined with lines:.".to_string());
+        } else {
+            return Err("CVB pull: callers: cannot be combined with search terms.".to_string());
+        }
+    }
+
+    Ok(Some((target.to_string(), scope)))
+}
+
+fn run_callers(target: &str, scope: Option<&str>) -> i32 {
+    let files = match tracked_files() {
+        Ok(files) => files,
+        Err(error) => {
+            eprintln!("{error}");
+            return 2;
+        }
+    };
+
+    let files = match filter_file_scope(files, scope) {
+        Ok(files) => files,
+        Err(error) => {
+            eprintln!("{error}");
+            return 2;
+        }
+    };
+
+    let rust_files: Vec<OsString> = files
+        .into_iter()
+        .filter(|path| std::path::Path::new(path).extension() == Some(OsStr::new("rs")))
+        .collect();
+
+    let mut found = false;
+    let mut incomplete = false;
+
+    for path in rust_files {
+        let display_path = path.to_string_lossy();
+
+        let source = match std::fs::read_to_string(&path) {
+            Ok(source) => source,
+            Err(error) => {
+                eprintln!(
+                    "CVB pull: warning: unable to read Rust file {display_path}: {error}; \
+                     caller results may be incomplete."
+                );
+                incomplete = true;
+                continue;
+            }
+        };
+
+        let matches = match rust_callers(&source, target) {
+            Some(matches) => matches,
+            None => {
+                eprintln!(
+                    "CVB pull: warning: skipping unparseable Rust file {display_path}; \
+                     caller results may be incomplete."
+                );
+                incomplete = true;
+                continue;
+            }
+        };
+
+        for item in matches {
+            found = true;
+            let kind = match item.kind {
+                RustCallKind::Function => "function call",
+                RustCallKind::Method => "method-call candidate",
+            };
+
+            match item.enclosing_function.as_deref() {
+                Some(function) => println!(
+                    "{display_path}:{}: {kind} to {target} inside {function}",
+                    item.line
+                ),
+                None => println!(
+                    "{display_path}:{}: {kind} to {target} outside a function",
+                    item.line
+                ),
+            }
+        }
+    }
+
+    let status = callers_exit_status(found, incomplete);
+
+    if status == 2 {
+        eprintln!("CVB pull: caller scan incomplete; no reliable no-callers conclusion.");
+    } else if status == 1 {
+        println!("No callers found for: {target}");
+    }
+
+    status
+}
+
+fn callers_exit_status(found: bool, incomplete: bool) -> i32 {
+    if found {
+        0
+    } else if incomplete {
+        2
+    } else {
+        1
+    }
+}
+
 pub fn run(args: &[String]) -> i32 {
+    match extract_callers_scope(args) {
+        Ok(Some((target, scope))) => return run_callers(&target, scope.as_deref()),
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("{error}");
+            return 2;
+        }
+    }
+
     if args.is_empty() {
         eprintln!("Usage: cvb pull [file:PATH] <search-term>...");
         eprintln!("       cvb pull file:PATH lines:LINE|START-END");
@@ -493,6 +649,104 @@ fn rust_function_range(source: &str, hit_line: usize) -> Option<(usize, usize)> 
         .min_by_key(|(start, end)| end - start)
 }
 
+
+#[derive(Debug, PartialEq, Eq)]
+enum RustCallKind {
+    Function,
+    Method,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct RustCallerMatch {
+    line: usize,
+    enclosing_function: Option<String>,
+    kind: RustCallKind,
+}
+
+fn rust_callers(source: &str, target: &str) -> Option<Vec<RustCallerMatch>> {
+    use syn::spanned::Spanned;
+    use syn::visit::{self, Visit};
+
+    struct CallerVisitor<'a> {
+        target: &'a str,
+        enclosing_function: Option<String>,
+        matches: Vec<RustCallerMatch>,
+    }
+
+    impl CallerVisitor<'_> {
+        fn with_function(
+            &mut self,
+            name: String,
+            visit_body: impl FnOnce(&mut Self),
+        ) {
+            let previous = self.enclosing_function.replace(name);
+            visit_body(self);
+            self.enclosing_function = previous;
+        }
+    }
+
+    impl<'ast> Visit<'ast> for CallerVisitor<'_> {
+        fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+            let name = node.sig.ident.to_string();
+            self.with_function(name, |visitor| {
+                visit::visit_item_fn(visitor, node);
+            });
+        }
+
+        fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+            let name = node.sig.ident.to_string();
+            self.with_function(name, |visitor| {
+                visit::visit_impl_item_fn(visitor, node);
+            });
+        }
+
+        fn visit_trait_item_fn(&mut self, node: &'ast syn::TraitItemFn) {
+            let name = node.sig.ident.to_string();
+            self.with_function(name, |visitor| {
+                visit::visit_trait_item_fn(visitor, node);
+            });
+        }
+
+        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(path) = node.func.as_ref() {
+                if path.path.segments.last().is_some_and(
+                    |segment| segment.ident == self.target
+                ) {
+                    self.matches.push(RustCallerMatch {
+                        line: node.span().start().line,
+                        enclosing_function: self.enclosing_function.clone(),
+                        kind: RustCallKind::Function,
+                    });
+                }
+            }
+
+            visit::visit_expr_call(self, node);
+        }
+
+        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+            if node.method == self.target {
+                self.matches.push(RustCallerMatch {
+                    line: node.span().start().line,
+                    enclosing_function: self.enclosing_function.clone(),
+                    kind: RustCallKind::Method,
+                });
+            }
+
+            visit::visit_expr_method_call(self, node);
+        }
+    }
+
+    let file = syn::parse_file(source).ok()?;
+    let mut visitor = CallerVisitor {
+        target,
+        enclosing_function: None,
+        matches: Vec::new(),
+    };
+
+    visitor.visit_file(&file);
+    visitor.matches.sort_by_key(|item| item.line);
+    Some(visitor.matches)
+}
 
 fn rust_expansion_ranges(
     source: &str,
@@ -702,6 +956,101 @@ fn expand_rust_matches(matches: &str) -> String {
 #[cfg(test)]
 mod pull_tests {
     use super::rust_function_range;
+
+    #[test]
+    fn callers_exit_status_is_success_when_matches_are_found() {
+        assert_eq!(super::callers_exit_status(true, false), 0);
+        assert_eq!(super::callers_exit_status(true, true), 0);
+    }
+
+    #[test]
+    fn callers_exit_status_distinguishes_complete_and_incomplete_no_match() {
+        assert_eq!(super::callers_exit_status(false, false), 1);
+        assert_eq!(super::callers_exit_status(false, true), 2);
+    }
+
+    #[test]
+    fn rust_callers_finds_unqualified_and_qualified_function_calls() {
+        let source = r#"fn caller() {
+    run();
+    module::run();
+}
+"#;
+
+        let matches = super::rust_callers(source, "run").unwrap();
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].line, 2);
+        assert_eq!(matches[0].enclosing_function.as_deref(), Some("caller"));
+        assert_eq!(matches[0].kind, super::RustCallKind::Function);
+        assert_eq!(matches[1].line, 3);
+        assert_eq!(matches[1].enclosing_function.as_deref(), Some("caller"));
+        assert_eq!(matches[1].kind, super::RustCallKind::Function);
+    }
+
+    #[test]
+    fn rust_callers_finds_method_call_candidates() {
+        let source = r#"fn caller(value: Example) {
+    value.run();
+}
+"#;
+
+        let matches = super::rust_callers(source, "run").unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].line, 2);
+        assert_eq!(matches[0].enclosing_function.as_deref(), Some("caller"));
+        assert_eq!(matches[0].kind, super::RustCallKind::Method);
+    }
+
+    #[test]
+    fn rust_callers_ignores_mentions_in_comments_and_strings() {
+        let source = r#"fn caller() {
+    // run();
+    let text = "run()";
+}
+"#;
+
+        assert!(super::rust_callers(source, "run").unwrap().is_empty());
+    }
+
+    #[test]
+    fn rust_callers_rejects_unparseable_source() {
+        assert!(super::rust_callers("fn broken( {", "run").is_none());
+    }
+
+    #[test]
+    fn extract_callers_scope_accepts_target_with_optional_file_scope() {
+        assert_eq!(
+            super::extract_callers_scope(&["callers:run".to_string()]).unwrap(),
+            Some(("run".to_string(), None))
+        );
+        assert_eq!(
+            super::extract_callers_scope(&[
+                "file:src/pull.rs".to_string(),
+                "callers:run".to_string(),
+            ])
+            .unwrap(),
+            Some(("run".to_string(), Some("src/pull.rs".to_string())))
+        );
+    }
+
+    #[test]
+    fn extract_callers_scope_rejects_invalid_combinations() {
+        for args in [
+            vec!["callers:".to_string()],
+            vec!["callers:run".to_string(), "callers:other".to_string()],
+            vec!["callers:run".to_string(), "lines:1".to_string()],
+            vec!["callers:run".to_string(), "run".to_string()],
+            vec!["file:src/pull.rs".to_string(), "callers:run".to_string(),
+                 "file:src/main.rs".to_string()],
+            vec!["file:manual.md".to_string(), "callers:run".to_string()],
+            vec!["callers:module::run".to_string()],
+        ] {
+            assert!(
+                super::extract_callers_scope(&args).is_err(),
+                "expected selector combination to be rejected: {args:?}"
+            );
+        }
+    }
 
     #[test]
     fn bash_function_range_finds_multiline_function_with_nested_control_flow() {
