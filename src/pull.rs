@@ -95,9 +95,9 @@ fn read_line_range(path: &str, start: usize, end: usize) -> Result<String, Strin
 
 fn extract_file_scope(
     args: &[String],
-) -> Result<(Option<String>, Option<(usize, usize)>, Vec<String>), String> {
+) -> Result<(Option<String>, Vec<(usize, usize)>, Vec<String>), String> {
     let mut scope = None;
-    let mut line_range = None;
+    let mut line_ranges = Vec::new();
     let mut query_args = Vec::new();
 
     for arg in args {
@@ -110,24 +110,21 @@ fn extract_file_scope(
             }
             scope = Some(path.to_string());
         } else if let Some(range) = arg.strip_prefix("lines:") {
-            if line_range.is_some() {
-                return Err("CVB pull: only one lines: selector is allowed.".to_string());
-            }
-            line_range = Some(parse_line_range(range)?);
+            line_ranges.push(parse_line_range(range)?);
         } else {
             query_args.push(arg.clone());
         }
     }
 
-    if line_range.is_some() && scope.is_none() {
+    if !line_ranges.is_empty() && scope.is_none() {
         return Err("CVB pull: lines: requires a file: scope.".to_string());
     }
 
-    if query_args.is_empty() && line_range.is_none() {
+    if query_args.is_empty() && line_ranges.is_empty() {
         return Err("CVB pull: search query is empty.".to_string());
     }
 
-    Ok((scope, line_range, query_args))
+    Ok((scope, line_ranges, query_args))
 }
 
 fn filter_file_scope(
@@ -451,7 +448,7 @@ pub fn run(args: &[String]) -> i32 {
     }
 
     let term = args.join(" ");
-    let (scope, line_range, query_args) = match extract_file_scope(args) {
+    let (scope, line_ranges, query_args) = match extract_file_scope(args) {
         Ok(parsed) => parsed,
         Err(error) => {
             eprintln!("{error}");
@@ -459,12 +456,12 @@ pub fn run(args: &[String]) -> i32 {
         }
     };
 
-    if line_range.is_some() && !query_args.is_empty() {
+    if !line_ranges.is_empty() && !query_args.is_empty() {
         eprintln!("CVB pull: lines: cannot be combined with search terms.");
         return 2;
     }
 
-    let query = if line_range.is_some() {
+    let query = if !line_ranges.is_empty() {
         SearchQuery::default()
     } else {
         match parse_query(&query_args) {
@@ -492,14 +489,18 @@ pub fn run(args: &[String]) -> i32 {
         }
     };
 
-    if let (Some(path), Some((start, end))) = (scope.as_deref(), line_range) {
-        match read_line_range(path, start, end) {
-            Ok(output) => print!("{output}"),
-            Err(error) => {
-                eprintln!("{error}");
-                return 2;
+    if let Some(path) = scope.as_deref().filter(|_| !line_ranges.is_empty()) {
+        let mut output = String::new();
+        for (start, end) in line_ranges {
+            match read_line_range(path, start, end) {
+                Ok(range_output) => output.push_str(&range_output),
+                Err(error) => {
+                    eprintln!("{error}");
+                    return 2;
+                }
             }
         }
+        print!("{output}");
         return 0;
     }
 
@@ -1288,7 +1289,7 @@ fn target() {
         let (scope, lines, query) = extract_file_scope(&args).unwrap();
 
         assert_eq!(scope.as_deref(), Some("src/pull.rs"));
-        assert_eq!(lines, None);
+        assert!(lines.is_empty());
         assert_eq!(
             query,
             vec!["protocol", "+line-endings", "-example"]
@@ -1307,7 +1308,7 @@ fn target() {
         let (scope, lines, query) = extract_file_scope(&args).unwrap();
 
         assert_eq!(scope.as_deref(), Some("src/pull.rs"));
-        assert_eq!(lines, Some((96, 110)));
+        assert_eq!(lines, vec![(96, 110)]);
         assert!(query.is_empty());
 
         let single_line = vec![
@@ -1318,14 +1319,18 @@ fn target() {
         let (scope, lines, query) = extract_file_scope(&single_line).unwrap();
 
         assert_eq!(scope.as_deref(), Some("manual.md"));
-        assert_eq!(lines, Some((155, 155)));
+        assert_eq!(lines, vec![(155, 155)]);
         assert!(query.is_empty());
 
-        assert!(extract_file_scope(&[
+        let multiple = extract_file_scope(&[
             "file:src/pull.rs".into(),
-            "lines:1-3".into(),
+            "lines:96-110".into(),
             "lines:5-8".into(),
-        ]).is_err());
+            "lines:7".into(),
+        ]).unwrap();
+        assert_eq!(multiple.0.as_deref(), Some("src/pull.rs"));
+        assert_eq!(multiple.1, vec![(96, 110), (5, 8), (7, 7)]);
+        assert!(multiple.2.is_empty());
 
         assert!(extract_file_scope(&["lines:1-3".into()]).is_err());
     }
