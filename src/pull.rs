@@ -1,4 +1,4 @@
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::os::unix::ffi::OsStringExt;
 use std::process::{Command, Output};
@@ -28,6 +28,53 @@ fn tracked_files() -> Result<Vec<OsString>, String> {
     Ok(files)
 }
 
+
+fn extract_file_scope(args: &[String]) -> Result<(Option<String>, Vec<String>), String> {
+    let mut scope = None;
+    let mut query_args = Vec::new();
+
+    for arg in args {
+        if let Some(path) = arg.strip_prefix("file:") {
+            if path.is_empty() {
+                return Err("CVB pull: file: must be followed by a path.".to_string());
+            }
+            if scope.is_some() {
+                return Err("CVB pull: only one file: scope is allowed.".to_string());
+            }
+            scope = Some(path.to_string());
+        } else {
+            query_args.push(arg.clone());
+        }
+    }
+
+    if query_args.is_empty() {
+        return Err("CVB pull: search query is empty.".to_string());
+    }
+
+    Ok((scope, query_args))
+}
+
+fn filter_file_scope(
+    files: Vec<OsString>,
+    scope: Option<&str>,
+) -> Result<Vec<OsString>, String> {
+    let Some(scope) = scope else {
+        return Ok(files);
+    };
+
+    let matching = files
+        .into_iter()
+        .filter(|path| path == OsStr::new(scope))
+        .collect::<Vec<_>>();
+
+    if matching.is_empty() {
+        return Err(format!(
+            "CVB pull: file scope matches no Git-tracked file: {scope}"
+        ));
+    }
+
+    Ok(matching)
+}
 
 #[derive(Debug, Default)]
 struct SearchQuery {
@@ -166,12 +213,20 @@ fn filter_matches(query: &SearchQuery, matches: &str) -> String {
 
 pub fn run(args: &[String]) -> i32 {
     if args.is_empty() {
-        eprintln!("Usage: cvb pull <search-term>...");
+        eprintln!("Usage: cvb pull [file:PATH] <search-term>...");
         return 2;
     }
 
     let term = args.join(" ");
-    let query = match parse_query(args) {
+    let (scope, query_args) = match extract_file_scope(args) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            eprintln!("{error}");
+            return 2;
+        }
+    };
+
+    let query = match parse_query(&query_args) {
         Ok(query) => query,
         Err(error) => {
             eprintln!("{error}");
@@ -180,6 +235,14 @@ pub fn run(args: &[String]) -> i32 {
     };
 
     let files = match tracked_files() {
+        Ok(files) => files,
+        Err(error) => {
+            eprintln!("{error}");
+            return 2;
+        }
+    };
+
+    let files = match filter_file_scope(files, scope.as_deref()) {
         Ok(files) => files,
         Err(error) => {
             eprintln!("{error}");
@@ -662,6 +725,81 @@ fn target() {
         assert!(output.contains("9 | }"));
 
         std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn filter_file_scope_matches_exact_tracked_path() {
+        use super::filter_file_scope;
+        use std::ffi::OsString;
+
+        let files = vec![
+            OsString::from("src/pull.rs"),
+            OsString::from("src/pull_tests.rs"),
+            OsString::from("manual.md"),
+        ];
+
+        let filtered = filter_file_scope(files, Some("src/pull.rs")).unwrap();
+
+        assert_eq!(filtered, vec![OsString::from("src/pull.rs")]);
+    }
+
+    #[test]
+    fn filter_file_scope_without_scope_preserves_all_files() {
+        use super::filter_file_scope;
+        use std::ffi::OsString;
+
+        let files = vec![OsString::from("src/pull.rs"), OsString::from("manual.md")];
+
+        assert_eq!(filter_file_scope(files.clone(), None).unwrap(), files);
+    }
+
+    #[test]
+    fn filter_file_scope_rejects_untracked_path() {
+        use super::filter_file_scope;
+        use std::ffi::OsString;
+
+        let files = vec![OsString::from("src/pull.rs")];
+
+        let error = filter_file_scope(files, Some("manual.md")).unwrap_err();
+
+        assert!(error.contains("no Git-tracked file"));
+        assert!(error.contains("manual.md"));
+    }
+
+    #[test]
+    fn extract_file_scope_preserves_query_operators() {
+        use super::extract_file_scope;
+
+        let args = vec![
+            "file:src/pull.rs".into(),
+            "protocol".into(),
+            "+line-endings".into(),
+            "-example".into(),
+        ];
+
+        let (scope, query) = extract_file_scope(&args).unwrap();
+
+        assert_eq!(scope.as_deref(), Some("src/pull.rs"));
+        assert_eq!(
+            query,
+            vec!["protocol", "+line-endings", "-example"]
+        );
+    }
+
+    #[test]
+    fn extract_file_scope_rejects_empty_or_multiple_scopes() {
+        use super::extract_file_scope;
+
+        assert!(extract_file_scope(&["file:".into(), "needle".into()]).is_err());
+        assert!(
+            extract_file_scope(&[
+                "file:src/pull.rs".into(),
+                "file:manual.md".into(),
+                "needle".into(),
+            ])
+            .is_err()
+        );
+        assert!(extract_file_scope(&["file:src/pull.rs".into()]).is_err());
     }
 
     #[test]

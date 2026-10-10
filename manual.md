@@ -180,8 +180,20 @@ An expanded section may therefore contain surrounding context with a word
 excluded by `-term`. That does not mean a line containing the excluded term
 matched the query.
 
-Search is limited to Git-tracked files in the current repository. Untracked
-files and files outside that repository are not searched. To share an
+Search is limited to Git-tracked files in the current repository. Use `file:PATH`
+to restrict a search to one exact tracked file:
+
+    cvb pull file:surgery-protocol.md protocol
+    cvb pull file:src/surgery.rs +load_originals -test
+
+The `file:PATH` scope can appear alongside the normal query terms and operators.
+It restricts which files are searched; `+term` and `-term` continue to filter
+matching records as usual. Only one `file:` scope is allowed per command, and
+the path must match a Git-tracked file exactly. A missing path produces an
+error rather than falling back to a repository-wide search. Directory prefixes
+and glob patterns are not supported as file scopes.
+
+Untracked files and files outside the repository are not searched. To share an
 untracked file or a known file's complete contents, capture it directly:
 
     cvb path/to/file

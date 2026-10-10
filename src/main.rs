@@ -48,14 +48,14 @@ Capture your terminal session and bridge command output to the clipboard.
 Usage:
     cvb
     cvb <PATH>...
-    cvb pull <search-term>...
+    cvb pull [file:PATH] <search-term>...
     cvb --help
     cvb --version
 
 Modes:
     cvb                      Start a terminal capture session
     cvb <PATH>...            Capture files or directory inventories
-    cvb pull <search-term>... Search Git-tracked source files
+    cvb pull [file:PATH] <search-term>... Search Git-tracked source files
 
 Options:
     -h, --help       Show this help message
@@ -67,7 +67,7 @@ A capture session ends with:
         cli::Command::Version => println!("cvb {}", env!("CARGO_PKG_VERSION")),
         cli::Command::Pull(args) => {
             if args.is_empty() {
-                eprintln!("Usage: cvb pull <search-term>...");
+                eprintln!("Usage: cvb pull [file:PATH] <search-term>...");
                 std::process::exit(2);
             }
 
