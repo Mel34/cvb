@@ -158,6 +158,95 @@ mod capture_state_tests {
     }
 }
 
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TranscriptSegment {
+    Terminal(Vec<u8>),
+    Literal(Vec<u8>),
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct Transcript {
+    segments: Vec<TranscriptSegment>,
+}
+
+#[allow(dead_code)]
+impl Transcript {
+    fn push_terminal(&mut self, data: &[u8]) {
+        if data.is_empty() {
+            return;
+        }
+
+        if let Some(TranscriptSegment::Terminal(previous)) =
+            self.segments.last_mut()
+        {
+            previous.extend_from_slice(data);
+        } else {
+            self.segments
+                .push(TranscriptSegment::Terminal(data.to_vec()));
+        }
+    }
+
+    fn push_literal(&mut self, data: &[u8]) {
+        if !data.is_empty() {
+            self.segments
+                .push(TranscriptSegment::Literal(data.to_vec()));
+        }
+    }
+}
+
+#[cfg(test)]
+mod transcript_tests {
+    use super::{Transcript, TranscriptSegment};
+
+    #[test]
+    fn preserves_terminal_and_literal_segments_in_order() {
+        let mut transcript = Transcript::default();
+
+        transcript.push_terminal(b"command output\n");
+        transcript.push_literal(b"\x1b[31mfile contents\x1b[0m");
+        transcript.push_terminal(b"next command output\n");
+
+        assert_eq!(
+            transcript.segments,
+            vec![
+                TranscriptSegment::Terminal(b"command output\n".to_vec()),
+                TranscriptSegment::Literal(
+                    b"\x1b[31mfile contents\x1b[0m".to_vec()
+                ),
+                TranscriptSegment::Terminal(b"next command output\n".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn combines_adjacent_terminal_chunks() {
+        let mut transcript = Transcript::default();
+
+        transcript.push_terminal(b"\x1b[");
+        transcript.push_terminal(b"31mred\x1b[0m");
+
+        assert_eq!(
+            transcript.segments,
+            vec![TranscriptSegment::Terminal(
+                b"\x1b[31mred\x1b[0m".to_vec()
+            )]
+        );
+    }
+
+    #[test]
+    fn ignores_empty_segments() {
+        let mut transcript = Transcript::default();
+
+        transcript.push_terminal(b"");
+        transcript.push_literal(b"");
+
+        assert!(transcript.segments.is_empty());
+    }
+}
+
 impl MarkerScanner {
     fn new() -> Self {
         Self {
@@ -229,10 +318,7 @@ impl MarkerScanner {
 
         events
     }
-
-    fn finish(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.pending)
-    }
+    
 }
 
 #[cfg(test)]
@@ -286,7 +372,7 @@ mod marker_scanner_tests {
             b"before\x1b]777;CVB;START\x07ONE\x1b]777;CVB;END\x07after",
         );
 
-        events.push(MarkerEvent::Data(scanner.finish()));
+        events.extend(scanner.process(b"0123456789012345"));
 
         assert_eq!(
             events,
@@ -809,20 +895,6 @@ fn proxy(
                 handle_control_message(message, control)?;
             }
         }
-    }
-
-    let remaining = marker_scanner.finish();
-
-    if !remaining.is_empty() {
-        let mut stdout = stdout.lock();
-
-        stdout
-            .write_all(&remaining)
-            .map_err(|error| format!("CVB: stdout write failed: {error}"))?;
-
-        stdout
-            .flush()
-            .map_err(|error| format!("CVB: stdout flush failed: {error}"))?;
     }
 
     Ok(())

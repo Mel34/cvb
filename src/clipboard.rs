@@ -6,7 +6,7 @@ pub(crate) struct ClipboardBuffer {
 
 const DIRECT_COPY_LIMIT: usize = 9_750;
 const MAX_PASTE_BYTES: usize = 1_000_000;
-const NULLPASTE_CREATE_URL: &str = "https://nullpaste.org/api/v1/pastes";
+const DEFAULT_PASTE_URL: &str = "https://nullpaste.org/api/v1/pastes";
 const HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 #[derive(Debug, PartialEq, Eq)]
@@ -51,8 +51,10 @@ fn upload_and_copy_url(buffer: &ClipboardBuffer) -> Result<(), String> {
         .build()
         .map_err(|error| format!("CVB: unable to create NullPaste HTTP client: {error}"))?;
 
+    let paste_url = std::env::var("CVB_PASTE_URL")
+        .unwrap_or_else(|_| DEFAULT_PASTE_URL.to_string());
     let response = client
-        .post(NULLPASTE_CREATE_URL)
+        .post(&paste_url)
         .header(reqwest::header::CONTENT_TYPE, "text/plain")
         .body(buffer.as_bytes().to_vec())
         .send()
@@ -95,25 +97,25 @@ fn upload_and_copy_url(buffer: &ClipboardBuffer) -> Result<(), String> {
         .bytes()
         .map_err(|error| format!("CVB: unable to read NullPaste response: {error}"))?;
 
-    let url = parse_share_url(&body)?;
+    let url = parse_raw_url(&body)?;
     copy_to_clipboard(&ClipboardBuffer::new(url.into_bytes()))
 }
 
-fn parse_share_url(body: &[u8]) -> Result<String, String> {
+fn parse_raw_url(body: &[u8]) -> Result<String, String> {
     let response: serde_json::Value = serde_json::from_slice(body)
         .map_err(|_| "CVB: NullPaste returned invalid JSON".to_string())?;
 
     let raw_url = response
-        .get("url")
+        .get("raw_url")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| {
-            "CVB: NullPaste response is missing a valid 'url' field".to_string()
+            "CVB: NullPaste response is missing a valid 'raw_url' field".to_string()
         })?;
 
     let url = reqwest::Url::parse(raw_url)
-        .map_err(|_| "CVB: NullPaste response contains an invalid share URL".to_string())?;
+        .map_err(|_| "CVB: NullPaste response contains an invalid raw URL".to_string())?;
 
-    let path = url.path().strip_prefix('/').unwrap_or("");
+    let path = url.path().strip_prefix("/raw/").unwrap_or("");
 
     if url.scheme() != "https"
         || url.host_str() != Some("nullpaste.org")
@@ -127,7 +129,7 @@ fn parse_share_url(body: &[u8]) -> Result<String, String> {
             byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
         })
     {
-        return Err("CVB: NullPaste returned an unexpected share URL".to_string());
+        return Err("CVB: NullPaste returned an unexpected raw URL".to_string());
     }
 
     Ok(url.to_string())
@@ -241,54 +243,54 @@ mod tests {
     }
 
     #[test]
-    fn parses_valid_nullpaste_share_url() {
-        let body = br#"{"url":"https://nullpaste.org/AbC123xYz012","delete_token":"secret"}"#;
+    fn parses_valid_nullpaste_raw_url() {
+        let body = br#"{"raw_url":"https://nullpaste.org/raw/AbC123xYz012","delete_token":"secret"}"#;
 
         assert_eq!(
-            super::parse_share_url(body).unwrap(),
-            "https://nullpaste.org/AbC123xYz012"
+            super::parse_raw_url(body).unwrap(),
+            "https://nullpaste.org/raw/AbC123xYz012"
         );
     }
 
     #[test]
     fn rejects_invalid_nullpaste_json() {
-        assert!(super::parse_share_url(b"not JSON").is_err());
+        assert!(super::parse_raw_url(b"not JSON").is_err());
     }
 
     #[test]
-    fn rejects_missing_share_url() {
-        assert!(super::parse_share_url(br#"{"id":"AbC123xYz012"}"#).is_err());
+    fn rejects_missing_raw_url() {
+        assert!(super::parse_raw_url(br#"{"id":"AbC123xYz012"}"#).is_err());
     }
 
     #[test]
-    fn rejects_share_url_from_another_host() {
-        let body = br#"{"url":"https://example.com/AbC123xYz012"}"#;
+    fn rejects_raw_url_from_another_host() {
+        let body = br#"{"raw_url":"https://example.com/raw/AbC123xYz012"}"#;
 
-        assert!(super::parse_share_url(body).is_err());
+        assert!(super::parse_raw_url(body).is_err());
     }
 
     #[test]
-    fn rejects_share_url_with_wrong_id_length() {
-        let body = br#"{"url":"https://nullpaste.org/AbC123xYz01"}"#;
+    fn rejects_raw_url_with_wrong_id_length() {
+        let body = br#"{"raw_url":"https://nullpaste.org/raw/AbC123xYz01"}"#;
 
-        assert!(super::parse_share_url(body).is_err());
+        assert!(super::parse_raw_url(body).is_err());
     }
 
     #[test]
-    fn rejects_share_url_with_invalid_id_character() {
-        let body = br#"{"url":"https://nullpaste.org/AbC123xYz0.2"}"#;
+    fn rejects_raw_url_with_invalid_id_character() {
+        let body = br#"{"raw_url":"https://nullpaste.org/raw/AbC123xYz0.2"}"#;
 
-        assert!(super::parse_share_url(body).is_err());
+        assert!(super::parse_raw_url(body).is_err());
     }
 
     #[test]
-    fn rejects_share_url_with_query_or_fragment() {
-        assert!(super::parse_share_url(
-            br#"{"url":"https://nullpaste.org/AbC123xYz012?next=example.com"}"#
+    fn rejects_raw_url_with_query_or_fragment() {
+        assert!(super::parse_raw_url(
+            br#"{"raw_url":"https://nullpaste.org/raw/AbC123xYz012?next=example.com"}"#
         ).is_err());
 
-        assert!(super::parse_share_url(
-            br#"{"url":"https://nullpaste.org/AbC123xYz012#fragment"}"#
+        assert!(super::parse_raw_url(
+            br#"{"raw_url":"https://nullpaste.org/raw/AbC123xYz012#fragment"}"#
         ).is_err());
     }
 
@@ -304,6 +306,8 @@ mod tests {
 
 pub(crate) fn copy_to_clipboard(buffer: &ClipboardBuffer) -> Result<(), String> {
     let mut child = std::process::Command::new("wl-copy")
+        .arg("--type")
+        .arg("text/plain")
         .stdin(std::process::Stdio::piped())
         .spawn()
         .map_err(|error| format!("CVB: unable to start wl-copy: {error}"))?;
@@ -331,7 +335,7 @@ mod live_nullpaste_integration_test {
 
     #[test]
     #[ignore = "LIVE: uploads a public test paste and replaces the Wayland clipboard"]
-    fn live_nullpaste_upload_creates_and_opens_share_url() {
+    fn live_nullpaste_upload_copies_raw_url_and_opens_share_page() {
         let story = concat!(
             "NULLPASTE JOURNEY LOG\n",
             "Chapter 1 — Capture: CVB gathered this harmless test story.\n",
@@ -366,29 +370,33 @@ mod live_nullpaste_integration_test {
             "wl-paste failed while reading the resulting clipboard"
         );
 
-        let share_url = String::from_utf8(output.stdout)
+        let raw_url = String::from_utf8(output.stdout)
             .expect("clipboard URL was not valid UTF-8");
 
-        let parsed = reqwest::Url::parse(&share_url)
+        let parsed = reqwest::Url::parse(&raw_url)
             .expect("clipboard did not contain a valid URL");
 
-        assert_eq!(parsed.scheme(), "https", "share URL must use HTTPS");
+        assert_eq!(parsed.scheme(), "https", "raw URL must use HTTPS");
         assert_eq!(parsed.host_str(), Some("nullpaste.org"));
-        assert!(parsed.query().is_none(), "share URL unexpectedly has a query");
-        assert!(parsed.fragment().is_none(), "share URL unexpectedly has a fragment");
+        assert!(parsed.query().is_none(), "raw URL unexpectedly has a query");
+        assert!(parsed.fragment().is_none(), "raw URL unexpectedly has a fragment");
+
+        let paste_id = parsed.path().strip_prefix("/raw/")
+            .expect("clipboard did not contain NullPaste's raw URL");
         assert!(
-            parsed.path().trim_matches('/').len() > 0
-                && !parsed.path().trim_matches('/').contains('/'),
-            "share URL did not contain a single paste path"
+            paste_id.len() == 12
+                && paste_id.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
+                }),
+            "raw URL did not contain a valid paste ID"
         );
+
+        let share_url = format!("https://nullpaste.org/{paste_id}");
 
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(15))
             .build()
             .expect("could not create HTTP client for paste verification");
-
-        let paste_id = parsed.path().trim_matches('/');
-        let raw_url = format!("https://nullpaste.org/raw/{paste_id}");
 
         let raw_response = client
             .get(&raw_url)

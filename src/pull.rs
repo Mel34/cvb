@@ -461,6 +461,8 @@ pub fn run(args: &[String]) -> i32 {
                 return 2;
             }
 
+            crate::emit_pathop_marker();
+
             let paths = [std::path::PathBuf::from(file_path)];
             return match crate::bridge_paths(&paths) {
                 Ok(message) => {
