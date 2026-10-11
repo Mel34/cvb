@@ -25,7 +25,7 @@ Search excludes untracked files. Results may expand to enclosing code or Markdow
 
 ## 2. CVB coding protocol
 
-`CVB-coding-protocol.md` is authoritative. Retrieve it through CVB when it is not already available in context. If it is unavailable, or any rule or requirement is unclear, ask the user rather than guess.
+The rules below are the coding protocol for this project. If any rule or requirement is unclear, ask the user rather than guess.
 
 - **Format:** Use plain Markdown and ordinary code fences. Keep commands copyable. Never use WritingBlocks for coding instructions.
 - **Atomicity:** Make one logically isolated change at a time. Do not bundle unrelated edits or refactors.
