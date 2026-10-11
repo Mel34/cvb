@@ -11,7 +11,7 @@ mod pty;
 mod pull;
 mod shell;
 mod sound;
-mod surgery;
+///mod surgery;
 
 const DEFAULT_IGNORE_LIST: &str = "\
 # This file contains directory names that CVB excludes from directory inventories.
@@ -181,12 +181,26 @@ fn target_paths(args: &[String]) -> Option<Vec<std::path::PathBuf>> {
     Some(paths)
 }
 
-pub(crate) fn bridge_paths(paths: &[std::path::PathBuf]) -> Result<String, String> {
+pub(crate) fn bridge_paths(
+    paths: &[std::path::PathBuf],
+) -> Result<String, String> {
+    let (contents, message) = build_bridge_output(paths)?;
+    let buffer = clipboard::ClipboardBuffer::new(contents);
+    clipboard::process(&buffer)?;
+    Ok(message)
+}
+
+pub(crate) fn build_bridge_output(
+    paths: &[std::path::PathBuf],
+) -> Result<(Vec<u8>, String), String> {
     if paths.len() == 1 {
         let path = &paths[0];
 
         if path.is_file() {
-            bridge_file(path)?;
+            let contents = std::fs::read(path)
+                .map_err(|error| {
+                    format!("CVB: unable to read {}: {error}", path.display())
+                })?;
             let size = std::fs::metadata(path)
                 .map_err(|error| {
                     format!(
@@ -196,38 +210,37 @@ pub(crate) fn bridge_paths(paths: &[std::path::PathBuf]) -> Result<String, Strin
                 })?
                 .len();
 
-            return Ok(format!(
-                "CVB: captured file '{}' ({} bytes)",
-                path.display(),
-                size
+            return Ok((
+                contents,
+                format!(
+                    "CVB: captured file '{}' ({} bytes)",
+                    path.display(),
+                    size
+                ),
             ));
         }
 
         if path.is_dir() {
             let ignore = load_ignore_list()?;
             let mut output = String::from(INVENTORY_HEADER);
-
             append_directory_entries(path, path, &mut output, &ignore)?;
-
             let entry_count = output.lines().skip(1).count();
-
-            let buffer = clipboard::ClipboardBuffer::new(output.into_bytes());
-            clipboard::process(&buffer)?;
-
-            return Ok(format!(
+            let message = format!(
                 "CVB: captured directory inventory '{}' ({} {})",
                 path.display(),
                 entry_count,
                 if entry_count == 1 { "entry" } else { "entries" }
-            ));
+            );
+
+            return Ok((output.into_bytes(), message));
         }
     }
 
     let output = build_paths_output(paths)?;
-    let buffer = clipboard::ClipboardBuffer::new(output.into_bytes());
-    clipboard::process(&buffer)?;
-
-    Ok(format!("CVB: captured {} paths", paths.len()))
+    Ok((
+        output.into_bytes(),
+        format!("CVB: captured {} paths", paths.len()),
+    ))
 }
 
 fn build_paths_output(paths: &[std::path::PathBuf]) -> Result<String, String> {
@@ -262,13 +275,7 @@ fn build_paths_output(paths: &[std::path::PathBuf]) -> Result<String, String> {
     Ok(output)
 }
 
-fn bridge_file(path: &Path) -> Result<(), String> {
-    let contents = std::fs::read(path)
-        .map_err(|error| format!("CVB: unable to read {}: {error}", path.display()))?;
 
-    let buffer = clipboard::ClipboardBuffer::new(contents);
-    clipboard::process(&buffer)
-}
 
 
 fn parse_ignore_list(contents: &str) -> Vec<String> {
@@ -743,6 +750,71 @@ mod tests {
         assert_eq!(fields[3], "-");
         assert_eq!(fields[6], "yes");
         assert_eq!(fields[7], "target.txt");
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn bridge_output_builds_single_file_without_writing_clipboard() {
+        let directory = test_directory("bridge-output-single");
+        let file = directory.join("test.txt");
+        fs::write(&file, b"file contents\n").unwrap();
+
+        let (contents, message) =
+            build_bridge_output(std::slice::from_ref(&file)).unwrap();
+
+        assert_eq!(contents, b"file contents\n");
+        assert_eq!(
+            message,
+            format!(
+                "CVB: captured file '{}' ({} bytes)",
+                file.display(),
+                b"file contents\n".len()
+            )
+        );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn bridge_output_builds_multiple_files_without_writing_clipboard() {
+        let directory = test_directory("bridge-output-multiple");
+        let first = directory.join("first.txt");
+        let second = directory.join("second.txt");
+        fs::write(&first, "first contents\n").unwrap();
+        fs::write(&second, "second contents\n").unwrap();
+
+        let (contents, message) =
+            build_bridge_output(&[first.clone(), second.clone()]).unwrap();
+
+        assert_eq!(
+            String::from_utf8(contents).unwrap(),
+            format!(
+                "--- {} ---\nfirst contents\n\n--- {} ---\nsecond contents\n",
+                first.display(),
+                second.display()
+            )
+        );
+        assert_eq!(message, "CVB: captured 2 paths");
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn bridge_output_builds_directory_inventory_without_writing_clipboard() {
+        let directory = test_directory("bridge-output-directory");
+        fs::write(directory.join("file.txt"), "contents").unwrap();
+
+        let (contents, message) =
+            build_bridge_output(std::slice::from_ref(&directory)).unwrap();
+        let output = String::from_utf8(contents).unwrap();
+
+        assert!(output.starts_with(INVENTORY_HEADER));
+        assert!(output.contains("file.txt\tfile.txt\tfile\t8"));
+        assert!(message.starts_with(&format!(
+            "CVB: captured directory inventory '{}'",
+            directory.display()
+        )));
 
         fs::remove_dir_all(directory).unwrap();
     }
