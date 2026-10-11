@@ -15,7 +15,15 @@ CVB is human-directed. The user runs commands and shares captured output; the LL
 
 Search excludes untracked files. Results may expand to enclosing code or Markdown sections and may contain surrounding context that did not match. Searches and caller scans can be incomplete. Capture complete relevant files when context is insufficient.
 
-## 2. CVB coding protocol — abbreviated
+### Capture and transcript behavior
+
+- One capture can span multiple shell commands until CVB's automatic END marker finalizes it.
+- Ordinary terminal output and multiple `cvb FILE...` bridge calls can be mixed in one capture. Their transcript sections preserve chronological order.
+- Terminal output is labeled `[Terminal output]` and rendered through the terminal emulator. Bridged file contents remain literal; directory arguments contribute inventories.
+- Each bridged path has its own labeled section. If a path fails, its error is included in the transcript and processing continues with later paths.
+- CVB assembles the transcript and dispatches it to the clipboard at the END marker, rather than replacing the clipboard separately for each bridged path.
+
+## 2. CVB coding protocol
 
 `CVB-coding-protocol.md` is authoritative. Retrieve it through CVB when it is not already available in context. If it is unavailable, or any rule or requirement is unclear, ask the user rather than guess.
 
