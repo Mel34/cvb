@@ -1,5 +1,9 @@
 use std::ffi::CString;
 use std::io::{self, Write};
+use std::fs::OpenOptions;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
+use std::time::Instant;
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::path::Path;
 
@@ -22,16 +26,47 @@ ioctl_write_ptr_bad!(tiocswinsz, libc::TIOCSWINSZ, Winsize);
 const CONTROL_FD: i32 = 3;
 const NO_OUTPUT: &str = "[NO_VISIBLE_OUTPUT]";
 
+
+static DEBUG_LOG_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+static DEBUG_LOG_START: OnceLock<Instant> = OnceLock::new();
+
+fn debug_log(event: &str, details: &str) {
+    let Some(path) = std::env::var_os("CVB_DEBUG_LOG") else {
+        return;
+    };
+
+    let sequence = DEBUG_LOG_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let mono_ns = DEBUG_LOG_START
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_nanos();
+
+    let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    else {
+        return;
+    };
+
+    let _ = writeln!(
+        file,
+        "seq={sequence} mono_ns={mono_ns} event={event} {details}"
+    );
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MarkerEvent {
     Data(Vec<u8>),
     Start,
+    Pathop,
     End(i32),
 }
 
 struct MarkerScanner {
     start: Vec<u8>,
     end: Vec<u8>,
+    pathop: Vec<u8>,
     pending: Vec<u8>,
 }
 
@@ -58,70 +93,6 @@ impl CaptureState {
     fn end(&mut self) -> Vec<u8> {
         self.capturing = false;
         std::mem::take(&mut self.captured)
-    }
-}
-
-#[derive(Default)]
-struct CaptureSuppression {
-    depth: usize,
-}
-
-impl CaptureSuppression {
-    fn start(&mut self) {
-        self.depth += 1;
-    }
-
-    fn end(&mut self) -> bool {
-        if self.depth == 0 {
-            return false;
-        }
-
-        self.depth -= 1;
-        true
-    }
-
-    fn active(&self) -> bool {
-        self.depth > 0
-    }
-}
-
-#[cfg(test)]
-mod capture_suppression_tests {
-    use super::CaptureSuppression;
-
-    #[test]
-    fn starts_inactive() {
-        let suppression = CaptureSuppression::default();
-
-        assert!(!suppression.active());
-    }
-
-    #[test]
-    fn nested_starts_keep_suppression_active() {
-        let mut suppression = CaptureSuppression::default();
-
-        suppression.start();
-        assert!(suppression.active());
-
-        suppression.start();
-        assert!(suppression.active());
-    }
-
-    #[test]
-    fn ends_unwind_suppression() {
-        let mut suppression = CaptureSuppression::default();
-
-        suppression.start();
-        suppression.start();
-
-        assert!(suppression.end());
-        assert!(suppression.active());
-
-        assert!(suppression.end());
-        assert!(!suppression.active());
-
-        assert!(!suppression.end());
-        assert!(!suppression.active());
     }
 }
 
@@ -192,6 +163,7 @@ impl MarkerScanner {
         Self {
             start: b"\x1b]777;CVB;START\x07".to_vec(),
             end: b"\x1b]777;CVB;END\x07".to_vec(),
+            pathop: b"\x1b]777;CVB;PATHOP\x07".to_vec(),
             pending: Vec::new(),
         }
     }
@@ -202,36 +174,41 @@ impl MarkerScanner {
         let mut events = Vec::new();
 
         loop {
-            let start_pos = find_subslice(&self.pending, &self.start);
-            let end_pos = find_subslice(&self.pending, &self.end);
+            let marker = [
+                (
+                    find_subslice(&self.pending, &self.start),
+                    self.start.len(),
+                    MarkerEvent::Start,
+                ),
+                (
+                    find_subslice(&self.pending, &self.end),
+                    self.end.len(),
+                    MarkerEvent::End(0),
+                ),
+                (
+                    find_subslice(&self.pending, &self.pathop),
+                    self.pathop.len(),
+                    MarkerEvent::Pathop,
+                ),
+            ]
+            .into_iter()
+            .filter_map(|(position, length, event)| {
+                position.map(|position| (position, length, event))
+            })
+            .min_by_key(|(position, _, _)| *position);
 
-            let marker = match (start_pos, end_pos) {
-                (Some(start), Some(end)) if start <= end => {
-                    Some((start, self.start.len(), true))
-                }
-                (Some(_), Some(end)) => Some((end, self.end.len(), false)),
-                (Some(start), None) => Some((start, self.start.len(), true)),
-                (None, Some(end)) => Some((end, self.end.len(), false)),
-                (None, None) => break,
-            };
-
-            let Some((pos, len, is_start)) = marker else {
+            let Some((position, length, event)) = marker else {
                 break;
             };
 
-            if pos > 0 {
+            if position > 0 {
                 events.push(MarkerEvent::Data(
-                    self.pending.drain(..pos).collect(),
+                    self.pending.drain(..position).collect(),
                 ));
             }
 
-            self.pending.drain(..len);
-
-            if is_start {
-                events.push(MarkerEvent::Start);
-            } else {
-                events.push(MarkerEvent::End(0));
-            }
+            self.pending.drain(..length);
+            events.push(event);
         }
 
         if !self.pending.is_empty() {
@@ -239,6 +216,7 @@ impl MarkerScanner {
                 .start
                 .len()
                 .max(self.end.len())
+                .max(self.pathop.len())
                 .saturating_sub(1);
 
             if self.pending.len() > keep {
@@ -260,6 +238,45 @@ impl MarkerScanner {
 #[cfg(test)]
 mod marker_scanner_tests {
     use super::{MarkerEvent, MarkerScanner};
+
+    #[test]
+    fn recognizes_pathop_split_at_sixteenth_byte() {
+        let marker = b"\x1b]777;CVB;PATHOP\x07";
+        assert_eq!(marker.len(), 17);
+
+        let mut scanner = MarkerScanner::new();
+
+        assert_eq!(
+            scanner.process(&marker[..16]),
+            Vec::<MarkerEvent>::new()
+        );
+
+        assert_eq!(
+            scanner.process(&marker[16..]),
+            vec![MarkerEvent::Pathop]
+        );
+    }
+
+    #[test]
+    fn recognizes_bracketed_paste_marker_sequence() {
+        let mut scanner = MarkerScanner::new();
+
+        let events = scanner.process(
+            b"\x1b]777;CVB;START\x07\x1b]777;CVB;PATHOP\x07\x1b]777;CVB;START\x07\x1b]777;CVB;PATHOP\x07\x1b]777;CVB;START\x07\x1b]777;CVB;END\x07",
+        );
+
+        assert_eq!(
+            events,
+            vec![
+                MarkerEvent::Start,
+                MarkerEvent::Pathop,
+                MarkerEvent::Start,
+                MarkerEvent::Pathop,
+                MarkerEvent::Start,
+                MarkerEvent::End(0),
+            ]
+        );
+    }
 
     #[test]
     fn recognizes_start_and_end_markers() {
@@ -575,7 +592,7 @@ fn proxy(
     let keybind_watcher = KeybindWatcher::new()?;
     let mut marker_scanner = MarkerScanner::new();
     let mut capture = CaptureState::default();
-    let mut capture_suppression = CaptureSuppression::default();
+    debug_log("proxy_start", &format!("pid={}", std::process::id()));
 
     loop {
 
@@ -700,27 +717,48 @@ fn proxy(
                         capture.push(&output);
                     }
 
+                    MarkerEvent::Pathop => {
+                        let capturing_before = capture.capturing;
+                        let discarded_bytes = capture.end().len();
+
+                        debug_log(
+                            "marker_pathop",
+                            &format!(
+                                "capturing_before={capturing_before} \
+                                 discarded_bytes={discarded_bytes}"
+                            ),
+                        );
+                    }
+
                     MarkerEvent::Start => {
-                        if capture_suppression.active() {
-                            capture_suppression.start();
-                            capture.end();
-                        } else {
-                            capture.start();
-                        }
+                        let capturing_before = capture.capturing;
+                        capture.start();
+
+                        debug_log(
+                            "marker_start",
+                            &format!(
+                                "capturing_before={capturing_before} capturing_after={}",
+                                capture.capturing
+                            ),
+                        );
                     }
 
                     MarkerEvent::End(_status) => {
-                        if capture_suppression.active() {
-                            capture_suppression.end();
-                            capture.end();
-                            continue;
-                        }
+                        let capturing_before = capture.capturing;
 
                         if !capture.capturing {
+                            debug_log(
+                                "marker_end_no_capture",
+                                &format!(
+                                    "capturing_before={capturing_before} capturing_after={}",
+                                    capture.capturing
+                                ),
+                            );
                             continue;
                         }
 
                         let captured = capture.end();
+                        let captured_bytes = captured.len();
 
                         let scrollback = captured.len();
                         let mut renderer = vt100::Parser::new(rows, cols, scrollback);
@@ -734,7 +772,24 @@ fn proxy(
                         };
                         let buffer =
                             crate::clipboard::ClipboardBuffer::new(processed.into_bytes());
+
+                        debug_log(
+                            "clipboard_dispatch_begin",
+                            &format!(
+                                "capturing_before={capturing_before} capturing_after={} captured_bytes={captured_bytes}",
+                                capture.capturing
+                            ),
+                        );
+
                         crate::clipboard::process(&buffer)?;
+
+                        debug_log(
+                            "clipboard_dispatch_ok",
+                            &format!(
+                                "capturing_before={capturing_before} capturing_after={} captured_bytes={captured_bytes}",
+                                capture.capturing
+                            ),
+                        );
                     }
                 }
             }
@@ -751,7 +806,7 @@ fn proxy(
                 | nix::poll::PollFlags::POLLERR,
         ) {
             for message in control.receive()? {
-                handle_control_message(message, control, &mut capture_suppression)?;
+                handle_control_message(message, control)?;
             }
         }
     }
@@ -776,13 +831,17 @@ fn proxy(
 fn handle_control_message(
     message: ControlMessage,
     control: &ControlChannel,
-    capture_suppression: &mut CaptureSuppression,
 ) -> Result<(), String> {
     match message {
         ControlMessage::Exit => {}
 
         ControlMessage::TargetRequest { id, args } => {
-            capture_suppression.start();
+            let arg_count = args.len();
+
+            debug_log(
+                "target_request",
+                &format!("id={id} arg_count={arg_count}"),
+            );
 
             let paths = args
                 .into_iter()

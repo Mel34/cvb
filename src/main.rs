@@ -111,6 +111,18 @@ A capture session ends with:
     }
 }
 
+fn emit_pathop_marker() {
+    if let Ok(mut tty) = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/tty")
+    {
+        let _ = std::io::Write::write_all(
+            &mut tty,
+            b"\x1b]777;CVB;PATHOP\x07",
+        );
+    }
+}
+
 fn run_internal_target(args: &[String]) -> ! {
     if args.is_empty() {
         eprintln!("CVB: internal target request has no arguments");
@@ -126,6 +138,7 @@ fn run_internal_target(args: &[String]) -> ! {
         args: args.to_vec(),
     };
 
+    emit_pathop_marker();
     if let Err(error) = control.send(&request) {
         eprintln!("{error}");
         std::process::exit(1);
