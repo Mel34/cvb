@@ -197,9 +197,79 @@ impl Transcript {
     }
 }
 
+fn render_transcript(
+    transcript: &Transcript,
+    rows: u16,
+    cols: u16,
+) -> Vec<u8> {
+    if transcript.segments.is_empty() {
+        return NO_OUTPUT.as_bytes().to_vec();
+    }
+
+    let mut output = Vec::new();
+
+    for segment in &transcript.segments {
+        match segment {
+            TranscriptSegment::Terminal(bytes) => {
+                output.extend_from_slice(b"[Terminal output]\n--------\n");
+
+                let mut renderer =
+                    vt100::Parser::new(rows, cols, bytes.len());
+                renderer.process(bytes);
+
+                let text = screen_to_text(&mut renderer);
+                let processed = if text.is_empty() {
+                    NO_OUTPUT.to_string()
+                } else {
+                    text
+                };
+
+                output.extend_from_slice(processed.as_bytes());
+
+                if !processed.ends_with('\n') {
+                    output.push(b'\n');
+                }
+            }
+            TranscriptSegment::Literal(bytes) => {
+                output.extend_from_slice(bytes);
+            }
+        }
+    }
+
+    output
+}
+
 #[cfg(test)]
 mod transcript_tests {
-    use super::{Transcript, TranscriptSegment};
+    use super::{render_transcript, Transcript, TranscriptSegment};
+
+    #[test]
+    fn renders_terminal_and_preserves_literal_bytes_in_order() {
+        let mut transcript = Transcript::default();
+
+        transcript.push_terminal(b"\x1b[31mRED\x1b[0m\r\n");
+        transcript.push_literal(
+            b"[file.txt]\n--------\n\x1b[31mRAW\x1b[0m\n",
+        );
+        transcript.push_terminal(b"NEXT\r\n");
+
+        let rendered = render_transcript(&transcript, 24, 80);
+
+        assert_eq!(
+            rendered,
+            b"[Terminal output]\n--------\nRED\n[file.txt]\n--------\n\x1b[31mRAW\x1b[0m\n[Terminal output]\n--------\nNEXT\n"
+        );
+    }
+
+    #[test]
+    fn renders_empty_transcript_as_no_output() {
+        let transcript = Transcript::default();
+
+        assert_eq!(
+            render_transcript(&transcript, 24, 80),
+            b"[NO_VISIBLE_OUTPUT]"
+        );
+    }
 
     #[test]
     fn preserves_terminal_and_literal_segments_in_order() {
@@ -677,6 +747,7 @@ fn proxy(
     let mut keyboard = HotkeyMonitor::new(bindings)?;
     let keybind_watcher = KeybindWatcher::new()?;
     let mut marker_scanner = MarkerScanner::new();
+    let mut transcript = Transcript::default();
     let mut capture = CaptureState::default();
     debug_log("proxy_start", &format!("pid={}", std::process::id()));
 
@@ -800,18 +871,20 @@ fn proxy(
             for event in events {
                 match event {
                     MarkerEvent::Data(output) => {
+                        if capture.capturing {
+                            transcript.push_terminal(&output);
+                        }
                         capture.push(&output);
                     }
 
                     MarkerEvent::Pathop => {
                         let capturing_before = capture.capturing;
-                        let discarded_bytes = capture.end().len();
 
                         debug_log(
                             "marker_pathop",
                             &format!(
                                 "capturing_before={capturing_before} \
-                                 discarded_bytes={discarded_bytes}"
+                                 capture_preserved=true"
                             ),
                         );
                     }
@@ -843,21 +916,11 @@ fn proxy(
                             continue;
                         }
 
-                        let captured = capture.end();
-                        let captured_bytes = captured.len();
-
-                        let scrollback = captured.len();
-                        let mut renderer = vt100::Parser::new(rows, cols, scrollback);
-                        renderer.process(&captured);
-
-                        let text = screen_to_text(&mut renderer);
-                        let processed = if text.is_empty() {
-                            NO_OUTPUT.to_string()
-                        } else {
-                            text
-                        };
+                        let _captured = capture.end();
+                        let rendered = render_transcript(&transcript, rows, cols);
+                        let captured_bytes = rendered.len();
                         let buffer =
-                            crate::clipboard::ClipboardBuffer::new(processed.into_bytes());
+                            crate::clipboard::ClipboardBuffer::new(rendered);
 
                         debug_log(
                             "clipboard_dispatch_begin",
@@ -876,6 +939,8 @@ fn proxy(
                                 capture.capturing
                             ),
                         );
+
+                        transcript = Transcript::default();
                     }
                 }
             }
@@ -892,7 +957,7 @@ fn proxy(
                 | nix::poll::PollFlags::POLLERR,
         ) {
             for message in control.receive()? {
-                handle_control_message(message, control)?;
+                handle_control_message(message, control, &mut transcript)?;
             }
         }
     }
@@ -903,6 +968,7 @@ fn proxy(
 fn handle_control_message(
     message: ControlMessage,
     control: &ControlChannel,
+    transcript: &mut Transcript,
 ) -> Result<(), String> {
     match message {
         ControlMessage::Exit => {}
@@ -920,9 +986,30 @@ fn handle_control_message(
                 .map(std::path::PathBuf::from)
                 .collect::<Vec<_>>();
 
-            let (status, message) = match crate::bridge_paths(&paths) {
-                Ok(message) => (0, message),
-                Err(error) => (1, error),
+            let leaves = crate::build_path_leaves(&paths);
+            let leaf_count = leaves.len();
+            let status = if leaves.iter().all(|(_, _, succeeded)| *succeeded) {
+                0
+            } else {
+                1
+            };
+
+            for (label, contents, _) in leaves {
+                transcript.push_literal(label.as_bytes());
+                transcript.push_literal(b"\n--------\n");
+                transcript.push_literal(&contents);
+
+                if !contents.ends_with(b"\n") {
+                    transcript.push_literal(b"\n");
+                }
+            }
+
+            let message = if status == 0 {
+                format!("Added {leaf_count} path(s) to transcript")
+            } else {
+                format!(
+                    "Added {leaf_count} path(s) to transcript; one or more paths failed"
+                )
             };
 
             control.send(&ControlMessage::TargetResponse {

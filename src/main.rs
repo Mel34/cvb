@@ -243,6 +243,40 @@ pub(crate) fn build_bridge_output(
     ))
 }
 
+fn build_path_leaves(
+    paths: &[std::path::PathBuf],
+) -> Vec<(String, Vec<u8>, bool)> {
+    paths
+        .iter()
+        .map(|path| {
+            let label = format!("[{}]", path.display());
+
+            let result: Result<Vec<u8>, String> = if path.is_file() {
+                std::fs::read(path)
+                    .map_err(|error| format!("Error reading the file: {error}"))
+            } else if path.is_dir() {
+                (|| {
+                    let ignore = load_ignore_list()?;
+                    let mut output = String::from(INVENTORY_HEADER);
+                    append_directory_entries(path, path, &mut output, &ignore)?;
+                    Ok(output.into_bytes())
+                })()
+                .map_err(|error: String| {
+                    format!("Error reading the directory inventory: {error}")
+                })
+            } else {
+                Err(format!("Error: unsupported path: {}", path.display()))
+            };
+
+            let (contents, succeeded) = match result {
+                Ok(contents) => (contents, true),
+                Err(error) => (error.into_bytes(), false),
+            };
+            (label, contents, succeeded)
+        })
+        .collect()
+}
+
 fn build_paths_output(paths: &[std::path::PathBuf]) -> Result<String, String> {
     let mut output = String::new();
 
@@ -870,6 +904,48 @@ mod tests {
             output.unwrap_err(),
             format!("CVB: unsupported path: {}", unsupported.display())
         );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn path_leaves_preserve_order_and_continue_after_failure() {
+        let directory = test_directory("path-leaves-order");
+        let missing = directory.join("missing.txt");
+        let file = directory.join("second.txt");
+
+        fs::write(&file, "second contents\n").unwrap();
+
+        let leaves = build_path_leaves(&[missing.clone(), file.clone()]);
+
+        assert_eq!(leaves.len(), 2);
+        assert_eq!(leaves[0].0, format!("[{}]", missing.display()));
+        assert_eq!(
+            String::from_utf8(leaves[0].1.clone()).unwrap(),
+            format!("Error: unsupported path: {}", missing.display())
+        );
+        assert!(!leaves[0].2);
+        assert_eq!(leaves[1].0, format!("[{}]", file.display()));
+        assert_eq!(leaves[1].1, b"second contents\n");
+        assert!(leaves[1].2);
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn path_leaves_preserve_file_bytes_literally() {
+        let directory = test_directory("path-leaves-literal");
+        let file = directory.join("binary.txt");
+        let contents = vec![b'a', 0xff, b'\n'];
+
+        fs::write(&file, &contents).unwrap();
+
+        let leaves = build_path_leaves(std::slice::from_ref(&file));
+
+        assert_eq!(leaves.len(), 1);
+        assert_eq!(leaves[0].0, format!("[{}]", file.display()));
+        assert_eq!(leaves[0].1, contents);
+        assert!(leaves[0].2);
 
         fs::remove_dir_all(directory).unwrap();
     }
