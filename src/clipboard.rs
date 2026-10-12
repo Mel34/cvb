@@ -1,4 +1,7 @@
+use std::fs;
 use std::io::Write;
+use std::path::Path;
+use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -7,9 +10,9 @@ pub(crate) struct ClipboardBuffer {
 }
 
 const DIRECT_COPY_LIMIT: usize = 9_750;
-const MAX_PASTE_BYTES: usize = 1_000_000;
-const DEFAULT_PASTE_URL: &str = "https://nullpaste.org/api/v1/pastes";
-const HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const MAX_CAPTURE_BYTES: usize = 1_000_000;
+const REGISTRY_REMOTE: &str = "git@github.com:Mel34/cvb-registry.git";
+const REGISTRY_FILE_URL: &str = "https://github.com/Mel34/cvb-registry/blob/main/captures/latest.txt";
 
 static CAPTURE_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -164,100 +167,173 @@ pub(crate) fn process(buffer: &ClipboardBuffer) -> Result<(), String> {
 }
 
 fn upload_and_copy_url(buffer: &ClipboardBuffer) -> Result<(), String> {
-    if buffer.len() > MAX_PASTE_BYTES {
+    std::str::from_utf8(buffer.as_bytes()).map_err(|_| {
+        "CVB: captured text is not valid UTF-8; refusing to publish it".to_string()
+    })?;
+
+    if buffer.len() > MAX_CAPTURE_BYTES {
         return Err(format!(
-            "CVB: captured text exceeds NullPaste's 1 MB limit ({} bytes)",
+            "CVB: captured text exceeds the 1 MB limit ({} bytes)",
             buffer.len()
         ));
     }
 
-    let client = reqwest::blocking::Client::builder()
-        .timeout(HTTP_TIMEOUT)
-        .build()
-        .map_err(|error| format!("CVB: unable to create NullPaste HTTP client: {error}"))?;
+    let home = std::env::var_os("HOME")
+        .ok_or_else(|| "CVB: HOME is not set; cannot locate the registry clone".to_string())?;
+    let repo = Path::new(&home).join(".local/share/cvb/registry");
 
-    let paste_url = std::env::var("CVB_PASTE_URL")
-        .unwrap_or_else(|_| DEFAULT_PASTE_URL.to_string());
-    let response = client
-        .post(&paste_url)
-        .header(reqwest::header::CONTENT_TYPE, "text/plain")
-        .body(buffer.as_bytes().to_vec())
-        .send()
-        .map_err(|error| {
-            if error.is_timeout() {
-                "CVB: NullPaste request timed out".to_string()
-            } else {
-                format!("CVB: NullPaste request failed: {error}")
-            }
-        })?;
-
-    let status = response.status();
-
-    if status != reqwest::StatusCode::CREATED {
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = response
-                .headers()
-                .get(reqwest::header::RETRY_AFTER)
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_string);
-
-            return Err(match retry_after {
-                Some(value) => format!(
-                    "CVB: NullPaste rate limit reached (HTTP 429; Retry-After: {value})"
-                ),
-                None => "CVB: NullPaste rate limit reached (HTTP 429)".to_string(),
-            });
-        }
-
-        if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE {
-            return Err("CVB: NullPaste rejected the paste as too large".to_string());
-        }
-
+    if !repo.join(".git").exists() {
         return Err(format!(
-            "CVB: NullPaste upload failed with HTTP status {status}"
+            "CVB: registry clone not found at {}",
+            repo.display()
         ));
     }
 
-    let body = response
-        .bytes()
-        .map_err(|error| format!("CVB: unable to read NullPaste response: {error}"))?;
-
-    let url = parse_raw_url(&body)?;
-    copy_to_clipboard(&ClipboardBuffer::new(url.into_bytes()))
-}
-
-fn parse_raw_url(body: &[u8]) -> Result<String, String> {
-    let response: serde_json::Value = serde_json::from_slice(body)
-        .map_err(|_| "CVB: NullPaste returned invalid JSON".to_string())?;
-
-    let raw_url = response
-        .get("raw_url")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-            "CVB: NullPaste response is missing a valid 'raw_url' field".to_string()
-        })?;
-
-    let url = reqwest::Url::parse(raw_url)
-        .map_err(|_| "CVB: NullPaste response contains an invalid raw URL".to_string())?;
-
-    let path = url.path().strip_prefix("/raw/").unwrap_or("");
-
-    if url.scheme() != "https"
-        || url.host_str() != Some("nullpaste.org")
-        || url.port().is_some()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-        || path.len() != 12
-        || !path.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
-        })
-    {
-        return Err("CVB: NullPaste returned an unexpected raw URL".to_string());
+    let branch = git_command(&repo, &["branch", "--show-current"], "inspect registry branch")?;
+    if String::from_utf8_lossy(&branch.stdout).trim() != "main" {
+        return Err("CVB: registry clone must be on branch 'main'".to_string());
     }
 
-    Ok(url.to_string())
+    let remote = git_command(&repo, &["remote", "get-url", "origin"], "inspect registry remote")?;
+    if String::from_utf8_lossy(&remote.stdout).trim() != REGISTRY_REMOTE {
+        return Err(format!(
+            "CVB: unexpected registry origin; expected {REGISTRY_REMOTE}"
+        ));
+    }
+
+    let status = git_command(
+        &repo,
+        &["status", "--porcelain", "--untracked-files=all"],
+        "check registry working tree",
+    )?;
+    if !status.stdout.is_empty() {
+        return Err(
+            "CVB: registry working tree is not clean; refusing to overwrite local changes"
+                .to_string(),
+        );
+    }
+
+    let readme = fs::read(repo.join("README.md"))
+        .map_err(|error| format!("CVB: unable to read registry README: {error}"))?;
+
+    git_command(&repo, &["fetch", "origin", "main"], "fetch registry main")?;
+
+    let remote_head = git_command(
+        &repo,
+        &["rev-parse", "refs/remotes/origin/main"],
+        "read fetched registry commit",
+    )?;
+    let remote_sha = String::from_utf8_lossy(&remote_head.stdout).trim().to_string();
+
+    if remote_sha.is_empty()
+        || !remote_sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("CVB: fetched registry commit ID is invalid".to_string());
+    }
+
+    let temp_branch = format!("cvb-upload-{}", new_capture_id());
+    let mut orphan_created = false;
+
+    let prepare_and_push = (|| -> Result<(), String> {
+        git_command(
+            &repo,
+            &["switch", "--orphan", temp_branch.as_str()],
+            "create parentless registry branch",
+        )?;
+        orphan_created = true;
+
+        fs::create_dir_all(repo.join("captures"))
+            .map_err(|error| format!("CVB: unable to create registry captures directory: {error}"))?;
+        fs::write(repo.join("README.md"), &readme)
+            .map_err(|error| format!("CVB: unable to restore registry README: {error}"))?;
+        fs::write(repo.join("captures/latest.txt"), buffer.as_bytes())
+            .map_err(|error| format!("CVB: unable to write latest capture: {error}"))?;
+
+        git_command(&repo, &["add", "-A"], "stage latest capture")?;
+        git_command(
+            &repo,
+            &["commit", "-m", "Update latest capture"],
+            "commit latest capture",
+        )?;
+
+        let commit = git_command(
+            &repo,
+            &["rev-list", "--parents", "-n", "1", "HEAD"],
+            "verify parentless capture commit",
+        )?;
+        if String::from_utf8_lossy(&commit.stdout)
+            .split_whitespace()
+            .count()
+            != 1
+        {
+            return Err("CVB: new registry commit unexpectedly has a parent".to_string());
+        }
+
+        let lease = format!("--force-with-lease=refs/heads/main:{remote_sha}");
+        git_command(
+            &repo,
+            &[lease.as_str(), "origin", "HEAD:refs/heads/main"],
+            "push latest capture to registry",
+        )?;
+
+        Ok(())
+    })();
+
+    if let Err(error) = prepare_and_push {
+        if orphan_created {
+            let _ = git_command(
+                &repo,
+                &["switch", "--discard-changes", "main"],
+                "restore registry main after failure",
+            );
+            let _ = git_command(
+                &repo,
+                &["branch", "-D", temp_branch.as_str()],
+                "remove temporary registry branch",
+            );
+        }
+        return Err(error);
+    }
+
+    git_command(
+        &repo,
+        &["switch", "-C", "main", "HEAD"],
+        "update local registry main",
+    )?;
+    let _ = git_command(
+        &repo,
+        &["branch", "-D", temp_branch.as_str()],
+        "remove temporary registry branch",
+    );
+
+    let message = handoff_message();
+    copy_to_clipboard(&ClipboardBuffer::new(message.into_bytes()))
+}
+
+fn git_command(repo: &Path, args: &[&str], operation: &str) -> Result<Output, String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .map_err(|error| format!("CVB: unable to {operation}: {error}"))?;
+
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            format!("CVB: unable to {operation} (git exited with {})", output.status)
+        } else {
+            format!("CVB: unable to {operation}: {detail}")
+        });
+    }
+
+    Ok(output)
+}
+
+fn handoff_message() -> String {
+    format!(
+        "Hey Chadgpt, check our GitHub registry — `captures/latest.txt` has new data for you!\n\n{REGISTRY_FILE_URL}\n"
+    )
 }
 
 impl ClipboardBuffer {
@@ -434,65 +510,33 @@ mod tests {
     }
 
     #[test]
-    fn parses_valid_nullpaste_raw_url() {
-        let body = br#"{"raw_url":"https://nullpaste.org/raw/AbC123xYz012","delete_token":"secret"}"#;
+    fn handoff_message_contains_stable_github_url() {
+        let message = super::handoff_message();
 
-        assert_eq!(
-            super::parse_raw_url(body).unwrap(),
-            "https://nullpaste.org/raw/AbC123xYz012"
-        );
+        assert!(message.contains("Hey Chadgpt"));
+        assert!(message.contains(
+            "https://github.com/Mel34/cvb-registry/blob/main/captures/latest.txt"
+        ));
     }
 
     #[test]
-    fn rejects_invalid_nullpaste_json() {
-        assert!(super::parse_raw_url(b"not JSON").is_err());
+    fn rejects_invalid_utf8_before_accessing_registry() {
+        let buffer = ClipboardBuffer::new(vec![b'a', 0xff, b'b']);
+
+        let error = super::upload_and_copy_url(&buffer).unwrap_err();
+
+        assert!(error.contains("valid UTF-8"));
     }
 
     #[test]
-    fn rejects_missing_raw_url() {
-        assert!(super::parse_raw_url(br#"{"id":"AbC123xYz012"}"#).is_err());
-    }
-
-    #[test]
-    fn rejects_raw_url_from_another_host() {
-        let body = br#"{"raw_url":"https://example.com/raw/AbC123xYz012"}"#;
-
-        assert!(super::parse_raw_url(body).is_err());
-    }
-
-    #[test]
-    fn rejects_raw_url_with_wrong_id_length() {
-        let body = br#"{"raw_url":"https://nullpaste.org/raw/AbC123xYz01"}"#;
-
-        assert!(super::parse_raw_url(body).is_err());
-    }
-
-    #[test]
-    fn rejects_raw_url_with_invalid_id_character() {
-        let body = br#"{"raw_url":"https://nullpaste.org/raw/AbC123xYz0.2"}"#;
-
-        assert!(super::parse_raw_url(body).is_err());
-    }
-
-    #[test]
-    fn rejects_raw_url_with_query_or_fragment() {
-        assert!(super::parse_raw_url(
-            br#"{"raw_url":"https://nullpaste.org/raw/AbC123xYz012?next=example.com"}"#
-        ).is_err());
-
-        assert!(super::parse_raw_url(
-            br#"{"raw_url":"https://nullpaste.org/raw/AbC123xYz012#fragment"}"#
-        ).is_err());
-    }
-
-    #[test]
-    fn rejects_oversized_paste_without_network_request() {
-        let buffer = ClipboardBuffer::new(vec![b'x'; super::MAX_PASTE_BYTES + 1]);
+    fn rejects_oversized_capture_before_accessing_registry() {
+        let buffer = ClipboardBuffer::new(vec![b'x'; super::MAX_CAPTURE_BYTES + 1]);
 
         let error = super::upload_and_copy_url(&buffer).unwrap_err();
 
         assert!(error.contains("1 MB limit"));
     }
+
 }
 
 pub(crate) fn copy_to_clipboard(buffer: &ClipboardBuffer) -> Result<(), String> {
@@ -518,114 +562,4 @@ pub(crate) fn copy_to_clipboard(buffer: &ClipboardBuffer) -> Result<(), String> 
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod live_nullpaste_integration_test {
-    use super::{ClipboardBuffer, process};
-
-    #[test]
-    #[ignore = "LIVE: uploads a public test paste and replaces the Wayland clipboard"]
-    fn live_nullpaste_upload_copies_raw_url_and_opens_share_page() {
-        let story = concat!(
-            "NULLPASTE JOURNEY LOG\n",
-            "Chapter 1 — Capture: CVB gathered this harmless test story.\n",
-            "Chapter 2 — Departure: the payload crossed the 9,750-byte threshold.\n",
-            "Chapter 3 — Upload: CVB sent the text to NullPaste as text/plain.\n",
-            "Chapter 4 — Receipt: NullPaste returned a share URL.\n",
-            "Chapter 5 — Return: CVB placed that URL on the Wayland clipboard.\n",
-            "Chapter 6 — Reunion: this test will open the URL and check the page.\n",
-            "Journey marker: CVB-NULLPASTE-LIVE-JOURNEY-2026-10-10\n",
-            "The following repeated log entries are harmless padding for the test.\n",
-        );
-
-        let mut payload = story.as_bytes().to_vec();
-        let padding = b"Journey continues: CVB delivered this story to NullPaste. \n";
-        while payload.len() < 9_750 {
-            payload.extend_from_slice(padding);
-        }
-
-        assert!(payload.len() < 1_000_000, "test payload unexpectedly too large");
-        let expected_payload = payload.clone();
-        let buffer = ClipboardBuffer::new(payload);
-
-        process(&buffer).expect("live NullPaste upload and clipboard copy failed");
-
-        let output = std::process::Command::new("wl-paste")
-            .arg("--no-newline")
-            .output()
-            .expect("could not run wl-paste to inspect the resulting clipboard");
-
-        assert!(
-            output.status.success(),
-            "wl-paste failed while reading the resulting clipboard"
-        );
-
-        let raw_url = String::from_utf8(output.stdout)
-            .expect("clipboard URL was not valid UTF-8");
-
-        let parsed = reqwest::Url::parse(&raw_url)
-            .expect("clipboard did not contain a valid URL");
-
-        assert_eq!(parsed.scheme(), "https", "raw URL must use HTTPS");
-        assert_eq!(parsed.host_str(), Some("nullpaste.org"));
-        assert!(parsed.query().is_none(), "raw URL unexpectedly has a query");
-        assert!(parsed.fragment().is_none(), "raw URL unexpectedly has a fragment");
-
-        let paste_id = parsed.path().strip_prefix("/raw/")
-            .expect("clipboard did not contain NullPaste's raw URL");
-        assert!(
-            paste_id.len() == 12
-                && paste_id.bytes().all(|byte| {
-                    byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
-                }),
-            "raw URL did not contain a valid paste ID"
-        );
-
-        let share_url = format!("https://nullpaste.org/{paste_id}");
-
-        let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .expect("could not create HTTP client for paste verification");
-
-        let raw_response = client
-            .get(&raw_url)
-            .send()
-            .expect("could not retrieve the raw NullPaste payload");
-
-        assert!(
-            raw_response.status().is_success(),
-            "NullPaste raw endpoint returned HTTP {}",
-            raw_response.status()
-        );
-
-        let retrieved_payload = raw_response
-            .bytes()
-            .expect("could not read the retrieved NullPaste payload");
-
-        assert_eq!(
-            retrieved_payload.as_ref(),
-            expected_payload.as_slice(),
-            "retrieved NullPaste payload differs from the uploaded bytes"
-        );
-
-        println!("PAYLOAD VERIFICATION PASSED: exact byte-for-byte match");
-
-        let response = client
-            .get(share_url.as_str())
-            .send()
-            .expect("could not open the returned NullPaste share URL");
-
-        assert!(
-            response.status().is_success(),
-            "NullPaste share URL returned HTTP {}",
-            response.status()
-        );
-
-        println!("LIVE NULLPASTE TEST PASSED");
-        println!("Payload bytes: {}", buffer.len());
-        println!("Share URL: {share_url}");
-        println!("The share page returned HTTP {}", response.status());
-    }
 }
