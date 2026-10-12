@@ -441,40 +441,11 @@ pub fn run(args: &[String]) -> i32 {
         }
     }
 
-    if args.len() == 1 {
-        if let Some(file_path) = args[0].strip_prefix("file:") {
-            if file_path.is_empty() {
-                eprintln!("CVB pull: file: must be followed by a path.");
-                return 2;
-            }
-
-            let files = match tracked_files() {
-                Ok(files) => files,
-                Err(error) => {
-                    eprintln!("{error}");
-                    return 2;
-                }
-            };
-
-            if let Err(error) = filter_file_scope(files, Some(file_path)) {
-                eprintln!("{error}");
-                return 2;
-            }
-
-            crate::emit_pathop_marker();
-
-            let paths = [std::path::PathBuf::from(file_path)];
-            return match crate::bridge_paths(&paths) {
-                Ok(message) => {
-                    eprintln!("{message}");
-                    0
-                }
-                Err(error) => {
-                    eprintln!("{error}");
-                    1
-                }
-            };
-        }
+    if args.len() == 1 && args[0].starts_with("file:") {
+        eprintln!(
+            "CVB pull: direct file capture via file:PATH is disabled; use cvb PATH instead."
+        );
+        return 2;
     }
 
     if args.is_empty() {

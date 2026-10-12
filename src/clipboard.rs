@@ -1,4 +1,6 @@
 use std::io::Write;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) struct ClipboardBuffer {
     contents: Vec<u8>,
@@ -8,6 +10,129 @@ const DIRECT_COPY_LIMIT: usize = 9_750;
 const MAX_PASTE_BYTES: usize = 1_000_000;
 const DEFAULT_PASTE_URL: &str = "https://nullpaste.org/api/v1/pastes";
 const HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+static CAPTURE_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn new_capture_id() -> String {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let counter = CAPTURE_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+
+    format!("{timestamp:x}-{:x}-{counter:x}", std::process::id())
+}
+
+
+const MULTIPART_MAX_PART_BYTES: usize = DIRECT_COPY_LIMIT - 1;
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MultipartPart {
+    pub(crate) number: usize,
+    pub(crate) total: usize,
+    header: String,
+    payload: Vec<u8>,
+}
+
+#[allow(dead_code)]
+impl MultipartPart {
+    pub(crate) fn clipboard_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(self.header.len() + self.payload.len());
+        bytes.extend_from_slice(self.header.as_bytes());
+        bytes.extend_from_slice(&self.payload);
+        bytes
+    }
+}
+
+fn multipart_header(capture_id: &str, number: usize, total: usize) -> String {
+    format!(
+        "[CVB MULTIPART CAPTURE — ID: {capture_id}] Part {number}/{total}. Do not analyze or respond yet. Wait until all parts have arrived and I explicitly say DONE.\n"
+    )
+}
+
+#[allow(dead_code)]
+fn multipart_parts(
+    contents: &[u8],
+    capture_id: &str,
+) -> Result<Vec<MultipartPart>, String> {
+    let text = std::str::from_utf8(contents).map_err(|_| {
+        "CVB: multipart capture contains invalid UTF-8; refusing to split it".to_string()
+    })?;
+
+    if capture_id.is_empty()
+        || !capture_id.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
+        })
+    {
+        return Err("CVB: multipart capture ID must contain only ASCII letters, digits, '-' or '_'".to_string());
+    }
+
+    let mut total_guess = 1usize;
+
+    loop {
+        let payloads = split_multipart_payloads(text, capture_id, total_guess)?;
+        let actual_total = payloads.len();
+
+        if actual_total == total_guess {
+            return Ok(payloads
+                .into_iter()
+                .enumerate()
+                .map(|(index, payload)| {
+                    let number = index + 1;
+                    MultipartPart {
+                        number,
+                        total: actual_total,
+                        header: multipart_header(capture_id, number, actual_total),
+                        payload,
+                    }
+                })
+                .collect());
+        }
+
+        total_guess = actual_total;
+    }
+}
+
+fn split_multipart_payloads(
+    text: &str,
+    capture_id: &str,
+    total_guess: usize,
+) -> Result<Vec<Vec<u8>>, String> {
+    let mut payloads = Vec::new();
+    let mut offset = 0usize;
+
+    if text.is_empty() {
+        return Ok(vec![Vec::new()]);
+    }
+
+    while offset < text.len() {
+        let number = payloads.len() + 1;
+        let header = multipart_header(capture_id, number, total_guess);
+        let available = MULTIPART_MAX_PART_BYTES
+            .checked_sub(header.len())
+            .ok_or_else(|| "CVB: multipart header exceeds the part size limit".to_string())?;
+
+        if available == 0 {
+            return Err("CVB: multipart header leaves no room for content".to_string());
+        }
+
+        let mut end = offset.saturating_add(available).min(text.len());
+
+        while end > offset && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+
+        if end == offset {
+            return Err("CVB: unable to find a valid UTF-8 multipart boundary".to_string());
+        }
+
+        payloads.push(text.as_bytes()[offset..end].to_vec());
+        offset = end;
+    }
+
+    Ok(payloads)
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ClipboardAction {
@@ -154,6 +279,72 @@ impl ClipboardBuffer {
 #[cfg(test)]
 mod tests {
     use super::{ClipboardAction, ClipboardBuffer};
+
+    #[test]
+    fn capture_ids_are_unique_and_valid() {
+        let first = super::new_capture_id();
+        let second = super::new_capture_id();
+
+        assert_ne!(first, second);
+        assert!(super::multipart_parts(b"content", &first).is_ok());
+        assert!(super::multipart_parts(b"content", &second).is_ok());
+    }
+
+    #[test]
+    fn multipart_parts_reconstruct_original_utf8_exactly() {
+        let original = "line one\né 🧑‍💻\n".repeat(3_000);
+        let parts = super::multipart_parts(original.as_bytes(), "test-123").unwrap();
+
+        assert!(parts.len() > 1);
+
+        let reconstructed: Vec<u8> = parts
+            .iter()
+            .flat_map(|part| part.payload.iter().copied())
+            .collect();
+
+        assert_eq!(reconstructed, original.as_bytes());
+    }
+
+    #[test]
+    fn multipart_parts_stay_below_direct_copy_limit_including_headers() {
+        let original = "Rust 🦀 source line\n".repeat(2_000);
+        let parts = super::multipart_parts(original.as_bytes(), "test-123").unwrap();
+        let total = parts.len();
+
+        for (index, part) in parts.iter().enumerate() {
+            assert_eq!(part.number, index + 1);
+            assert_eq!(part.total, total);
+            assert!(part.clipboard_bytes().len() < super::DIRECT_COPY_LIMIT);
+            assert!(part.clipboard_bytes().starts_with(part.header.as_bytes()));
+            assert!(std::str::from_utf8(&part.payload).is_ok());
+            assert!(part.header.contains(&format!("Part {}/{total}.", index + 1)));
+        }
+    }
+
+    #[test]
+    fn multipart_parts_preserve_empty_input() {
+        let parts = super::multipart_parts(b"", "empty").unwrap();
+
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].number, 1);
+        assert_eq!(parts[0].total, 1);
+        assert!(parts[0].payload.is_empty());
+        assert!(parts[0].clipboard_bytes().len() < super::DIRECT_COPY_LIMIT);
+    }
+
+    #[test]
+    fn multipart_parts_reject_invalid_utf8() {
+        let error = super::multipart_parts(&[b'a', 0xff, b'b'], "test-123").unwrap_err();
+
+        assert!(error.contains("invalid UTF-8"));
+    }
+
+    #[test]
+    fn multipart_parts_reject_unsafe_capture_ids() {
+        assert!(super::multipart_parts(b"content", "").is_err());
+        assert!(super::multipart_parts(b"content", "bad id").is_err());
+        assert!(super::multipart_parts(b"content", "id/part").is_err());
+    }
 
     #[test]
     fn buffer_owns_exact_bytes() {
