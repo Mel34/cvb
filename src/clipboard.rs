@@ -189,13 +189,32 @@ pub(crate) fn process(buffer: &ClipboardBuffer) -> Result<(), String> {
 }
 
 fn copy_chunk_sequence(chunks: &[String]) -> Result<(), String> {
-    let total = chunks.len();
     let mut stdin = std::io::stdin();
+
+    copy_chunk_sequence_with(chunks, copy_to_clipboard, || {
+        let mut key = [0u8; 1];
+        stdin
+            .read_exact(&mut key)
+            .map_err(|error| format!("CVB: unable to read chunk control key: {error}"))?;
+        Ok(key[0])
+    })
+}
+
+fn copy_chunk_sequence_with<C, R>(
+    chunks: &[String],
+    mut copy: C,
+    mut read_key: R,
+) -> Result<(), String>
+where
+    C: FnMut(&ClipboardBuffer) -> Result<(), String>,
+    R: FnMut() -> Result<u8, String>,
+{
+    let total = chunks.len();
 
     for (index, chunk) in chunks.iter().enumerate() {
         let number = index + 1;
         let buffer = ClipboardBuffer::new(chunk.as_bytes().to_vec());
-        copy_to_clipboard(&buffer)?;
+        copy(&buffer)?;
 
         if number == total {
             eprint!("\r\x1b[2K");
@@ -214,12 +233,7 @@ Press Space for next part; q or Ctrl+C to cancel."
             .map_err(|error| format!("CVB: unable to update chunk status: {error}"))?;
 
         loop {
-            let mut key = [0u8; 1];
-            stdin
-                .read_exact(&mut key)
-                .map_err(|error| format!("CVB: unable to read chunk control key: {error}"))?;
-
-            match key[0] {
+            match read_key()? {
                 b' ' => break,
                 b'q' | b'Q' | 0x03 => {
                     eprint!("\r\x1b[2K");
@@ -317,21 +331,80 @@ mod tests {
     fn chunk_messages_reconstruct_original_text_exactly() {
         let input = "line one with spaces\né 🧑‍💻\n".repeat(200);
         let chunks = super::chunk_messages(&input, 300).unwrap();
+        let total = chunks.len();
 
-        assert!(chunks.len() > 1);
+        assert!(total > 1);
 
-        let reconstructed = chunks
-            .iter()
-            .map(|chunk| chunk.split_once("---\n").unwrap().1)
-            .collect::<String>();
+        let mut reconstructed = String::new();
 
-        assert_eq!(reconstructed, input);
-        assert!(chunks.iter().enumerate().all(|(index, chunk)| {
-            chunk.chars().count() <= 300
-                && chunk.starts_with(&format!("[Part {}/{} - ", index + 1, chunks.len()))
-        }));
-        assert!(chunks[0].contains("DO NOT PROCESS YET"));
-        assert!(chunks.last().unwrap().contains("FINAL PART"));
+        for (index, chunk) in chunks.iter().enumerate() {
+            let number = index + 1;
+            let final_part = number == total;
+
+            assert!(
+                chunk.chars().count() <= 300,
+                "part {number}/{total} exceeds the configured character limit"
+            );
+
+            let (header, payload) = chunk
+                .split_once("---\n")
+                .unwrap_or_else(|| panic!("part {number}/{total} has no framing separator"));
+
+            assert!(
+                header.starts_with(&format!("[Part {number}/{total} - ")),
+                "part {number}/{total} has incorrect numbering"
+            );
+
+            if final_part {
+                assert!(header.contains("FINAL PART"));
+                assert!(!header.contains("DO NOT PROCESS YET"));
+            } else {
+                assert!(header.contains("DO NOT PROCESS YET"));
+                assert!(!header.contains("FINAL PART"));
+            }
+
+            reconstructed.push_str(payload);
+        }
+
+        assert_eq!(
+            reconstructed.as_bytes(),
+            input.as_bytes(),
+            "reassembling the payloads must reproduce the original bytes exactly"
+        );
+    }
+
+    #[test]
+    fn chunk_messages_preserve_edge_case_payloads_exactly() {
+        let inputs = [
+            "é🧑‍💻漢字".repeat(500),
+            "\n\n\nline\n\n".repeat(100),
+            "   leading and trailing spaces   \n".repeat(100),
+            "x".repeat(2_000),
+            "line one\nline two\n".repeat(200),
+        ];
+
+        for input in inputs {
+            let chunks = super::chunk_messages(&input, 300).unwrap();
+            assert!(chunks.len() > 1);
+
+            let reconstructed = chunks
+                .iter()
+                .map(|chunk| {
+                    chunk
+                        .split_once("---\n")
+                        .expect("chunk must contain framing separator")
+                        .1
+                })
+                .collect::<String>();
+
+            assert_eq!(
+                reconstructed.as_bytes(),
+                input.as_bytes(),
+                "chunk reconstruction changed the original payload"
+            );
+
+            assert!(chunks.iter().all(|chunk| chunk.chars().count() <= 300));
+        }
     }
 
     #[test]
@@ -376,6 +449,156 @@ mod tests {
 
         assert_eq!(buffer.len(), 2);
         assert_eq!(buffer.as_bytes(), "é".as_bytes());
+    }
+
+    #[test]
+    fn chunk_sequence_copies_every_part_and_reconstructs_original() {
+        let input = "Unicode 🦀 and whitespace\n\n".repeat(100);
+        let chunks = super::chunk_messages(&input, 300).unwrap();
+        let expected_chunks = chunks.clone();
+        let mut copied = Vec::<Vec<u8>>::new();
+        let mut keys = vec![b' '; chunks.len().saturating_sub(1)].into_iter();
+
+        super::copy_chunk_sequence_with(
+            &chunks,
+            |buffer| {
+                copied.push(buffer.as_bytes().to_vec());
+                Ok(())
+            },
+            || {
+                Ok(keys
+                    .next()
+                    .expect("a key should advance each non-final part"))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            copied,
+            expected_chunks
+                .iter()
+                .map(|chunk| chunk.as_bytes().to_vec())
+                .collect::<Vec<_>>(),
+            "the clipboard must receive every framed chunk in order"
+        );
+
+        let reconstructed = copied
+            .iter()
+            .map(|chunk| {
+                std::str::from_utf8(chunk)
+                    .unwrap()
+                    .split_once("---\n")
+                    .expect("each copied chunk must have a framing separator")
+                    .1
+            })
+            .collect::<String>();
+
+        assert_eq!(reconstructed.as_bytes(), input.as_bytes());
+        assert_eq!(keys.next(), None);
+    }
+
+    #[test]
+    fn chunk_sequence_cancellation_stops_after_current_part() {
+        for cancel_key in [b'q', b'Q', 0x03] {
+            let chunks = vec![
+                "first framed chunk".to_string(),
+                "second framed chunk".to_string(),
+                "third framed chunk".to_string(),
+            ];
+            let mut copied = Vec::<Vec<u8>>::new();
+
+            super::copy_chunk_sequence_with(
+                &chunks,
+                |buffer| {
+                    copied.push(buffer.as_bytes().to_vec());
+                    Ok(())
+                },
+                || Ok(cancel_key),
+            )
+            .unwrap();
+
+            assert_eq!(
+                copied,
+                vec![chunks[0].as_bytes().to_vec()],
+                "cancel key {cancel_key:?} must prevent later chunks from being copied"
+            );
+        }
+    }
+
+    #[test]
+    fn chunk_sequence_ignores_unrecognized_keys() {
+        let chunks = vec![
+            "first framed chunk".to_string(),
+            "second framed chunk".to_string(),
+            "third framed chunk".to_string(),
+        ];
+        let mut copied = Vec::<Vec<u8>>::new();
+        let mut keys = [b'x', b'\n', b' ', b'!', b' '].into_iter().map(|key| key);
+
+        super::copy_chunk_sequence_with(
+            &chunks,
+            |buffer| {
+                copied.push(buffer.as_bytes().to_vec());
+                Ok(())
+            },
+            || Ok(keys.next().expect("expected scripted control key")),
+        )
+        .unwrap();
+
+        assert_eq!(
+            copied,
+            chunks
+                .iter()
+                .map(|chunk| chunk.as_bytes().to_vec())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn chunk_sequence_propagates_key_read_failure_without_advancing() {
+        let chunks = vec![
+            "first framed chunk".to_string(),
+            "second framed chunk".to_string(),
+        ];
+        let mut copy_attempts = 0;
+
+        let result = super::copy_chunk_sequence_with(
+            &chunks,
+            |_| {
+                copy_attempts += 1;
+                Ok(())
+            },
+            || Err("simulated key read failure".to_string()),
+        );
+
+        assert_eq!(result.unwrap_err(), "simulated key read failure");
+        assert_eq!(copy_attempts, 1);
+    }
+
+    #[test]
+    fn chunk_sequence_propagates_copy_failure_without_advancing() {
+        let chunks = vec![
+            "first framed chunk".to_string(),
+            "second framed chunk".to_string(),
+        ];
+        let mut copy_attempts = 0;
+        let mut key_reads = 0;
+
+        let result = super::copy_chunk_sequence_with(
+            &chunks,
+            |_| {
+                copy_attempts += 1;
+                Err("simulated clipboard failure".to_string())
+            },
+            || {
+                key_reads += 1;
+                Ok(b' ')
+            },
+        );
+
+        assert_eq!(result.unwrap_err(), "simulated clipboard failure");
+        assert_eq!(copy_attempts, 1);
+        assert_eq!(key_reads, 0);
     }
 }
 
