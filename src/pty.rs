@@ -960,7 +960,7 @@ fn capture_screen(terminal: &mut vt100::Parser) -> Result<(), String> {
 
     terminal.screen_mut().set_scrollback(0);
 
-    let text = screen_to_text(terminal);
+    let text = screen_viewport_to_text(terminal);
 
     let processed = if text.is_empty() {
         NO_OUTPUT.to_string()
@@ -972,6 +972,20 @@ fn capture_screen(terminal: &mut vt100::Parser) -> Result<(), String> {
     crate::clipboard::process(&buffer)?;
 
     Ok(())
+}
+
+fn screen_viewport_to_text(terminal: &mut vt100::Parser) -> String {
+    let (_, cols) = terminal.screen().size();
+
+    terminal.screen_mut().set_scrollback(0);
+
+    terminal
+        .screen()
+        .rows(0, cols)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_end_matches('\n')
+        .to_string()
 }
 
 fn screen_to_text(terminal: &mut vt100::Parser) -> String {
@@ -1053,7 +1067,7 @@ fn status_to_code(status: WaitStatus) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::screen_to_text;
+    use super::{screen_to_text, screen_viewport_to_text};
 
     #[test]
     fn renders_plain_multiline_output() {
@@ -1089,5 +1103,14 @@ mod tests {
         terminal.process(b"ONE\r\nTWO\r\nTHREE\r\nFOUR\r\nFIVE\r\n");
 
         assert_eq!(screen_to_text(&mut terminal), "ONE\nTWO\nTHREE\nFOUR\nFIVE");
+    }
+
+    #[test]
+    fn screenshot_rendering_excludes_scrollback() {
+        let mut terminal = vt100::Parser::new(3, 80, 64);
+
+        terminal.process(b"ONE\r\nTWO\r\nTHREE\r\nFOUR\r\nFIVE");
+
+        assert_eq!(screen_viewport_to_text(&mut terminal), "THREE\nFOUR\nFIVE");
     }
 }
