@@ -167,11 +167,27 @@ fn chunk_messages(text: &str, limit: usize) -> Result<Vec<String>, String> {
 }
 
 pub(crate) fn process(buffer: &ClipboardBuffer) -> Result<(), String> {
-    let limit = configured_copy_limit();
+    process_with(
+        buffer,
+        configured_copy_limit(),
+        copy_to_clipboard,
+        copy_chunk_sequence,
+    )
+}
 
+fn process_with<C, S>(
+    buffer: &ClipboardBuffer,
+    limit: usize,
+    mut copy: C,
+    mut copy_sequence: S,
+) -> Result<(), String>
+where
+    C: FnMut(&ClipboardBuffer) -> Result<(), String>,
+    S: FnMut(&[String]) -> Result<(), String>,
+{
     let text = match std::str::from_utf8(buffer.as_bytes()) {
         Ok(text) => text,
-        Err(_) if buffer.len() < limit => return copy_to_clipboard(buffer),
+        Err(_) if buffer.len() < limit => return copy(buffer),
         Err(_) => {
             return Err(
                 "CVB: oversized capture is not valid UTF-8; cannot split it safely".to_string(),
@@ -182,10 +198,10 @@ pub(crate) fn process(buffer: &ClipboardBuffer) -> Result<(), String> {
     let chunks = chunk_messages(text, limit)?;
 
     if chunks.len() == 1 {
-        return copy_to_clipboard(buffer);
+        return copy(buffer);
     }
 
-    copy_chunk_sequence(&chunks)
+    copy_sequence(&chunks)
 }
 
 fn copy_chunk_sequence(chunks: &[String]) -> Result<(), String> {
@@ -573,6 +589,162 @@ mod tests {
 
         assert_eq!(result.unwrap_err(), "simulated key read failure");
         assert_eq!(copy_attempts, 1);
+    }
+
+    #[test]
+    fn process_copies_small_valid_text_unchanged() {
+        let buffer = ClipboardBuffer::new(b"hello".to_vec());
+        let mut copied = Vec::new();
+        let mut sequence_calls = 0;
+
+        super::process_with(
+            &buffer,
+            100,
+            |buffer| {
+                copied.push(buffer.as_bytes().to_vec());
+                Ok(())
+            },
+            |_| {
+                sequence_calls += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(copied, vec![b"hello".to_vec()]);
+        assert_eq!(sequence_calls, 0);
+    }
+
+    #[test]
+    fn process_sends_oversized_valid_text_to_chunk_sequence() {
+        let input = "x".repeat(1_000);
+        let buffer = ClipboardBuffer::new(input.as_bytes().to_vec());
+        let mut copied = Vec::new();
+        let mut received_chunks = Vec::new();
+
+        super::process_with(
+            &buffer,
+            300,
+            |buffer| {
+                copied.push(buffer.as_bytes().to_vec());
+                Ok(())
+            },
+            |chunks| {
+                received_chunks = chunks.to_vec();
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert!(copied.is_empty());
+        assert!(received_chunks.len() > 1);
+
+        let reconstructed = received_chunks
+            .iter()
+            .map(|chunk| {
+                chunk
+                    .split_once("---\n")
+                    .expect("each chunk must contain its framing separator")
+                    .1
+            })
+            .collect::<String>();
+
+        assert_eq!(reconstructed.as_bytes(), input.as_bytes());
+    }
+
+    #[test]
+    fn process_copies_small_invalid_utf8_unchanged() {
+        let bytes = vec![0xff, 0x00, 0x41];
+        let buffer = ClipboardBuffer::new(bytes.clone());
+        let mut copied = Vec::new();
+        let mut sequence_calls = 0;
+
+        super::process_with(
+            &buffer,
+            10,
+            |buffer| {
+                copied.push(buffer.as_bytes().to_vec());
+                Ok(())
+            },
+            |_| {
+                sequence_calls += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(copied, vec![bytes]);
+        assert_eq!(sequence_calls, 0);
+    }
+
+    #[test]
+    fn process_rejects_oversized_invalid_utf8_without_copying() {
+        let buffer = ClipboardBuffer::new(vec![0xff; 10]);
+        let mut copy_calls = 0;
+        let mut sequence_calls = 0;
+
+        let result = super::process_with(
+            &buffer,
+            10,
+            |_| {
+                copy_calls += 1;
+                Ok(())
+            },
+            |_| {
+                sequence_calls += 1;
+                Ok(())
+            },
+        );
+
+        assert_eq!(
+            result.unwrap_err(),
+            "CVB: oversized capture is not valid UTF-8; cannot split it safely"
+        );
+        assert_eq!(copy_calls, 0);
+        assert_eq!(sequence_calls, 0);
+    }
+
+    #[test]
+    fn process_propagates_direct_copy_failure() {
+        let buffer = ClipboardBuffer::new(b"hello".to_vec());
+        let mut sequence_calls = 0;
+
+        let result = super::process_with(
+            &buffer,
+            100,
+            |_| Err("simulated direct-copy failure".to_string()),
+            |_| {
+                sequence_calls += 1;
+                Ok(())
+            },
+        );
+
+        assert_eq!(result.unwrap_err(), "simulated direct-copy failure");
+        assert_eq!(sequence_calls, 0);
+    }
+
+    #[test]
+    fn process_propagates_chunk_sequence_failure() {
+        let buffer = ClipboardBuffer::new("x".repeat(1_000).into_bytes());
+        let mut copy_calls = 0;
+        let mut sequence_calls = 0;
+
+        let result = super::process_with(
+            &buffer,
+            300,
+            |_| {
+                copy_calls += 1;
+                Ok(())
+            },
+            |_| {
+                sequence_calls += 1;
+                Err("simulated chunk-sequence failure".to_string())
+            },
+        );
+
+        assert_eq!(result.unwrap_err(), "simulated chunk-sequence failure");
+        assert_eq!(copy_calls, 0);
+        assert_eq!(sequence_calls, 1);
     }
 
     #[test]
