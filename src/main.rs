@@ -83,7 +83,7 @@ A capture session ends with:
 
             if let Some(paths) = target_paths(&args) {
                 match bridge_paths(&paths) {
-                    Ok(message) => eprintln!("{message}"),
+                    Ok(()) => {}
                     Err(error) => {
                         eprintln!("{error}");
                         std::process::exit(1);
@@ -133,8 +133,17 @@ fn run_internal_target(args: &[String]) -> ! {
     let mut control = control::ControlChannel::new(fd);
     let id = std::process::id() as u64;
 
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd.to_string_lossy().into_owned(),
+        Err(error) => {
+            eprintln!("CVB: unable to determine working directory: {error}");
+            std::process::exit(1);
+        }
+    };
+
     let request = control::ControlMessage::TargetRequest {
         id,
+        cwd,
         args: args.to_vec(),
     };
 
@@ -183,11 +192,11 @@ fn target_paths(args: &[String]) -> Option<Vec<std::path::PathBuf>> {
 
 pub(crate) fn bridge_paths(
     paths: &[std::path::PathBuf],
-) -> Result<String, String> {
-    let (contents, message) = build_bridge_output(paths)?;
+) -> Result<(), String> {
+    let (contents, _message) = build_bridge_output(paths)?;
     let buffer = clipboard::ClipboardBuffer::new(contents);
     clipboard::process(&buffer)?;
-    Ok(message)
+    Ok(())
 }
 
 pub(crate) fn build_bridge_output(
@@ -245,20 +254,31 @@ pub(crate) fn build_bridge_output(
 
 fn build_path_leaves(
     paths: &[std::path::PathBuf],
+    base_dir: &std::path::Path,
 ) -> Vec<(String, Vec<u8>, bool)> {
     paths
         .iter()
         .map(|path| {
             let label = format!("[{}]", path.display());
+            let resolved_path = if path.is_absolute() {
+                path.clone()
+            } else {
+                base_dir.join(path)
+            };
 
-            let result: Result<Vec<u8>, String> = if path.is_file() {
-                std::fs::read(path)
+            let result: Result<Vec<u8>, String> = if resolved_path.is_file() {
+                std::fs::read(&resolved_path)
                     .map_err(|error| format!("Error reading the file: {error}"))
-            } else if path.is_dir() {
+            } else if resolved_path.is_dir() {
                 (|| {
                     let ignore = load_ignore_list()?;
                     let mut output = String::from(INVENTORY_HEADER);
-                    append_directory_entries(path, path, &mut output, &ignore)?;
+                    append_directory_entries(
+                        &resolved_path,
+                        &resolved_path,
+                        &mut output,
+                        &ignore,
+                    )?;
                     Ok(output.into_bytes())
                 })()
                 .map_err(|error: String| {
@@ -916,7 +936,7 @@ mod tests {
 
         fs::write(&file, "second contents\n").unwrap();
 
-        let leaves = build_path_leaves(&[missing.clone(), file.clone()]);
+        let leaves = build_path_leaves(&[missing.clone(), file.clone()], std::path::Path::new("."));
 
         assert_eq!(leaves.len(), 2);
         assert_eq!(leaves[0].0, format!("[{}]", missing.display()));
@@ -940,7 +960,7 @@ mod tests {
 
         fs::write(&file, &contents).unwrap();
 
-        let leaves = build_path_leaves(std::slice::from_ref(&file));
+        let leaves = build_path_leaves(std::slice::from_ref(&file), std::path::Path::new("."));
 
         assert_eq!(leaves.len(), 1);
         assert_eq!(leaves[0].0, format!("[{}]", file.display()));

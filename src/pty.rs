@@ -973,7 +973,7 @@ fn handle_control_message(
     match message {
         ControlMessage::Exit => {}
 
-        ControlMessage::TargetRequest { id, args } => {
+        ControlMessage::TargetRequest { id, cwd, args } => {
             let arg_count = args.len();
 
             debug_log(
@@ -986,8 +986,8 @@ fn handle_control_message(
                 .map(std::path::PathBuf::from)
                 .collect::<Vec<_>>();
 
-            let leaves = crate::build_path_leaves(&paths);
-            let leaf_count = leaves.len();
+            let base_dir = std::path::PathBuf::from(cwd);
+            let leaves = crate::build_path_leaves(&paths, &base_dir);
             let status = if leaves.iter().all(|(_, _, succeeded)| *succeeded) {
                 0
             } else {
@@ -1004,18 +1004,10 @@ fn handle_control_message(
                 }
             }
 
-            let message = if status == 0 {
-                format!("Added {leaf_count} path(s) to transcript")
-            } else {
-                format!(
-                    "Added {leaf_count} path(s) to transcript; one or more paths failed"
-                )
-            };
-
             control.send(&ControlMessage::TargetResponse {
                 id,
                 status,
-                message,
+                message: String::new(),
             })?;
         }
 

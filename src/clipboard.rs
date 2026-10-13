@@ -272,7 +272,7 @@ fn upload_and_copy_url(buffer: &ClipboardBuffer) -> Result<(), String> {
         let lease = format!("--force-with-lease=refs/heads/main:{remote_sha}");
         git_command(
             &repo,
-            &[lease.as_str(), "origin", "HEAD:refs/heads/main"],
+            &["push", lease.as_str(), "origin", "HEAD:refs/heads/main"],
             "push latest capture to registry",
         )?;
 

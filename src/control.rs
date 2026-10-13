@@ -12,7 +12,7 @@ const TARGET_RESPONSE: u8 = 0x05;
 #[derive(Debug, PartialEq, Eq)]
 pub enum ControlMessage {
     Exit,
-    TargetRequest { id: u64, args: Vec<String> },
+    TargetRequest { id: u64, cwd: String, args: Vec<String> },
     TargetResponse { id: u64, status: i32, message: String },
 }
 
@@ -141,9 +141,13 @@ fn encode(message: &ControlMessage) -> Result<Vec<u8>, String> {
             payload.push(EXIT);
         }
 
-        ControlMessage::TargetRequest { id, args } => {
+        ControlMessage::TargetRequest { id, cwd, args } => {
             payload.push(TARGET_REQUEST);
             payload.extend_from_slice(&id.to_be_bytes());
+
+            let cwd = cwd.as_bytes();
+            payload.extend_from_slice(&(cwd.len() as u32).to_be_bytes());
+            payload.extend_from_slice(cwd);
             payload.extend_from_slice(&(args.len() as u32).to_be_bytes());
 
             for arg in args {
@@ -216,7 +220,7 @@ fn decode(payload: &[u8]) -> Result<ControlMessage, String> {
         }
 
         TARGET_REQUEST => {
-            if payload.len() < 13 {
+            if payload.len() < 17 {
                 return Err("CVB: malformed TARGET_REQUEST message".to_string());
             }
 
@@ -226,13 +230,29 @@ fn decode(payload: &[u8]) -> Result<ControlMessage, String> {
                     .map_err(|_| "CVB: malformed TARGET_REQUEST message".to_string())?,
             );
 
-            let argc = u32::from_be_bytes(
+            let cwd_length = u32::from_be_bytes(
                 payload[9..13]
                     .try_into()
                     .map_err(|_| "CVB: malformed TARGET_REQUEST message".to_string())?,
             ) as usize;
 
             let mut offset = 13;
+            if payload.len() < offset + cwd_length + 4 {
+                return Err("CVB: malformed TARGET_REQUEST message".to_string());
+            }
+
+            let cwd = std::str::from_utf8(&payload[offset..offset + cwd_length])
+                .map_err(|_| "CVB: TARGET_REQUEST working directory is not valid UTF-8".to_string())?
+                .to_string();
+            offset += cwd_length;
+
+            let argc = u32::from_be_bytes(
+                payload[offset..offset + 4]
+                    .try_into()
+                    .map_err(|_| "CVB: malformed TARGET_REQUEST message".to_string())?,
+            ) as usize;
+            offset += 4;
+
             let mut args = Vec::with_capacity(argc);
 
             for _ in 0..argc {
@@ -264,7 +284,7 @@ fn decode(payload: &[u8]) -> Result<ControlMessage, String> {
                 return Err("CVB: malformed TARGET_REQUEST message".to_string());
             }
 
-            Ok(ControlMessage::TargetRequest { id, args })
+            Ok(ControlMessage::TargetRequest { id, cwd, args })
         }
 
         TARGET_RESPONSE => {
@@ -328,6 +348,7 @@ mod tests {
     fn encodes_and_decodes_target_request() {
         let message = ControlMessage::TargetRequest {
             id: 42,
+            cwd: "/tmp/cvb-test".to_string(),
             args: vec![
                 "src/foo.rs".to_string(),
                 "a path with spaces".to_string(),
