@@ -44,6 +44,16 @@ printf 'Command lifecycle: %s\n' "$lifecycle_summary"
 run_step "CLI bridge" "$tmpdir/cli-bridge.log" scripts/test-cli-bridge.py
 cli_bridge_summary=$(tail -n 1 "$tmpdir/cli-bridge.log")
 printf 'CLI bridge: %s\n' "$cli_bridge_summary"
+
+run_step "PTY capture" "$tmpdir/pty-capture.log" scripts/test-pty-capture.py
+pty_capture_summary=$(grep -E '^(SKIP: interactive PTY unavailable|[0-9]+ passed, [0-9]+ failed)' "$tmpdir/pty-capture.log" | tail -n 1 || true)
+if [[ -z "$pty_capture_summary" ]]; then
+    printf 'FAIL: PTY harness produced no recognizable summary. Full output follows:\n' >&2
+    cat "$tmpdir/pty-capture.log" >&2
+    exit 1
+fi
+printf 'PTY capture: %s\n' "$pty_capture_summary"
+
 run_step "cargo check" "$tmpdir/check.log" cargo check
 run_step "git diff --check" "$tmpdir/diff.log" git diff --check
 

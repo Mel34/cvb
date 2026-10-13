@@ -264,8 +264,11 @@ impl KeybindWatcher {
             let length = result as usize;
 
             while offset < length {
-                let event =
-                    unsafe { &*(buffer.as_ptr().add(offset) as *const libc::inotify_event) };
+                let event = unsafe {
+                    std::ptr::read_unaligned(
+                        buffer.as_ptr().add(offset).cast::<libc::inotify_event>(),
+                    )
+                };
 
                 if event.len > 0 {
                     let name_offset = offset + std::mem::size_of::<libc::inotify_event>();
