@@ -41,6 +41,9 @@ summary=$(awk '
 run_step "command lifecycle" "$tmpdir/lifecycle.log" scripts/test-command-lifecycle.sh
 lifecycle_summary=$(tail -n 1 "$tmpdir/lifecycle.log")
 printf 'Command lifecycle: %s\n' "$lifecycle_summary"
+run_step "CLI bridge" "$tmpdir/cli-bridge.log" scripts/test-cli-bridge.py
+cli_bridge_summary=$(tail -n 1 "$tmpdir/cli-bridge.log")
+printf 'CLI bridge: %s\n' "$cli_bridge_summary"
 run_step "cargo check" "$tmpdir/check.log" cargo check
 run_step "git diff --check" "$tmpdir/diff.log" git diff --check
 
