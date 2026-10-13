@@ -441,12 +441,8 @@ pub fn run(args: &[String]) -> i32 {
         }
     }
 
-    if args.len() == 1 && args[0].starts_with("file:") {
-        eprintln!(
-            "CVB pull: direct file capture via file:PATH is disabled; use cvb PATH instead."
-        );
-        return 2;
-    }
+    let whole_file_capture =
+        args.len() == 1 && args[0].starts_with("file:");
 
     if args.is_empty() {
         eprintln!("Usage: cvb pull [file:PATH] <search-term>...");
@@ -455,7 +451,12 @@ pub fn run(args: &[String]) -> i32 {
     }
 
     let term = args.join(" ");
-    let (scope, line_ranges, query_args) = match extract_file_scope(args) {
+    let parsed = if whole_file_capture {
+        extract_file_scope(&[args[0].clone(), "lines:1".to_string()])
+    } else {
+        extract_file_scope(args)
+    };
+    let (scope, mut line_ranges, query_args) = match parsed {
         Ok(parsed) => parsed,
         Err(error) => {
             eprintln!("{error}");
@@ -495,6 +496,25 @@ pub fn run(args: &[String]) -> i32 {
             return 2;
         }
     };
+
+    if whole_file_capture {
+        let Some(path) = scope.as_deref() else {
+            eprintln!("CVB pull: internal error: missing whole-file path.");
+            return 2;
+        };
+        let source = match std::fs::read_to_string(path) {
+            Ok(source) => source,
+            Err(error) => {
+                eprintln!("CVB pull: unable to read {path}: {error}");
+                return 2;
+            }
+        };
+        let line_count = source.lines().count();
+        if line_count == 0 {
+            return 0;
+        }
+        line_ranges = vec![(1, line_count)];
+    }
 
     if let Some(path) = scope.as_deref().filter(|_| !line_ranges.is_empty()) {
         let mut output = String::new();
