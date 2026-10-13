@@ -38,6 +38,9 @@ summary=$(awk '
     exit 1
 }
 
+run_step "command lifecycle" "$tmpdir/lifecycle.log" scripts/test-command-lifecycle.sh
+lifecycle_summary=$(tail -n 1 "$tmpdir/lifecycle.log")
+printf 'Command lifecycle: %s\n' "$lifecycle_summary"
 run_step "cargo check" "$tmpdir/check.log" cargo check
 run_step "git diff --check" "$tmpdir/diff.log" git diff --check
 
