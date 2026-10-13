@@ -4,8 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 
 fn sha256(path: &str) -> String {
-    let contents = fs::read(path)
-        .unwrap_or_else(|error| panic!("unable to read {path}: {error}"));
+    let contents = fs::read(path).unwrap_or_else(|error| panic!("unable to read {path}: {error}"));
 
     Sha256::digest(&contents)
         .iter()
@@ -36,9 +35,7 @@ fn main() {
          pub const CVB_CONTROL_BASH_SHA256: &str = \"{cvb_control_bash_sha256}\";\n"
     );
 
-    let out_dir = PathBuf::from(
-        env::var_os("OUT_DIR").expect("Cargo did not set OUT_DIR"),
-    );
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo did not set OUT_DIR"));
 
     fs::write(out_dir.join("cvb_script_hashes.rs"), generated)
         .expect("unable to write generated CVB script fingerprints");

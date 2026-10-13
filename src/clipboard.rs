@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -10,9 +10,75 @@ pub(crate) struct ClipboardBuffer {
 }
 
 const DIRECT_COPY_LIMIT: usize = 9_750;
+const DEFAULT_COPY_LIMIT: usize = 9_750;
+
+fn configured_copy_limit() -> usize {
+    let config_dir = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|home| home.join(".config"))
+        });
+
+    let Some(config_dir) = config_dir else {
+        eprintln!(
+            "CVB: unable to determine config directory; using default limit {DEFAULT_COPY_LIMIT}"
+        );
+        return DEFAULT_COPY_LIMIT;
+    };
+
+    load_copy_limit(&config_dir.join("cvb").join("limit"))
+}
+
+fn load_copy_limit(path: &Path) -> usize {
+    if !path.exists() {
+        let Some(parent) = path.parent() else {
+            eprintln!("CVB: invalid limit config path; using default limit {DEFAULT_COPY_LIMIT}");
+            return DEFAULT_COPY_LIMIT;
+        };
+
+        if let Err(error) = fs::create_dir_all(parent) {
+            eprintln!(
+                "CVB: unable to create limit config directory: {error}; using default limit {DEFAULT_COPY_LIMIT}"
+            );
+            return DEFAULT_COPY_LIMIT;
+        }
+
+        let initial_contents = format!("{}{}", DEFAULT_COPY_LIMIT, char::from(10));
+        if let Err(error) = fs::write(path, initial_contents) {
+            eprintln!(
+                "CVB: unable to initialize limit config: {error}; using default limit {DEFAULT_COPY_LIMIT}"
+            );
+            return DEFAULT_COPY_LIMIT;
+        }
+    }
+
+    match fs::read_to_string(path) {
+        Ok(contents) => match contents.trim().parse::<usize>() {
+            Ok(limit) if limit > 0 => limit,
+            _ => {
+                eprintln!(
+                    "CVB: invalid limit in {}; using default limit {DEFAULT_COPY_LIMIT}",
+                    path.display()
+                );
+                DEFAULT_COPY_LIMIT
+            }
+        },
+        Err(error) => {
+            eprintln!(
+                "CVB: unable to read {}: {error}; using default limit {DEFAULT_COPY_LIMIT}",
+                path.display()
+            );
+            DEFAULT_COPY_LIMIT
+        }
+    }
+}
 const MAX_CAPTURE_BYTES: usize = 1_000_000;
 const REGISTRY_REMOTE: &str = "git@github.com:Mel34/cvb-registry.git";
-const REGISTRY_FILE_URL: &str = "https://github.com/Mel34/cvb-registry/blob/main/captures/latest.txt";
+const REGISTRY_FILE_URL: &str =
+    "https://github.com/Mel34/cvb-registry/blob/main/captures/latest.txt";
 
 static CAPTURE_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -25,7 +91,6 @@ fn new_capture_id() -> String {
 
     format!("{timestamp:x}-{:x}-{counter:x}", std::process::id())
 }
-
 
 const MULTIPART_MAX_PART_BYTES: usize = DIRECT_COPY_LIMIT - 1;
 
@@ -55,20 +120,20 @@ fn multipart_header(capture_id: &str, number: usize, total: usize) -> String {
 }
 
 #[allow(dead_code)]
-fn multipart_parts(
-    contents: &[u8],
-    capture_id: &str,
-) -> Result<Vec<MultipartPart>, String> {
+fn multipart_parts(contents: &[u8], capture_id: &str) -> Result<Vec<MultipartPart>, String> {
     let text = std::str::from_utf8(contents).map_err(|_| {
         "CVB: multipart capture contains invalid UTF-8; refusing to split it".to_string()
     })?;
 
     if capture_id.is_empty()
-        || !capture_id.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
-        })
+        || !capture_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
     {
-        return Err("CVB: multipart capture ID must contain only ASCII letters, digits, '-' or '_'".to_string());
+        return Err(
+            "CVB: multipart capture ID must contain only ASCII letters, digits, '-' or '_'"
+                .to_string(),
+        );
     }
 
     let mut total_guess = 1usize;
@@ -144,7 +209,11 @@ pub(crate) enum ClipboardAction {
 }
 
 pub(crate) fn action_for(buffer: &ClipboardBuffer) -> ClipboardAction {
-    if buffer.len() < DIRECT_COPY_LIMIT {
+    action_for_with_limit(buffer, configured_copy_limit())
+}
+
+fn action_for_with_limit(buffer: &ClipboardBuffer, limit: usize) -> ClipboardAction {
+    if buffer.len() < limit {
         ClipboardAction::CopyDirectly
     } else {
         ClipboardAction::UploadAndCopyUrl
@@ -156,7 +225,21 @@ fn dispatch<T>(
     copy_directly: impl FnOnce(&ClipboardBuffer) -> Result<T, String>,
     upload_and_copy_url: impl FnOnce(&ClipboardBuffer) -> Result<T, String>,
 ) -> Result<T, String> {
-    match action_for(buffer) {
+    dispatch_with_limit(
+        buffer,
+        configured_copy_limit(),
+        copy_directly,
+        upload_and_copy_url,
+    )
+}
+
+fn dispatch_with_limit<T>(
+    buffer: &ClipboardBuffer,
+    limit: usize,
+    copy_directly: impl FnOnce(&ClipboardBuffer) -> Result<T, String>,
+    upload_and_copy_url: impl FnOnce(&ClipboardBuffer) -> Result<T, String>,
+) -> Result<T, String> {
+    match action_for_with_limit(buffer, limit) {
         ClipboardAction::CopyDirectly => copy_directly(buffer),
         ClipboardAction::UploadAndCopyUrl => upload_and_copy_url(buffer),
     }
@@ -167,9 +250,8 @@ pub(crate) fn process(buffer: &ClipboardBuffer) -> Result<(), String> {
 }
 
 fn upload_and_copy_url(buffer: &ClipboardBuffer) -> Result<(), String> {
-    std::str::from_utf8(buffer.as_bytes()).map_err(|_| {
-        "CVB: captured text is not valid UTF-8; refusing to publish it".to_string()
-    })?;
+    std::str::from_utf8(buffer.as_bytes())
+        .map_err(|_| "CVB: captured text is not valid UTF-8; refusing to publish it".to_string())?;
 
     if buffer.len() > MAX_CAPTURE_BYTES {
         return Err(format!(
@@ -189,12 +271,20 @@ fn upload_and_copy_url(buffer: &ClipboardBuffer) -> Result<(), String> {
         ));
     }
 
-    let branch = git_command(&repo, &["branch", "--show-current"], "inspect registry branch")?;
+    let branch = git_command(
+        &repo,
+        &["branch", "--show-current"],
+        "inspect registry branch",
+    )?;
     if String::from_utf8_lossy(&branch.stdout).trim() != "main" {
         return Err("CVB: registry clone must be on branch 'main'".to_string());
     }
 
-    let remote = git_command(&repo, &["remote", "get-url", "origin"], "inspect registry remote")?;
+    let remote = git_command(
+        &repo,
+        &["remote", "get-url", "origin"],
+        "inspect registry remote",
+    )?;
     if String::from_utf8_lossy(&remote.stdout).trim() != REGISTRY_REMOTE {
         return Err(format!(
             "CVB: unexpected registry origin; expected {REGISTRY_REMOTE}"
@@ -223,11 +313,11 @@ fn upload_and_copy_url(buffer: &ClipboardBuffer) -> Result<(), String> {
         &["rev-parse", "refs/remotes/origin/main"],
         "read fetched registry commit",
     )?;
-    let remote_sha = String::from_utf8_lossy(&remote_head.stdout).trim().to_string();
+    let remote_sha = String::from_utf8_lossy(&remote_head.stdout)
+        .trim()
+        .to_string();
 
-    if remote_sha.is_empty()
-        || !remote_sha.bytes().all(|byte| byte.is_ascii_hexdigit())
-    {
+    if remote_sha.is_empty() || !remote_sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("CVB: fetched registry commit ID is invalid".to_string());
     }
 
@@ -242,8 +332,9 @@ fn upload_and_copy_url(buffer: &ClipboardBuffer) -> Result<(), String> {
         )?;
         orphan_created = true;
 
-        fs::create_dir_all(repo.join("captures"))
-            .map_err(|error| format!("CVB: unable to create registry captures directory: {error}"))?;
+        fs::create_dir_all(repo.join("captures")).map_err(|error| {
+            format!("CVB: unable to create registry captures directory: {error}")
+        })?;
         fs::write(repo.join("README.md"), &readme)
             .map_err(|error| format!("CVB: unable to restore registry README: {error}"))?;
         fs::write(repo.join("captures/latest.txt"), buffer.as_bytes())
@@ -321,7 +412,10 @@ fn git_command(repo: &Path, args: &[&str], operation: &str) -> Result<Output, St
     if !output.status.success() {
         let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(if detail.is_empty() {
-            format!("CVB: unable to {operation} (git exited with {})", output.status)
+            format!(
+                "CVB: unable to {operation} (git exited with {})",
+                output.status
+            )
         } else {
             format!("CVB: unable to {operation}: {detail}")
         });
@@ -355,6 +449,54 @@ impl ClipboardBuffer {
 #[cfg(test)]
 mod tests {
     use super::{ClipboardAction, ClipboardBuffer};
+
+    fn temporary_limit_path(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir()
+            .join(format!(
+                "cvb-limit-{label}-{}-{}",
+                std::process::id(),
+                super::new_capture_id()
+            ))
+            .join("cvb")
+            .join("limit")
+    }
+
+    #[test]
+    fn limit_config_initializes_default_with_newline() {
+        let path = temporary_limit_path("init");
+        let root = path.parent().unwrap().parent().unwrap().to_path_buf();
+
+        assert_eq!(super::load_copy_limit(&path), 9_750);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "9750\n");
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn limit_config_reads_custom_value() {
+        let path = temporary_limit_path("custom");
+        let root = path.parent().unwrap().parent().unwrap().to_path_buf();
+
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "4321\n").unwrap();
+
+        assert_eq!(super::load_copy_limit(&path), 4_321);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn limit_config_invalid_value_uses_default() {
+        let path = temporary_limit_path("invalid");
+        let root = path.parent().unwrap().parent().unwrap().to_path_buf();
+
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "not-a-number\n").unwrap();
+
+        assert_eq!(super::load_copy_limit(&path), 9_750);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn capture_ids_are_unique_and_valid() {
@@ -393,7 +535,10 @@ mod tests {
             assert!(part.clipboard_bytes().len() < super::DIRECT_COPY_LIMIT);
             assert!(part.clipboard_bytes().starts_with(part.header.as_bytes()));
             assert!(std::str::from_utf8(&part.payload).is_ok());
-            assert!(part.header.contains(&format!("Part {}/{total}.", index + 1)));
+            assert!(
+                part.header
+                    .contains(&format!("Part {}/{total}.", index + 1))
+            );
         }
     }
 
@@ -446,7 +591,10 @@ mod tests {
         let above = ClipboardBuffer::new(vec![0; 9_751]);
 
         assert_eq!(super::action_for(&below), ClipboardAction::CopyDirectly);
-        assert_eq!(super::action_for(&at_limit), ClipboardAction::UploadAndCopyUrl);
+        assert_eq!(
+            super::action_for(&at_limit),
+            ClipboardAction::UploadAndCopyUrl
+        );
         assert_eq!(super::action_for(&above), ClipboardAction::UploadAndCopyUrl);
     }
 
@@ -456,8 +604,9 @@ mod tests {
         let mut direct_called = false;
         let mut upload_called = false;
 
-        let result = super::dispatch(
+        let result = super::dispatch_with_limit(
             &buffer,
+            9_750,
             |_| {
                 direct_called = true;
                 Ok(())
@@ -479,8 +628,9 @@ mod tests {
         let mut direct_called = false;
         let mut upload_called = false;
 
-        let result = super::dispatch(
+        let result = super::dispatch_with_limit(
             &buffer,
+            9_750,
             |_| {
                 direct_called = true;
                 Ok(())
@@ -500,8 +650,9 @@ mod tests {
     fn dispatch_propagates_selected_action_error() {
         let buffer = ClipboardBuffer::new(vec![0; 9_750]);
 
-        let result = super::dispatch(
+        let result = super::dispatch_with_limit(
             &buffer,
+            9_750,
             |_| Ok(()),
             |_| Err("upload failed".to_string()),
         );
@@ -514,9 +665,9 @@ mod tests {
         let message = super::handoff_message();
 
         assert!(message.contains("Hey Chadgpt"));
-        assert!(message.contains(
-            "https://github.com/Mel34/cvb-registry/blob/main/captures/latest.txt"
-        ));
+        assert!(
+            message.contains("https://github.com/Mel34/cvb-registry/blob/main/captures/latest.txt")
+        );
     }
 
     #[test]
@@ -536,7 +687,6 @@ mod tests {
 
         assert!(error.contains("1 MB limit"));
     }
-
 }
 
 pub(crate) fn copy_to_clipboard(buffer: &ClipboardBuffer) -> Result<(), String> {

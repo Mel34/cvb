@@ -10,8 +10,9 @@ fn tracked_files() -> Result<Vec<OsString>, String> {
         .map_err(|error| format!("CVB pull: unable to run git ls-files: {error}"))?;
 
     if !output.status.success() {
-        return Err("CVB pull: unable to list Git-tracked files; run inside a Git repository."
-            .to_string());
+        return Err(
+            "CVB pull: unable to list Git-tracked files; run inside a Git repository.".to_string(),
+        );
     }
 
     let files = output
@@ -28,13 +29,10 @@ fn tracked_files() -> Result<Vec<OsString>, String> {
     Ok(files)
 }
 
-
 fn parse_line_range(range: &str) -> Result<(usize, usize), String> {
     let Some((start, end)) = range.split_once('-') else {
         let line = range.parse::<usize>().map_err(|_| {
-            format!(
-                "CVB pull: invalid line selector '{range}'; expected LINE or START-END."
-            )
+            format!("CVB pull: invalid line selector '{range}'; expected LINE or START-END.")
         })?;
 
         if line == 0 {
@@ -74,8 +72,9 @@ fn read_line_range(path: &str, start: usize, end: usize) -> Result<String, Strin
     let lines: Vec<&str> = source.lines().collect();
 
     if start == 0 || end == 0 || start > end {
-        return Err("CVB pull: invalid line range; expected positive START not exceeding END."
-            .to_string());
+        return Err(
+            "CVB pull: invalid line range; expected positive START not exceeding END.".to_string(),
+        );
     }
 
     if end > lines.len() {
@@ -127,10 +126,7 @@ fn extract_file_scope(
     Ok((scope, line_ranges, query_args))
 }
 
-fn filter_file_scope(
-    files: Vec<OsString>,
-    scope: Option<&str>,
-) -> Result<Vec<OsString>, String> {
+fn filter_file_scope(files: Vec<OsString>, scope: Option<&str>) -> Result<Vec<OsString>, String> {
     let Some(scope) = scope else {
         return Ok(files);
     };
@@ -211,10 +207,7 @@ fn parse_query(args: &[String]) -> Result<SearchQuery, String> {
         }
     }
 
-    if query.alternatives.is_empty()
-        && query.required.is_empty()
-        && query.excluded.is_empty()
-    {
+    if query.alternatives.is_empty() && query.required.is_empty() && query.excluded.is_empty() {
         return Err("CVB pull: search query is empty.".to_string());
     }
 
@@ -222,8 +215,8 @@ fn parse_query(args: &[String]) -> Result<SearchQuery, String> {
 }
 
 fn matches_query(query: &SearchQuery, line: &str) -> bool {
-    let has_alternative = query.alternatives.is_empty()
-        || query.alternatives.iter().any(|term| line.contains(term));
+    let has_alternative =
+        query.alternatives.is_empty() || query.alternatives.iter().any(|term| line.contains(term));
 
     has_alternative
         && query.required.iter().all(|term| line.contains(term))
@@ -265,7 +258,6 @@ fn matching_content(record: &str) -> Option<&str> {
     None
 }
 
-
 fn filter_matches(query: &SearchQuery, matches: &str) -> String {
     let mut seen = std::collections::HashSet::new();
     let mut filtered = String::new();
@@ -284,9 +276,7 @@ fn filter_matches(query: &SearchQuery, matches: &str) -> String {
     filtered
 }
 
-fn extract_callers_scope(
-    args: &[String],
-) -> Result<Option<(String, Option<String>)>, String> {
+fn extract_callers_scope(args: &[String]) -> Result<Option<(String, Option<String>)>, String> {
     let selectors: Vec<&String> = args
         .iter()
         .filter(|arg| arg.starts_with("callers:"))
@@ -305,8 +295,7 @@ fn extract_callers_scope(
 
     if target.is_empty() || syn::parse_str::<syn::Ident>(target).is_err() {
         return Err(
-            "CVB pull: callers: must be followed by a Rust function or method name."
-                .to_string(),
+            "CVB pull: callers: must be followed by a Rust function or method name.".to_string(),
         );
     }
 
@@ -441,8 +430,7 @@ pub fn run(args: &[String]) -> i32 {
         }
     }
 
-    let whole_file_capture =
-        args.len() == 1 && args[0].starts_with("file:");
+    let whole_file_capture = args.len() == 1 && args[0].starts_with("file:");
 
     if args.is_empty() {
         eprintln!("Usage: cvb pull [file:PATH] <search-term>...");
@@ -587,7 +575,6 @@ pub fn run(args: &[String]) -> i32 {
     0
 }
 
-
 fn bash_function_range(source: &str, hit_line: usize) -> Option<(usize, usize)> {
     let mut parser = tree_sitter::Parser::new();
     let language = tree_sitter_bash::LANGUAGE;
@@ -602,10 +589,7 @@ fn bash_function_range(source: &str, hit_line: usize) -> Option<(usize, usize)> 
 
     fn collect_ranges(node: tree_sitter::Node<'_>, ranges: &mut Vec<(usize, usize)>) {
         if node.kind() == "function_definition" {
-            ranges.push((
-                node.start_position().row + 1,
-                node.end_position().row + 1,
-            ));
+            ranges.push((node.start_position().row + 1, node.end_position().row + 1));
         }
 
         let mut cursor = node.walk();
@@ -677,7 +661,6 @@ fn rust_function_range(source: &str, hit_line: usize) -> Option<(usize, usize)> 
         .min_by_key(|(start, end)| end - start)
 }
 
-
 #[derive(Debug, PartialEq, Eq)]
 enum RustCallKind {
     Function,
@@ -702,11 +685,7 @@ fn rust_callers(source: &str, target: &str) -> Option<Vec<RustCallerMatch>> {
     }
 
     impl CallerVisitor<'_> {
-        fn with_function(
-            &mut self,
-            name: String,
-            visit_body: impl FnOnce(&mut Self),
-        ) {
+        fn with_function(&mut self, name: String, visit_body: impl FnOnce(&mut Self)) {
             let previous = self.enclosing_function.replace(name);
             visit_body(self);
             self.enclosing_function = previous;
@@ -737,9 +716,12 @@ fn rust_callers(source: &str, target: &str) -> Option<Vec<RustCallerMatch>> {
 
         fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
             if let syn::Expr::Path(path) = node.func.as_ref() {
-                if path.path.segments.last().is_some_and(
-                    |segment| segment.ident == self.target
-                ) {
+                if path
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|segment| segment.ident == self.target)
+                {
                     self.matches.push(RustCallerMatch {
                         line: node.span().start().line,
                         enclosing_function: self.enclosing_function.clone(),
@@ -776,10 +758,7 @@ fn rust_callers(source: &str, target: &str) -> Option<Vec<RustCallerMatch>> {
     Some(visitor.matches)
 }
 
-fn rust_expansion_ranges(
-    source: &str,
-    hit_line: usize,
-) -> Vec<((usize, usize), &'static str)> {
+fn rust_expansion_ranges(source: &str, hit_line: usize) -> Vec<((usize, usize), &'static str)> {
     use syn::spanned::Spanned;
 
     let Ok(file) = syn::parse_file(source) else {
@@ -793,8 +772,13 @@ fn rust_expansion_ranges(
             _ => return None,
         };
 
-        (span.start().line <= hit_line && hit_line <= span.end().line)
-            .then(|| (name.to_string(), (span.start().line, span.end().line), label))
+        (span.start().line <= hit_line && hit_line <= span.end().line).then(|| {
+            (
+                name.to_string(),
+                (span.start().line, span.end().line),
+                label,
+            )
+        })
     });
 
     if let Some((name, declaration, label)) = matched_type {
@@ -809,7 +793,12 @@ fn rust_expansion_ranges(
             };
 
             if self_type.qself.is_some()
-                || self_type.path.segments.last().map(|segment| segment.ident.to_string()).as_deref()
+                || self_type
+                    .path
+                    .segments
+                    .last()
+                    .map(|segment| segment.ident.to_string())
+                    .as_deref()
                     != Some(name.as_str())
             {
                 continue;
@@ -1068,8 +1057,11 @@ mod pull_tests {
             vec!["callers:run".to_string(), "callers:other".to_string()],
             vec!["callers:run".to_string(), "lines:1".to_string()],
             vec!["callers:run".to_string(), "run".to_string()],
-            vec!["file:src/pull.rs".to_string(), "callers:run".to_string(),
-                 "file:src/main.rs".to_string()],
+            vec![
+                "file:src/pull.rs".to_string(),
+                "callers:run".to_string(),
+                "file:src/main.rs".to_string(),
+            ],
             vec!["file:manual.md".to_string(), "callers:run".to_string()],
             vec!["callers:module::run".to_string()],
         ] {
@@ -1172,13 +1164,10 @@ fn target() {
         assert_eq!(rust_function_range("fn broken( {", 1), None);
     }
 
-
     #[test]
     fn expansion_includes_impl_for_matched_struct() {
-        let directory = std::env::temp_dir().join(format!(
-            "cvb-pull-struct-impl-{}",
-            std::process::id()
-        ));
+        let directory =
+            std::env::temp_dir().join(format!("cvb-pull-struct-impl-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
 
         let file = directory.join("example.rs");
@@ -1244,10 +1233,7 @@ fn target() {
     fn read_line_range_returns_requested_lines_with_original_numbers() {
         use super::read_line_range;
 
-        let path = std::env::temp_dir().join(format!(
-            "cvb-pull-lines-{}.txt",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir().join(format!("cvb-pull-lines-{}.txt", std::process::id()));
         std::fs::write(&path, "alpha\nbeta\ngamma\n").unwrap();
         let path_text = path.to_string_lossy();
 
@@ -1257,9 +1243,7 @@ fn target() {
         let multiple = read_line_range(&path_text, 1, 3).unwrap();
         assert_eq!(
             multiple,
-            format!(
-                "{path_text}:1: alpha\n{path_text}:2: beta\n{path_text}:3: gamma\n"
-            )
+            format!("{path_text}:1: alpha\n{path_text}:2: beta\n{path_text}:3: gamma\n")
         );
 
         std::fs::remove_file(path).unwrap();
@@ -1269,10 +1253,8 @@ fn target() {
     fn read_line_range_rejects_invalid_or_out_of_bounds_ranges() {
         use super::read_line_range;
 
-        let path = std::env::temp_dir().join(format!(
-            "cvb-pull-lines-bounds-{}.txt",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("cvb-pull-lines-bounds-{}.txt", std::process::id()));
         std::fs::write(&path, "alpha\nbeta\n").unwrap();
         let path_text = path.to_string_lossy();
 
@@ -1317,20 +1299,14 @@ fn target() {
 
         assert_eq!(scope.as_deref(), Some("src/pull.rs"));
         assert!(lines.is_empty());
-        assert_eq!(
-            query,
-            vec!["protocol", "+line-endings", "-example"]
-        );
+        assert_eq!(query, vec!["protocol", "+line-endings", "-example"]);
     }
 
     #[test]
     fn extract_file_scope_parses_line_ranges() {
         use super::extract_file_scope;
 
-        let args = vec![
-            "file:src/pull.rs".into(),
-            "lines:96-110".into(),
-        ];
+        let args = vec!["file:src/pull.rs".into(), "lines:96-110".into()];
 
         let (scope, lines, query) = extract_file_scope(&args).unwrap();
 
@@ -1338,10 +1314,7 @@ fn target() {
         assert_eq!(lines, vec![(96, 110)]);
         assert!(query.is_empty());
 
-        let single_line = vec![
-            "file:manual.md".into(),
-            "lines:155".into(),
-        ];
+        let single_line = vec!["file:manual.md".into(), "lines:155".into()];
 
         let (scope, lines, query) = extract_file_scope(&single_line).unwrap();
 
@@ -1354,7 +1327,8 @@ fn target() {
             "lines:96-110".into(),
             "lines:5-8".into(),
             "lines:7".into(),
-        ]).unwrap();
+        ])
+        .unwrap();
         assert_eq!(multiple.0.as_deref(), Some("src/pull.rs"));
         assert_eq!(multiple.1, vec![(96, 110), (5, 8), (7, 7)]);
         assert!(multiple.2.is_empty());
@@ -1506,10 +1480,7 @@ fn target() {
 
         assert_eq!(
             filter_matches(&query, input),
-            concat!(
-                "src/a.rs:1:first needle\n",
-                "src/b.rs:2:second needle\n",
-            )
+            concat!("src/a.rs:1:first needle\n", "src/b.rs:2:second needle\n",)
         );
     }
 
@@ -1536,17 +1507,13 @@ fn target() {
         fs::write(&path, source).unwrap();
 
         let path_text = path.to_string_lossy();
-        let matches = format!(
-            "{path_text}:4:first needle\n{path_text}:5:second needle\n"
-        );
+        let matches = format!("{path_text}:4:first needle\n{path_text}:5:second needle\n");
 
         let expanded = expand_rust_matches(&matches);
         let _ = fs::remove_file(&path);
 
         assert_eq!(expanded.matches("Markdown section:").count(), 1);
-        assert!(expanded.contains(&format!(
-            "Markdown section: {path_text}:3-7"
-        )));
+        assert!(expanded.contains(&format!("Markdown section: {path_text}:3-7")));
         assert!(expanded.contains("    6 | ### Details"));
         assert!(expanded.contains("    7 | Nested detail"));
         assert!(!expanded.contains("Sibling section"));
@@ -1597,9 +1564,7 @@ fn target() {
         let expanded = expand_rust_matches(&matches);
         let _ = fs::remove_file(&path);
 
-        assert!(expanded.contains(&format!(
-            "Markdown section: {path_text}:5-7"
-        )));
+        assert!(expanded.contains(&format!("Markdown section: {path_text}:5-7")));
         assert!(expanded.contains("    5 | ### Details"));
         assert!(expanded.contains("    6 | nested needle"));
         assert!(expanded.contains("    7 | More details"));
@@ -1652,10 +1617,7 @@ fn target() {
         use super::expand_rust_matches;
         use std::fs;
 
-        let path = std::env::temp_dir().join(format!(
-            "cvb-pull-dedup-{}.rs",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir().join(format!("cvb-pull-dedup-{}.rs", std::process::id()));
         let source = "fn target() {\n    let needle = 1;\n    assert_eq!(needle, 1);\n}\n";
         fs::write(&path, source).unwrap();
 

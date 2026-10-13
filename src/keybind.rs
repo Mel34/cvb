@@ -74,15 +74,13 @@ pub fn load() -> Result<Vec<KeyBinding>, String> {
             continue;
         }
 
-        bindings.push(
-            parse(line).map_err(|error| {
-                format!(
-                    "CVB: invalid keybind at {}:{}: {error}",
-                    path.display(),
-                    line_number + 1
-                )
-            })?,
-        );
+        bindings.push(parse(line).map_err(|error| {
+            format!(
+                "CVB: invalid keybind at {}:{}: {error}",
+                path.display(),
+                line_number + 1
+            )
+        })?);
     }
 
     if bindings.is_empty() {
@@ -200,9 +198,7 @@ impl KeybindWatcher {
             )
         })?;
 
-        let fd = unsafe {
-            libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC)
-        };
+        let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
 
         if fd < 0 {
             return Err(format!(
@@ -218,10 +214,7 @@ impl KeybindWatcher {
             libc::inotify_add_watch(
                 fd,
                 parent_c.as_ptr(),
-                libc::IN_CLOSE_WRITE
-                    | libc::IN_MOVED_TO
-                    | libc::IN_CREATE
-                    | libc::IN_DELETE,
+                libc::IN_CLOSE_WRITE | libc::IN_MOVED_TO | libc::IN_CREATE | libc::IN_DELETE,
             )
         };
 
@@ -246,19 +239,12 @@ impl KeybindWatcher {
         self.fd
     }
 
-
     pub fn changed(&self) -> Result<bool, String> {
         let mut buffer = [0u8; 4096];
         let mut changed = false;
 
         loop {
-            let result = unsafe {
-                libc::read(
-                    self.fd,
-                    buffer.as_mut_ptr().cast(),
-                    buffer.len(),
-                )
-            };
+            let result = unsafe { libc::read(self.fd, buffer.as_mut_ptr().cast(), buffer.len()) };
 
             if result < 0 {
                 let error = std::io::Error::last_os_error();
@@ -267,9 +253,7 @@ impl KeybindWatcher {
                     break;
                 }
 
-                return Err(format!(
-                    "CVB: unable to read keybind file watcher: {error}"
-                ));
+                return Err(format!("CVB: unable to read keybind file watcher: {error}"));
             }
 
             if result == 0 {
@@ -280,13 +264,11 @@ impl KeybindWatcher {
             let length = result as usize;
 
             while offset < length {
-                let event = unsafe {
-                    &*(buffer.as_ptr().add(offset) as *const libc::inotify_event)
-                };
+                let event =
+                    unsafe { &*(buffer.as_ptr().add(offset) as *const libc::inotify_event) };
 
                 if event.len > 0 {
-                    let name_offset =
-                        offset + std::mem::size_of::<libc::inotify_event>();
+                    let name_offset = offset + std::mem::size_of::<libc::inotify_event>();
                     let name_length = event.len as usize;
 
                     if name_offset + name_length <= length {
@@ -302,8 +284,7 @@ impl KeybindWatcher {
                     }
                 }
 
-                let event_size = std::mem::size_of::<libc::inotify_event>()
-                    + event.len as usize;
+                let event_size = std::mem::size_of::<libc::inotify_event>() + event.len as usize;
 
                 if event_size == 0 {
                     break;
@@ -374,30 +355,12 @@ mod tests {
         assert_eq!(parse("Ctrl+Comma").unwrap().key, Key::Character(','));
         assert_eq!(parse("Ctrl+Period").unwrap().key, Key::Character('.'));
         assert_eq!(parse("Ctrl+Slash").unwrap().key, Key::Character('/'));
-        assert_eq!(
-            parse("Ctrl+Backslash").unwrap().key,
-            Key::Character('\\')
-        );
-        assert_eq!(
-            parse("Ctrl+Semicolon").unwrap().key,
-            Key::Character(';')
-        );
-        assert_eq!(
-            parse("Ctrl+Apostrophe").unwrap().key,
-            Key::Character('\'')
-        );
-        assert_eq!(
-            parse("Ctrl+LeftBracket").unwrap().key,
-            Key::Character('[')
-        );
-        assert_eq!(
-            parse("Ctrl+RightBracket").unwrap().key,
-            Key::Character(']')
-        );
-        assert_eq!(
-            parse("Ctrl+Backtick").unwrap().key,
-            Key::Character('`')
-        );
+        assert_eq!(parse("Ctrl+Backslash").unwrap().key, Key::Character('\\'));
+        assert_eq!(parse("Ctrl+Semicolon").unwrap().key, Key::Character(';'));
+        assert_eq!(parse("Ctrl+Apostrophe").unwrap().key, Key::Character('\''));
+        assert_eq!(parse("Ctrl+LeftBracket").unwrap().key, Key::Character('['));
+        assert_eq!(parse("Ctrl+RightBracket").unwrap().key, Key::Character(']'));
+        assert_eq!(parse("Ctrl+Backtick").unwrap().key, Key::Character('`'));
     }
 
     #[test]

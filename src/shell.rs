@@ -67,7 +67,6 @@ pub fn create_rcfile() -> Result<PathBuf, String> {
 
 include!(concat!(env!("OUT_DIR"), "/cvb_script_hashes.rs"));
 
-
 fn verify_cvb_bash() -> Result<(), String> {
     use sha2::{Digest, Sha256};
 
@@ -119,17 +118,14 @@ fn control_script() -> Result<String, String> {
     use sha2::{Digest, Sha256};
 
     let installed = PathBuf::from("/usr/share/cvb/cvb-control.bash");
-    let development = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("data/cvb-control.bash");
+    let development = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data/cvb-control.bash");
 
     let path = if installed.is_file() {
         installed
     } else if development.is_file() {
         development
     } else {
-        return Err(
-            "CVB: unable to verify cvb-control.bash: script file not found".to_string()
-        );
+        return Err("CVB: unable to verify cvb-control.bash: script file not found".to_string());
     };
 
     let contents = fs::read(&path).map_err(|error| {
@@ -174,7 +170,8 @@ patch() {
         command patch "$@"
     fi
 }
-"#.to_string()
+"#
+    .to_string()
 }
 
 fn bash_quote(path: &Path) -> String {

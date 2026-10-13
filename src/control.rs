@@ -12,8 +12,16 @@ const TARGET_RESPONSE: u8 = 0x05;
 #[derive(Debug, PartialEq, Eq)]
 pub enum ControlMessage {
     Exit,
-    TargetRequest { id: u64, cwd: String, args: Vec<String> },
-    TargetResponse { id: u64, status: i32, message: String },
+    TargetRequest {
+        id: u64,
+        cwd: String,
+        args: Vec<String>,
+    },
+    TargetResponse {
+        id: u64,
+        status: i32,
+        message: String,
+    },
 }
 
 pub struct ControlChannel {
@@ -111,26 +119,23 @@ impl ControlChannel {
 
             match read(self.fd.as_fd(), &mut buffer) {
                 Ok(0) => {
-                    return Err("CVB: control channel closed while waiting for response".to_string());
+                    return Err(
+                        "CVB: control channel closed while waiting for response".to_string()
+                    );
                 }
                 Ok(count) => {
                     self.receive_buffer.extend_from_slice(&buffer[..count]);
 
                     if self.receive_buffer.len() > HEADER_SIZE + MAX_FRAME_SIZE {
-                        return Err(
-                            "CVB: control message exceeds maximum frame size".to_string()
-                        );
+                        return Err("CVB: control message exceeds maximum frame size".to_string());
                     }
                 }
                 Err(error) => {
-                    return Err(format!(
-                        "CVB: unable to receive control message: {error}"
-                    ));
+                    return Err(format!("CVB: unable to receive control message: {error}"));
                 }
             }
         }
     }
-
 }
 
 fn encode(message: &ControlMessage) -> Result<Vec<u8>, String> {
@@ -242,7 +247,9 @@ fn decode(payload: &[u8]) -> Result<ControlMessage, String> {
             }
 
             let cwd = std::str::from_utf8(&payload[offset..offset + cwd_length])
-                .map_err(|_| "CVB: TARGET_REQUEST working directory is not valid UTF-8".to_string())?
+                .map_err(|_| {
+                    "CVB: TARGET_REQUEST working directory is not valid UTF-8".to_string()
+                })?
                 .to_string();
             offset += cwd_length;
 

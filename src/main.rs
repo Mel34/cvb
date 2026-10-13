@@ -5,8 +5,8 @@ use std::path::Path;
 mod cli;
 pub(crate) mod clipboard;
 mod control;
-mod keyboard;
 mod keybind;
+mod keyboard;
 mod pty;
 mod pull;
 mod shell;
@@ -112,14 +112,8 @@ A capture session ends with:
 }
 
 fn emit_pathop_marker() {
-    if let Ok(mut tty) = std::fs::OpenOptions::new()
-        .write(true)
-        .open("/dev/tty")
-    {
-        let _ = std::io::Write::write_all(
-            &mut tty,
-            b"\x1b]777;CVB;PATHOP\x07",
-        );
+    if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
+        let _ = std::io::Write::write_all(&mut tty, b"\x1b]777;CVB;PATHOP\x07");
     }
 }
 
@@ -190,9 +184,7 @@ fn target_paths(args: &[String]) -> Option<Vec<std::path::PathBuf>> {
     Some(paths)
 }
 
-pub(crate) fn bridge_paths(
-    paths: &[std::path::PathBuf],
-) -> Result<(), String> {
+pub(crate) fn bridge_paths(paths: &[std::path::PathBuf]) -> Result<(), String> {
     let (contents, _message) = build_bridge_output(paths)?;
     let buffer = clipboard::ClipboardBuffer::new(contents);
     clipboard::process(&buffer)?;
@@ -207,9 +199,7 @@ pub(crate) fn build_bridge_output(
 
         if path.is_file() {
             let contents = std::fs::read(path)
-                .map_err(|error| {
-                    format!("CVB: unable to read {}: {error}", path.display())
-                })?;
+                .map_err(|error| format!("CVB: unable to read {}: {error}", path.display()))?;
             let size = std::fs::metadata(path)
                 .map_err(|error| {
                     format!(
@@ -221,11 +211,7 @@ pub(crate) fn build_bridge_output(
 
             return Ok((
                 contents,
-                format!(
-                    "CVB: captured file '{}' ({} bytes)",
-                    path.display(),
-                    size
-                ),
+                format!("CVB: captured file '{}' ({} bytes)", path.display(), size),
             ));
         }
 
@@ -273,17 +259,10 @@ fn build_path_leaves(
                 (|| {
                     let ignore = load_ignore_list()?;
                     let mut output = String::from(INVENTORY_HEADER);
-                    append_directory_entries(
-                        &resolved_path,
-                        &resolved_path,
-                        &mut output,
-                        &ignore,
-                    )?;
+                    append_directory_entries(&resolved_path, &resolved_path, &mut output, &ignore)?;
                     Ok(output.into_bytes())
                 })()
-                .map_err(|error: String| {
-                    format!("Error reading the directory inventory: {error}")
-                })
+                .map_err(|error: String| format!("Error reading the directory inventory: {error}"))
             } else {
                 Err(format!("Error: unsupported path: {}", path.display()))
             };
@@ -328,9 +307,6 @@ fn build_paths_output(paths: &[std::path::PathBuf]) -> Result<String, String> {
 
     Ok(output)
 }
-
-
-
 
 fn parse_ignore_list(contents: &str) -> Vec<String> {
     contents
@@ -617,10 +593,7 @@ mod tests {
         fs::write(&existing, "contents").unwrap();
 
         let args = vec![existing.display().to_string()];
-        assert_eq!(
-            target_paths(&args),
-            Some(vec![existing.clone()])
-        );
+        assert_eq!(target_paths(&args), Some(vec![existing.clone()]));
 
         let args = vec![
             existing.display().to_string(),
@@ -643,10 +616,7 @@ mod tests {
 
     #[test]
     fn format_unix_timestamp_formats_epoch() {
-        assert_eq!(
-            format_unix_timestamp(0).unwrap(),
-            "1970-01-01T00:00:00Z"
-        );
+        assert_eq!(format_unix_timestamp(0).unwrap(), "1970-01-01T00:00:00Z");
     }
 
     #[test]
@@ -728,13 +698,8 @@ mod tests {
 
         let mut output = String::from(INVENTORY_HEADER);
 
-        append_directory_entries(
-            &directory,
-            &directory,
-            &mut output,
-            &[".git".to_string()],
-        )
-        .unwrap();
+        append_directory_entries(&directory, &directory, &mut output, &[".git".to_string()])
+            .unwrap();
 
         assert!(!output.contains(".git"));
         assert!(output.contains("src\tsrc\tdir\t-"));
@@ -814,8 +779,7 @@ mod tests {
         let file = directory.join("test.txt");
         fs::write(&file, b"file contents\n").unwrap();
 
-        let (contents, message) =
-            build_bridge_output(std::slice::from_ref(&file)).unwrap();
+        let (contents, message) = build_bridge_output(std::slice::from_ref(&file)).unwrap();
 
         assert_eq!(contents, b"file contents\n");
         assert_eq!(
@@ -838,8 +802,7 @@ mod tests {
         fs::write(&first, "first contents\n").unwrap();
         fs::write(&second, "second contents\n").unwrap();
 
-        let (contents, message) =
-            build_bridge_output(&[first.clone(), second.clone()]).unwrap();
+        let (contents, message) = build_bridge_output(&[first.clone(), second.clone()]).unwrap();
 
         assert_eq!(
             String::from_utf8(contents).unwrap(),
@@ -859,8 +822,7 @@ mod tests {
         let directory = test_directory("bridge-output-directory");
         fs::write(directory.join("file.txt"), "contents").unwrap();
 
-        let (contents, message) =
-            build_bridge_output(std::slice::from_ref(&directory)).unwrap();
+        let (contents, message) = build_bridge_output(std::slice::from_ref(&directory)).unwrap();
         let output = String::from_utf8(contents).unwrap();
 
         assert!(output.starts_with(INVENTORY_HEADER));

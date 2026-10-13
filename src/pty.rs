@@ -1,23 +1,23 @@
 use std::ffi::CString;
-use std::io::{self, Write};
 use std::fs::OpenOptions;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
-use std::time::Instant;
+use std::io::{self, Write};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::path::Path;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use nix::ioctl_read_bad;
 use nix::ioctl_write_ptr_bad;
-use nix::pty::{forkpty, ForkptyResult, Winsize};
+use nix::pty::{ForkptyResult, Winsize, forkpty};
 use nix::sys::signal::{self, SigHandler, Signal};
 use nix::sys::termios::{self, SetArg, Termios};
-use nix::sys::wait::{waitpid, WaitStatus};
-use nix::unistd::{pipe, read, write, Pid};
+use nix::sys::wait::{WaitStatus, waitpid};
+use nix::unistd::{Pid, pipe, read, write};
 
 use crate::control::{ControlChannel, ControlMessage};
-use crate::keyboard::HotkeyMonitor;
 use crate::keybind::{self, KeybindWatcher};
+use crate::keyboard::HotkeyMonitor;
 use crate::sound::SoundPlayer;
 
 ioctl_read_bad!(tiocgwinsz, libc::TIOCGWINSZ, Winsize);
@@ -25,7 +25,6 @@ ioctl_write_ptr_bad!(tiocswinsz, libc::TIOCSWINSZ, Winsize);
 
 const CONTROL_FD: i32 = 3;
 const NO_OUTPUT: &str = "[NO_VISIBLE_OUTPUT]";
-
 
 static DEBUG_LOG_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static DEBUG_LOG_START: OnceLock<Instant> = OnceLock::new();
@@ -41,11 +40,7 @@ fn debug_log(event: &str, details: &str) {
         .elapsed()
         .as_nanos();
 
-    let Ok(mut file) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    else {
+    let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) else {
         return;
     };
 
@@ -158,7 +153,6 @@ mod capture_state_tests {
     }
 }
 
-
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TranscriptSegment {
@@ -179,9 +173,7 @@ impl Transcript {
             return;
         }
 
-        if let Some(TranscriptSegment::Terminal(previous)) =
-            self.segments.last_mut()
-        {
+        if let Some(TranscriptSegment::Terminal(previous)) = self.segments.last_mut() {
             previous.extend_from_slice(data);
         } else {
             self.segments
@@ -197,11 +189,7 @@ impl Transcript {
     }
 }
 
-fn render_transcript(
-    transcript: &Transcript,
-    rows: u16,
-    cols: u16,
-) -> Vec<u8> {
+fn render_transcript(transcript: &Transcript, rows: u16, cols: u16) -> Vec<u8> {
     if transcript.segments.is_empty() {
         return NO_OUTPUT.as_bytes().to_vec();
     }
@@ -213,8 +201,7 @@ fn render_transcript(
             TranscriptSegment::Terminal(bytes) => {
                 output.extend_from_slice(b"[Terminal output]\n--------\n");
 
-                let mut renderer =
-                    vt100::Parser::new(rows, cols, bytes.len());
+                let mut renderer = vt100::Parser::new(rows, cols, bytes.len());
                 renderer.process(bytes);
 
                 let text = screen_to_text(&mut renderer);
@@ -241,16 +228,14 @@ fn render_transcript(
 
 #[cfg(test)]
 mod transcript_tests {
-    use super::{render_transcript, Transcript, TranscriptSegment};
+    use super::{Transcript, TranscriptSegment, render_transcript};
 
     #[test]
     fn renders_terminal_and_preserves_literal_bytes_in_order() {
         let mut transcript = Transcript::default();
 
         transcript.push_terminal(b"\x1b[31mRED\x1b[0m\r\n");
-        transcript.push_literal(
-            b"[file.txt]\n--------\n\x1b[31mRAW\x1b[0m\n",
-        );
+        transcript.push_literal(b"[file.txt]\n--------\n\x1b[31mRAW\x1b[0m\n");
         transcript.push_terminal(b"NEXT\r\n");
 
         let rendered = render_transcript(&transcript, 24, 80);
@@ -283,9 +268,7 @@ mod transcript_tests {
             transcript.segments,
             vec![
                 TranscriptSegment::Terminal(b"command output\n".to_vec()),
-                TranscriptSegment::Literal(
-                    b"\x1b[31mfile contents\x1b[0m".to_vec()
-                ),
+                TranscriptSegment::Literal(b"\x1b[31mfile contents\x1b[0m".to_vec()),
                 TranscriptSegment::Terminal(b"next command output\n".to_vec()),
             ]
         );
@@ -300,9 +283,7 @@ mod transcript_tests {
 
         assert_eq!(
             transcript.segments,
-            vec![TranscriptSegment::Terminal(
-                b"\x1b[31mred\x1b[0m".to_vec()
-            )]
+            vec![TranscriptSegment::Terminal(b"\x1b[31mred\x1b[0m".to_vec())]
         );
     }
 
@@ -361,9 +342,7 @@ impl MarkerScanner {
             };
 
             if position > 0 {
-                events.push(MarkerEvent::Data(
-                    self.pending.drain(..position).collect(),
-                ));
+                events.push(MarkerEvent::Data(self.pending.drain(..position).collect()));
             }
 
             self.pending.drain(..length);
@@ -380,15 +359,12 @@ impl MarkerScanner {
 
             if self.pending.len() > keep {
                 let split_at = self.pending.len() - keep;
-                events.push(MarkerEvent::Data(
-                    self.pending.drain(..split_at).collect(),
-                ));
+                events.push(MarkerEvent::Data(self.pending.drain(..split_at).collect()));
             }
         }
 
         events
     }
-    
 }
 
 #[cfg(test)]
@@ -402,15 +378,9 @@ mod marker_scanner_tests {
 
         let mut scanner = MarkerScanner::new();
 
-        assert_eq!(
-            scanner.process(&marker[..16]),
-            Vec::<MarkerEvent>::new()
-        );
+        assert_eq!(scanner.process(&marker[..16]), Vec::<MarkerEvent>::new());
 
-        assert_eq!(
-            scanner.process(&marker[16..]),
-            vec![MarkerEvent::Pathop]
-        );
+        assert_eq!(scanner.process(&marker[16..]), vec![MarkerEvent::Pathop]);
     }
 
     #[test]
@@ -438,9 +408,8 @@ mod marker_scanner_tests {
     fn recognizes_start_and_end_markers() {
         let mut scanner = MarkerScanner::new();
 
-        let mut events = scanner.process(
-            b"before\x1b]777;CVB;START\x07ONE\x1b]777;CVB;END\x07after",
-        );
+        let mut events =
+            scanner.process(b"before\x1b]777;CVB;START\x07ONE\x1b]777;CVB;END\x07after");
 
         events.extend(scanner.process(b"0123456789012345"));
 
@@ -460,9 +429,7 @@ mod marker_scanner_tests {
     fn preserves_data_between_markers() {
         let mut scanner = MarkerScanner::new();
 
-        let events = scanner.process(
-            b"\x1b]777;CVB;START\x07ONE\nTWO\n\x1b]777;CVB;END\x07",
-        );
+        let events = scanner.process(b"\x1b]777;CVB;START\x07ONE\nTWO\n\x1b]777;CVB;END\x07");
 
         assert_eq!(
             events,
@@ -657,14 +624,7 @@ fn run_pty(rcfile: &Path) -> Result<i32, String> {
 fn control_socketpair() -> Result<(OwnedFd, OwnedFd), String> {
     let mut fds = [0; 2];
 
-    let result = unsafe {
-        libc::socketpair(
-            libc::AF_UNIX,
-            libc::SOCK_STREAM,
-            0,
-            fds.as_mut_ptr(),
-        )
-    };
+    let result = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
 
     if result == -1 {
         return Err(format!(
@@ -689,13 +649,7 @@ fn set_nonblocking(fd: &OwnedFd) -> Result<(), String> {
         ));
     }
 
-    let result = unsafe {
-        libc::fcntl(
-            fd.as_raw_fd(),
-            libc::F_SETFL,
-            flags | libc::O_NONBLOCK,
-        )
-    };
+    let result = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) };
 
     if result == -1 {
         return Err(format!(
@@ -738,11 +692,7 @@ fn proxy(
 
     let mut buffer = [0u8; 8192];
     let mut signal_buffer = [0u8; 64];
-    let mut screen_terminal = vt100::Parser::new(
-        rows,
-        cols,
-        1000,
-    );
+    let mut screen_terminal = vt100::Parser::new(rows, cols, 1000);
     let bindings = keybind::load()?;
     let mut keyboard = HotkeyMonitor::new(bindings)?;
     let keybind_watcher = KeybindWatcher::new()?;
@@ -752,20 +702,14 @@ fn proxy(
     debug_log("proxy_start", &format!("pid={}", std::process::id()));
 
     loop {
-
-        let keyboard_fd =
-            unsafe { std::os::fd::BorrowedFd::borrow_raw(keyboard.fd()) };
-        let keybind_fd =
-            unsafe { std::os::fd::BorrowedFd::borrow_raw(keybind_watcher.fd()) };
+        let keyboard_fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(keyboard.fd()) };
+        let keybind_fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(keybind_watcher.fd()) };
 
         let mut poll_fds = [
             nix::poll::PollFd::new(stdin.as_fd(), nix::poll::PollFlags::POLLIN),
             nix::poll::PollFd::new(master.as_fd(), nix::poll::PollFlags::POLLIN),
             nix::poll::PollFd::new(signal_read.as_fd(), nix::poll::PollFlags::POLLIN),
-            nix::poll::PollFd::new(
-                control.fd().as_fd(),
-                nix::poll::PollFlags::POLLIN,
-            ),
+            nix::poll::PollFd::new(control.fd().as_fd(), nix::poll::PollFlags::POLLIN),
             nix::poll::PollFd::new(keyboard_fd, nix::poll::PollFlags::POLLIN),
             nix::poll::PollFd::new(keybind_fd, nix::poll::PollFlags::POLLIN),
         ];
@@ -813,10 +757,9 @@ fn proxy(
             let _ = read(signal_read.as_fd(), &mut signal_buffer);
 
             let winsize = resize_pty(master, child)?;
-            screen_terminal.screen_mut().set_size(
-                winsize.ws_row,
-                winsize.ws_col,
-            );
+            screen_terminal
+                .screen_mut()
+                .set_size(winsize.ws_row, winsize.ws_col);
         }
 
         if keyboard_events.contains(nix::poll::PollFlags::POLLIN) {
@@ -919,8 +862,7 @@ fn proxy(
                         let _captured = capture.end();
                         let rendered = render_transcript(&transcript, rows, cols);
                         let captured_bytes = rendered.len();
-                        let buffer =
-                            crate::clipboard::ClipboardBuffer::new(rendered);
+                        let buffer = crate::clipboard::ClipboardBuffer::new(rendered);
 
                         debug_log(
                             "clipboard_dispatch_begin",
@@ -948,7 +890,6 @@ fn proxy(
             stdout
                 .flush()
                 .map_err(|error| format!("CVB: stdout flush failed: {error}"))?;
-
         }
 
         if control_events.intersects(
@@ -976,10 +917,7 @@ fn handle_control_message(
         ControlMessage::TargetRequest { id, cwd, args } => {
             let arg_count = args.len();
 
-            debug_log(
-                "target_request",
-                &format!("id={id} arg_count={arg_count}"),
-            );
+            debug_log("target_request", &format!("id={id} arg_count={arg_count}"));
 
             let paths = args
                 .into_iter()
@@ -1148,13 +1086,8 @@ mod tests {
     fn renders_scrolled_back_output() {
         let mut terminal = vt100::Parser::new(3, 80, 64);
 
-        terminal.process(
-            b"ONE\r\nTWO\r\nTHREE\r\nFOUR\r\nFIVE\r\n",
-        );
+        terminal.process(b"ONE\r\nTWO\r\nTHREE\r\nFOUR\r\nFIVE\r\n");
 
-        assert_eq!(
-            screen_to_text(&mut terminal),
-            "ONE\nTWO\nTHREE\nFOUR\nFIVE"
-        );
+        assert_eq!(screen_to_text(&mut terminal), "ONE\nTWO\nTHREE\nFOUR\nFIVE");
     }
 }

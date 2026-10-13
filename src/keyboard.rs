@@ -51,7 +51,7 @@ const KEY_RIGHTSUPER: u32 = 126;
 
 unsafe extern "C" {
     fn cvb_libinput_silence(libinput: *mut LibinputRaw);
-    
+
     fn udev_new() -> *mut Udev;
     fn udev_unref(udev: *mut Udev) -> *mut Udev;
 
@@ -199,11 +199,11 @@ impl HotkeyMonitor {
     pub fn fd(&self) -> c_int {
         self.libinput.fd()
     }
-    
+
     pub fn set_bindings(&mut self, bindings: Vec<KeyBinding>) {
         self.bindings = bindings;
     }
-    
+
     pub fn poll(&mut self) -> Result<bool, String> {
         self.libinput.dispatch()?;
 
@@ -218,10 +218,9 @@ impl HotkeyMonitor {
                 if !keyboard_event.is_null() {
                     let key = unsafe { libinput_event_keyboard_get_key(keyboard_event) };
 
-                    let state =
-                        unsafe { libinput_event_keyboard_get_key_state(keyboard_event).0 };
+                    let state = unsafe { libinput_event_keyboard_get_key_state(keyboard_event).0 };
 
-                                        match state {
+                    match state {
                         LIBINPUT_KEY_STATE_PRESSED => {
                             match key {
                                 KEY_LEFTCTRL | KEY_RIGHTCTRL => {
@@ -433,7 +432,7 @@ mod tests {
         assert!(!key_matches(Key::Character(']'), 26));
         assert!(!key_matches(Key::Character('`'), 43));
     }
-    
+
     #[test]
     fn binding_matches_modifiers() {
         let binding = KeyBinding {
