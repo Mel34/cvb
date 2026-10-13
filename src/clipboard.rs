@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -202,6 +202,101 @@ fn split_multipart_payloads(
     Ok(payloads)
 }
 
+fn chunk_prefix(number: usize, total: usize, final_part: bool) -> String {
+    if final_part {
+        format!(
+            "[Part {number}/{total} - FINAL PART]\nThis is the final part ({number}/{total}). All parts have now been transmitted. Please assemble all parts and process the entire request now.\n---\n"
+        )
+    } else {
+        format!(
+            "[Part {number}/{total} - DO NOT PROCESS YET]\nThis is part {number} of {total}. Do not analyze, answer, or summarize yet. Simply reply: \"Part {number}/{total} received, awaiting next part.\" and wait for subsequent parts.\n---\n"
+        )
+    }
+}
+
+fn split_chunk_payloads(
+    text: &str,
+    limit: usize,
+    total_guess: usize,
+) -> Result<Vec<String>, String> {
+    let mut chunks = Vec::new();
+    let mut remaining = text;
+
+    while !remaining.is_empty() {
+        let number = chunks.len() + 1;
+        let intermediate = chunk_prefix(number, total_guess, false);
+        let final_prefix = chunk_prefix(number, total_guess, true);
+        let overhead = intermediate
+            .chars()
+            .count()
+            .max(final_prefix.chars().count());
+
+        let available = limit
+            .checked_sub(overhead)
+            .ok_or_else(|| "CVB: chunk framing exceeds the configured limit".to_string())?;
+
+        if available == 0 {
+            return Err("CVB: chunk framing leaves no room for content".to_string());
+        }
+
+        let mut end = remaining
+            .char_indices()
+            .nth(available)
+            .map(|(index, _)| index)
+            .unwrap_or(remaining.len());
+
+        if end == 0 {
+            return Err("CVB: unable to make progress while splitting capture".to_string());
+        }
+
+        if end < remaining.len() {
+            let candidate = &remaining[..end];
+
+            if let Some(index) = candidate.rfind('\n') {
+                end = index + 1;
+            } else if let Some(index) = candidate.rfind(' ') {
+                end = index + 1;
+            }
+        }
+
+        if end == 0 {
+            return Err("CVB: unable to make progress while splitting capture".to_string());
+        }
+
+        chunks.push(remaining[..end].to_string());
+        remaining = &remaining[end..];
+    }
+
+    Ok(chunks)
+}
+
+fn chunk_messages(text: &str, limit: usize) -> Result<Vec<String>, String> {
+    if text.chars().count() <= limit {
+        return Ok(vec![text.to_string()]);
+    }
+
+    let mut total_guess = 2;
+
+    loop {
+        let chunks = split_chunk_payloads(text, limit, total_guess)?;
+        let actual_total = chunks.len();
+
+        if actual_total == total_guess {
+            return Ok(chunks
+                .into_iter()
+                .enumerate()
+                .map(|(index, chunk)| {
+                    let number = index + 1;
+                    let prefix = chunk_prefix(number, actual_total, number == actual_total);
+                    format!("{prefix}{chunk}")
+                })
+                .collect());
+        }
+
+        total_guess = actual_total;
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ClipboardAction {
     CopyDirectly,
@@ -246,7 +341,70 @@ fn dispatch_with_limit<T>(
 }
 
 pub(crate) fn process(buffer: &ClipboardBuffer) -> Result<(), String> {
-    dispatch(buffer, copy_to_clipboard, upload_and_copy_url)
+    let limit = configured_copy_limit();
+
+    let text = match std::str::from_utf8(buffer.as_bytes()) {
+        Ok(text) => text,
+        Err(_) if buffer.len() < limit => return copy_to_clipboard(buffer),
+        Err(_) => {
+            return Err(
+                "CVB: oversized capture is not valid UTF-8; cannot split it safely".to_string(),
+            );
+        }
+    };
+
+    let chunks = chunk_messages(text, limit)?;
+
+    if chunks.len() == 1 {
+        return copy_to_clipboard(buffer);
+    }
+
+    copy_chunk_sequence(&chunks)
+}
+
+fn copy_chunk_sequence(chunks: &[String]) -> Result<(), String> {
+    let total = chunks.len();
+    let mut stdin = std::io::stdin();
+
+    for (index, chunk) in chunks.iter().enumerate() {
+        let number = index + 1;
+        let buffer = ClipboardBuffer::new(chunk.as_bytes().to_vec());
+        copy_to_clipboard(&buffer)?;
+
+        if number == total {
+            eprint!("\r\x1b[2K");
+            std::io::stderr()
+                .flush()
+                .map_err(|error| format!("CVB: unable to clear final chunk status: {error}"))?;
+            break;
+        }
+
+        eprint!(
+            "\r\x1b[2KPart {number}/{total} is available in clipboard. \
+Press Space for next part; q or Ctrl+C to cancel."
+        );
+        std::io::stderr()
+            .flush()
+            .map_err(|error| format!("CVB: unable to update chunk status: {error}"))?;
+
+        loop {
+            let mut key = [0u8; 1];
+            stdin
+                .read_exact(&mut key)
+                .map_err(|error| format!("CVB: unable to read chunk control key: {error}"))?;
+
+            match key[0] {
+                b' ' => break,
+                b'q' | b'Q' | 0x03 => {
+                    eprintln!("\r\x1b[2KChunked copy cancelled at part {number}/{total}.");
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn upload_and_copy_url(buffer: &ClipboardBuffer) -> Result<(), String> {
@@ -496,6 +654,62 @@ mod tests {
         assert_eq!(super::load_copy_limit(&path), 9_750);
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn chunk_messages_leave_small_input_unchanged() {
+        let input = "hello 🦀\nworld";
+        let chunks = super::chunk_messages(input, 100).unwrap();
+
+        assert_eq!(chunks, vec![input]);
+    }
+
+    #[test]
+    fn chunk_messages_reconstruct_original_text_exactly() {
+        let input = "line one with spaces\né 🧑‍💻\n".repeat(200);
+        let chunks = super::chunk_messages(&input, 300).unwrap();
+
+        assert!(chunks.len() > 1);
+
+        let reconstructed = chunks
+            .iter()
+            .map(|chunk| chunk.split_once("---\n").unwrap().1)
+            .collect::<String>();
+
+        assert_eq!(reconstructed, input);
+        assert!(chunks.iter().enumerate().all(|(index, chunk)| {
+            chunk.chars().count() <= 300
+                && chunk.starts_with(&format!("[Part {}/{} - ", index + 1, chunks.len()))
+        }));
+        assert!(chunks[0].contains("DO NOT PROCESS YET"));
+        assert!(chunks.last().unwrap().contains("FINAL PART"));
+    }
+
+    #[test]
+    fn chunk_messages_prefer_newline_boundaries() {
+        let input = format!("{}\n{}", "a".repeat(40), "b".repeat(600));
+        let chunks = super::chunk_messages(&input, 300).unwrap();
+
+        assert!(chunks.len() > 1);
+        let first_payload = chunks[0].split_once("---\n").unwrap().1;
+        assert!(first_payload.ends_with("\n"));
+    }
+
+    #[test]
+    fn chunk_messages_prefer_spaces_when_no_newline_fits() {
+        let input = format!("{} {}", "a".repeat(40), "b".repeat(600));
+        let chunks = super::chunk_messages(&input, 300).unwrap();
+
+        assert!(chunks.len() > 1);
+        let first_payload = chunks[0].split_once("---\n").unwrap().1;
+        assert!(first_payload.ends_with(' '));
+    }
+
+    #[test]
+    fn chunk_messages_reject_limits_too_small_for_framing() {
+        let error = super::chunk_messages(&"x".repeat(100), 10).unwrap_err();
+
+        assert!(error.contains("framing"));
     }
 
     #[test]
