@@ -271,6 +271,20 @@ fi""",
                 (b"A\tB",),
             )
 
+            # Cursor-up and erase-line sequences should capture the final visible text.
+            run_command(
+                "handles ANSI cursor movement and line erasure",
+                "printf 'PTY_CURSOR_BEGIN\\nPTY_CURSOR_OLD\\n'; "
+                "printf '\\033[1A\\033[2KPTY_CURSOR_NEW\\nPTY_CURSOR_END\\n'",
+                clipboard_dir,
+                (
+                    b"PTY_CURSOR_BEGIN",
+                    b"PTY_CURSOR_NEW",
+                    b"PTY_CURSOR_END",
+                ),
+                (b"PTY_CURSOR_OLD",),
+            )
+
             # UTF-8 output should survive capture without character corruption.
             run_command(
                 "preserves UTF-8 terminal output",
