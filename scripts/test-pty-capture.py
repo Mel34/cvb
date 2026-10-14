@@ -217,6 +217,34 @@ fi""",
                 (b"PTY_STDERR_OK",),
             )
 
+            # Interrupt a foreground command and require the shell to recover.
+            before = len(clipboard_files(clipboard_dir))
+            buffer.clear()
+            os.write(
+                master,
+                b"printf 'PTY_INTERRUPT_READY\\n'; sleep 30\n",
+            )
+            read_until(START)
+            read_until(b"PTY_INTERRUPT_READY")
+            time.sleep(0.2)
+            os.write(master, b"\x03")
+            payloads = wait_for_payload(
+                clipboard_dir, before + 1, timeout=10
+            )
+            interrupted_payload = payloads[before]
+            check(
+                "Ctrl+C interrupts foreground command",
+                b"[Terminal output]" in interrupted_payload,
+                interrupted_payload,
+            )
+
+            run_command(
+                "capture recovers after Ctrl+C",
+                "printf 'PTY_AFTER_CTRL_C_OK\\n'",
+                clipboard_dir,
+                (b"PTY_AFTER_CTRL_C_OK",),
+            )
+
             run_command(
                 "silent failure produces no-visible-output marker",
                 "false",
