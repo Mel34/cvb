@@ -382,6 +382,85 @@ fi""",
                 scroll_payload,
             )
 
+            # Output without a final newline must still be captured.
+            run_command(
+                "captures output without a trailing newline",
+                "printf 'PTY_PARTIAL_BEGIN'; "
+                "printf 'PTY_PARTIAL_BODY'; "
+                "printf 'PTY_PARTIAL_END'",
+                clipboard_dir,
+                (
+                    b"PTY_PARTIAL_BEGIN",
+                    b"PTY_PARTIAL_BODY",
+                    b"PTY_PARTIAL_END",
+                ),
+                (b"\xef\xbf\xbd",),
+            )
+
+            # Empty lines between output must remain present.
+            run_command(
+                "preserves intentional blank lines",
+                "printf 'PTY_BLANK_BEGIN\\n\\n"
+                "PTY_BLANK_MIDDLE\\n\\nPTY_BLANK_END\\n'",
+                clipboard_dir,
+                (
+                    b"PTY_BLANK_BEGIN\n\nPTY_BLANK_MIDDLE",
+                    b"PTY_BLANK_MIDDLE\n\nPTY_BLANK_END",
+                ),
+                (b"\xef\xbf\xbd",),
+            )
+
+            # CSI insert-character should shift existing characters right.
+            run_command(
+                "handles ANSI character insertion",
+                "printf 'PTY_INSERT_BEGINABCDE\\033[2D\\033[2@\\n"
+                "PTY_INSERT_END\\n'",
+                clipboard_dir,
+                (
+                    b"PTY_INSERT_BEGINABC  DE",
+                    b"PTY_INSERT_END",
+                ),
+                (b"\xef\xbf\xbd",),
+            )
+
+            # CSI delete-character should shift remaining characters left.
+            run_command(
+                "handles ANSI character deletion",
+                "printf 'PTY_DELETE_BEGINABCDE\\033[3D\\033[2P\\n"
+                "PTY_DELETE_END\\n'",
+                clipboard_dir,
+                (
+                    b"PTY_DELETE_BEGINABE",
+                    b"PTY_DELETE_END",
+                ),
+                (b"\xef\xbf\xbd",),
+            )
+
+            # CSI 0 K should erase text from the cursor to the line end.
+            run_command(
+                "handles erase-to-end-of-line",
+                "printf 'PTY_ERASE_BEGINDELETE_THIS\\033[11D"
+                "\\033[0KPTY_ERASE_END\\n'",
+                clipboard_dir,
+                (b"PTY_ERASE_BEGINPTY_ERASE_END",),
+                (b"DELETE_THIS", b"\xef\xbf\xbd"),
+            )
+
+            # OSC terminal-title sequences must not leak into captured text.
+            run_command(
+                "strips OSC terminal-title sequences",
+                "printf 'PTY_OSC_BEGIN\\033]0;"
+                "PTY_OSC_TITLE_SHOULD_NOT_LEAK\\007"
+                "PTY_OSC_END\\n'",
+                clipboard_dir,
+                (b"PTY_OSC_BEGIN", b"PTY_OSC_END"),
+                (
+                    b"PTY_OSC_TITLE_SHOULD_NOT_LEAK",
+                    b"\x1b",
+                    b"\xef\xbf\xbd",
+                ),
+            )
+
             # Send several commands without waiting between them.
             burst_before = len(clipboard_files(clipboard_dir))
             burst_commands = [
