@@ -34,7 +34,14 @@ def check(name, condition, detail=""):
         failed += 1
         print(f"FAIL {name}", flush=True)
         if detail:
-            print(f"     {detail!r}", flush=True)
+            if isinstance(detail, bytes):
+                print(
+                    f"     payload length={len(detail)} bytes; "
+                    f"preview={detail[:160]!r}",
+                    flush=True,
+                )
+            else:
+                print(f"     {str(detail)[:300]!r}", flush=True)
 
 
 def read_until(marker, timeout=10):
@@ -137,6 +144,9 @@ def main():
             directory.mkdir(parents=True)
 
         (home / ".bashrc").write_text("")
+        cvb_config = config / "cvb"
+        cvb_config.mkdir(parents=True, exist_ok=True)
+        (cvb_config / "limit").write_text("400000\n")
         init_file = work / "parent-init"
         history_file = work / "history"
         parent_history_file = work / "parent-history"
@@ -215,6 +225,55 @@ fi""",
                 "printf 'PTY_STDERR_OK\\n' >&2",
                 clipboard_dir,
                 (b"PTY_STDERR_OK",),
+            )
+
+            # Send several commands without waiting between them.
+            burst_before = len(clipboard_files(clipboard_dir))
+            burst_commands = [
+                "printf 'PTY_BURST_1\\n'",
+                "printf 'PTY_BURST_2\\n'",
+                "printf 'PTY_BURST_3\\n'",
+            ]
+            os.write(
+                master,
+                ("\n".join(burst_commands) + "\n").encode("utf-8"),
+            )
+            burst_payloads = wait_for_payload(
+                clipboard_dir, burst_before + len(burst_commands)
+            )
+            burst_payloads = burst_payloads[
+                burst_before:burst_before + len(burst_commands)
+            ]
+
+            for index, payload in enumerate(burst_payloads, start=1):
+                expected = f"PTY_BURST_{index}".encode()
+                forbidden = [
+                    f"PTY_BURST_{other}".encode()
+                    for other in range(1, len(burst_commands) + 1)
+                    if other != index
+                ]
+                check(
+                    f"rapid command {index} captured separately and in order",
+                    expected in payload
+                    and all(marker not in payload for marker in forbidden),
+                    payload,
+                )
+
+            # Stress capture with output much larger than a terminal screen.
+            large_payload = run_command(
+                "captures large terminal output markers",
+                "printf 'PTY_LARGE_BEGIN\\n'; "
+                "head -c 262144 /dev/zero | tr '\\000' 'X'; "
+                "printf '\\nPTY_LARGE_END\\n'",
+                clipboard_dir,
+                (b"PTY_LARGE_BEGIN", b"PTY_LARGE_END"),
+            )
+            x_count = large_payload.count(b"X")
+            check(
+                "captures all large terminal output characters",
+                x_count == 262144,
+                f"expected 262144 X bytes, found {x_count}; "
+                f"payload length={len(large_payload)} bytes",
             )
 
             # Interrupt a foreground command and require the shell to recover.
