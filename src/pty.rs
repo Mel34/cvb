@@ -692,6 +692,8 @@ fn proxy(
 
     let mut buffer = [0u8; 8192];
     let mut signal_buffer = [0u8; 64];
+    let mut rows = rows;
+    let mut cols = cols;
     let mut screen_terminal = vt100::Parser::new(rows, cols, 1000);
     let bindings = keybind::load()?;
     let mut keyboard = HotkeyMonitor::new(bindings)?;
@@ -757,6 +759,8 @@ fn proxy(
             let _ = read(signal_read.as_fd(), &mut signal_buffer);
 
             let winsize = resize_pty(master, child)?;
+            rows = winsize.ws_row;
+            cols = winsize.ws_col;
             screen_terminal
                 .screen_mut()
                 .set_size(winsize.ws_row, winsize.ws_col);

@@ -75,6 +75,10 @@ def clipboard_files(directory):
     return sorted(directory.glob("capture-*.bin"))
 
 
+def resize_terminal(rows, cols):
+    fcntl.ioctl(master, 0x5414, struct.pack("HHHH", rows, cols, 0, 0))
+
+
 def wait_for_payload(directory, count, timeout=10):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -461,6 +465,212 @@ fi""",
                 ),
             )
 
+            # Clearing the display must remove old text from the rendered screen.
+            run_command(
+                "handles full-screen erase",
+                "printf 'PTY_CLEAR_OLD_BEGIN\\nPTY_CLEAR_OLD_LINE\\n'; "
+                "printf '\\033[H\\033[2J'; "
+                "printf 'PTY_CLEAR_NEW_SCREEN\\n'",
+                clipboard_dir,
+                (b"PTY_CLEAR_NEW_SCREEN",),
+                (b"PTY_CLEAR_OLD_BEGIN", b"PTY_CLEAR_OLD_LINE"),
+            )
+
+            # CSI 2K should remove the selected line without losing its neighbors.
+            run_command(
+                "erases a line without retaining erased text",
+                "printf '\\033[2J\\033[H'; "
+                "printf 'PTY_DLINE_BEGIN\\nPTY_DLINE_REMOVE\\n"
+                "PTY_DLINE_END\\n'; "
+                "printf '\\033[2A\\033[2K'",
+                clipboard_dir,
+                (b"PTY_DLINE_BEGIN", b"PTY_DLINE_END"),
+                (b"PTY_DLINE_REMOVE",),
+            )
+
+            # CSI L inserts a blank row and shifts the following rows down.
+            run_command(
+                "handles ANSI line insertion",
+                "printf '\\033[2J\\033[H'; "
+                "printf 'PTY_IL_TOP\\nPTY_IL_MIDDLE\\nPTY_IL_BOTTOM'; "
+                "printf '\\033[2;1H\\033[1L'; "
+                "printf '\\033[5;1HPTY_IL_END\\n'",
+                clipboard_dir,
+                (
+                    b"PTY_IL_TOP\n\nPTY_IL_MIDDLE\n"
+                    b"PTY_IL_BOTTOM\nPTY_IL_END",
+                ),
+                (b"\xef\xbf\xbd",),
+            )
+
+            # Scrolling inside a restricted region must not move the rows outside it.
+            run_command(
+                "respects ANSI scrolling-region boundaries",
+                "printf '\\033[2J\\033[HPTY_REGION_TOP\\n"
+                "PTY_REGION_ONE\\nPTY_REGION_TWO\\nPTY_REGION_BOTTOM'; "
+                "printf '\\033[2;3r\\033[3;1H\\n\\033[r'",
+                clipboard_dir,
+                (
+                    b"PTY_REGION_TOP",
+                    b"PTY_REGION_TWO",
+                    b"PTY_REGION_BOTTOM",
+                ),
+                (b"PTY_REGION_ONE",),
+            )
+
+            # A CSI sequence split across writes must still be parsed as one sequence.
+            run_command(
+                "handles CSI sequences split across writes",
+                "printf 'PTY_SPLIT_CSI_BEGIN\\n'; "
+                "printf '\\033'; sleep 0.05; "
+                "printf '[31mPTY_SPLIT_CSI_TEXT\\033'; sleep 0.05; "
+                "printf '[0m\\nPTY_SPLIT_CSI_END\\n'",
+                clipboard_dir,
+                (
+                    b"PTY_SPLIT_CSI_BEGIN",
+                    b"PTY_SPLIT_CSI_TEXT",
+                    b"PTY_SPLIT_CSI_END",
+                ),
+                (b"\x1b", b"\xef\xbf\xbd"),
+            )
+
+            # An OSC sequence split across writes must neither leak nor corrupt text.
+            run_command(
+                "handles OSC sequences split across writes",
+                "printf 'PTY_SPLIT_OSC_BEGIN\\n'; "
+                "printf '\\033]0;PTY_SPLIT_OSC_TITLE'; sleep 0.05; "
+                "printf '\\007'; "
+                "printf 'PTY_SPLIT_OSC_END\\n'",
+                clipboard_dir,
+                (b"PTY_SPLIT_OSC_BEGIN", b"PTY_SPLIT_OSC_END"),
+                (
+                    b"PTY_SPLIT_OSC_TITLE",
+                    b"\x1b",
+                    b"\xef\xbf\xbd",
+                ),
+            )
+
+            # The renderer must use the terminal width after a resize.
+            resize_terminal(24, 40)
+            time.sleep(0.1)
+            try:
+                run_command(
+                    "renders output at the resized terminal width",
+                    "sleep 0.1; "
+                    "printf '\\033[2J\\033[HPTY_RESIZE_BEFORE_BEGIN\\n'; "
+                    "printf '%050d' 0; "
+                    "printf '\\nPTY_RESIZE_BEFORE_END\\n'",
+                    clipboard_dir,
+                    (
+                        b"PTY_RESIZE_BEFORE_BEGIN",
+                        b"0" * 40 + b"\n" + b"0" * 10,
+                        b"PTY_RESIZE_BEFORE_END",
+                    ),
+                    (b"\xef\xbf\xbd",),
+                )
+            finally:
+                resize_terminal(24, 80)
+                time.sleep(0.1)
+
+            # Resizing while a command is running must also update transcript rendering.
+            resize_before = len(clipboard_files(clipboard_dir))
+            buffer.clear()
+            os.write(
+                master,
+                b"printf 'PTY_RESIZE_MID_PHASE\\n'; "
+                b"sleep 0.4; "
+                b"printf '%050d' 0; "
+                b"printf '\\nPTY_RESIZE_MID_END\\n'\n",
+            )
+            try:
+                read_until(START)
+                read_until(b"PTY_RESIZE_MID_PHASE")
+                resize_terminal(24, 40)
+                resize_payloads = wait_for_payload(
+                    clipboard_dir, resize_before + 1, timeout=10
+                )
+                resize_payload = resize_payloads[resize_before]
+                check(
+                    "tracks terminal resizing during active capture",
+                    b"PTY_RESIZE_MID_PHASE" in resize_payload
+                    and b"0" * 40 + b"\n" + b"0" * 10 in resize_payload
+                    and b"PTY_RESIZE_MID_END" in resize_payload
+                    and b"\xef\xbf\xbd" not in resize_payload,
+                    resize_payload,
+                )
+            finally:
+                resize_terminal(24, 80)
+                time.sleep(0.1)
+
+            # Output sent to the alternate screen must not contaminate the main screen.
+            run_command(
+                "isolates alternate-screen contents",
+                "printf 'PTY_ALT_MAIN_BEGIN\\n'; "
+                "printf '\\033[?1049hPTY_ALT_SCREEN_SHOULD_NOT_LEAK'; "
+                "sleep 0.05; "
+                "printf '\\033[?1049l'; "
+                "printf 'PTY_ALT_MAIN_END\\n'",
+                clipboard_dir,
+                (b"PTY_ALT_MAIN_BEGIN", b"PTY_ALT_MAIN_END"),
+                (b"PTY_ALT_SCREEN_SHOULD_NOT_LEAK", b"\xef\xbf\xbd"),
+            )
+
+            # Variation selectors should remain attached to their base character.
+            run_command(
+                "preserves emoji variation selectors",
+                "printf 'PTY_VS16_BEGIN\\n❤️\\nPTY_VS16_END\\n'",
+                clipboard_dir,
+                (
+                    b"PTY_VS16_BEGIN",
+                    "❤️".encode("utf-8"),
+                    b"PTY_VS16_END",
+                ),
+                (b"\xef\xbf\xbd",),
+            )
+
+            # Supplementary-plane UTF-8 must survive terminal rendering unchanged.
+            run_command(
+                "preserves supplementary-plane Unicode",
+                "printf 'PTY_SUPPLEMENTARY_BEGIN\\n𐍈\\n"
+                "PTY_SUPPLEMENTARY_END\\n'",
+                clipboard_dir,
+                (
+                    b"PTY_SUPPLEMENTARY_BEGIN",
+                    "𐍈".encode("utf-8"),
+                    b"PTY_SUPPLEMENTARY_END",
+                ),
+                (b"\xef\xbf\xbd",),
+            )
+
+            # A double-width glyph at the right edge must wrap as a whole glyph.
+            run_command(
+                "wraps wide Unicode at the right margin",
+                "printf '\\033[2J\\033[H'; "
+                "printf '%079d' 0 | tr '0' 'A'; "
+                "printf '界X\\nPTY_WIDE_MARGIN_END\\n'",
+                clipboard_dir,
+                (
+                    b"A" * 79 + b"\n" + "界X".encode("utf-8"),
+                    b"PTY_WIDE_MARGIN_END",
+                ),
+                (b"\xef\xbf\xbd",),
+            )
+
+            # A genuinely empty capture must not reuse a preceding command's output.
+            run_command(
+                "isolation setup leaves a unique prior marker",
+                "printf 'PTY_ISOLATION_PREVIOUS_ONLY\\n'",
+                clipboard_dir,
+                (b"PTY_ISOLATION_PREVIOUS_ONLY",),
+            )
+            run_command(
+                "empty capture does not retain previous output",
+                ":",
+                clipboard_dir,
+                (b"[NO_VISIBLE_OUTPUT]",),
+                (b"PTY_ISOLATION_PREVIOUS_ONLY",),
+            )
+
             # Send several commands without waiting between them.
             burst_before = len(clipboard_files(clipboard_dir))
             burst_commands = [
@@ -508,6 +718,14 @@ fi""",
                 x_count == 262144,
                 f"expected 262144 X bytes, found {x_count}; "
                 f"payload length={len(large_payload)} bytes",
+            )
+
+            run_command(
+                "capture state resets after a large payload",
+                "printf 'PTY_AFTER_LARGE_OK\\n'",
+                clipboard_dir,
+                (b"PTY_AFTER_LARGE_OK",),
+                (b"PTY_LARGE_BEGIN", b"X" * 128),
             )
 
             # Interrupt a foreground command and require the shell to recover.
