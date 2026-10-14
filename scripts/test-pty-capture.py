@@ -260,6 +260,17 @@ fi""",
                 (b"ABCDE",),
             )
 
+            # Horizontal tabs should expand to terminal tab stops.
+            run_command(
+                "handles horizontal tab expansion",
+                "printf 'PTY_TAB_BEGIN\\n'; "
+                "printf 'A\\tB\\n'; "
+                "printf 'PTY_TAB_END\\n'",
+                clipboard_dir,
+                (b"PTY_TAB_BEGIN", b"A       B", b"PTY_TAB_END"),
+                (b"A\tB",),
+            )
+
             # Send several commands without waiting between them.
             burst_before = len(clipboard_files(clipboard_dir))
             burst_commands = [
