@@ -330,6 +330,21 @@ fi""",
                 (b"\xef\xbf\xbd",),
             )
 
+            # Text beyond the right margin should wrap to the next terminal row.
+            run_command(
+                "handles automatic right-margin wrapping",
+                "printf 'PTY_WRAP_BEGIN\\n'; "
+                "printf '%080d' 0; "
+                "printf 'X\\nPTY_WRAP_END\\n'",
+                clipboard_dir,
+                (
+                    b"PTY_WRAP_BEGIN",
+                    b"0" * 80 + b"\nX",
+                    b"PTY_WRAP_END",
+                ),
+                (b"\xef\xbf\xbd",),
+            )
+
             # Send several commands without waiting between them.
             burst_before = len(clipboard_files(clipboard_dir))
             burst_commands = [
