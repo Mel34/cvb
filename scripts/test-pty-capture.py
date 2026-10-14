@@ -271,6 +271,21 @@ fi""",
                 (b"A\tB",),
             )
 
+            # UTF-8 output should survive capture without character corruption.
+            run_command(
+                "preserves UTF-8 terminal output",
+                "printf 'PTY_UTF8_BEGIN\\n'; "
+                "printf 'Zażółć 世界\\n'; "
+                "printf 'PTY_UTF8_END\\n'",
+                clipboard_dir,
+                (
+                    b"PTY_UTF8_BEGIN",
+                    "Zażółć 世界".encode("utf-8"),
+                    b"PTY_UTF8_END",
+                ),
+                (b"\xef\xbf\xbd",),
+            )
+
             # Send several commands without waiting between them.
             burst_before = len(clipboard_files(clipboard_dir))
             burst_commands = [
