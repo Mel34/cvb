@@ -345,6 +345,43 @@ fi""",
                 (b"\xef\xbf\xbd",),
             )
 
+            # Wrapped lines should survive scrollback reconstruction in order.
+            scroll_payload = run_command(
+                "captures wrapped output across scrollback",
+                "printf 'PTY_SCROLL_BEGIN\\n'; "
+                "for i in $(seq 1 30); do "
+                "printf 'PTY_SCROLL_%02d:' \"$i\"; "
+                "printf '%070d' \"$i\"; "
+                "printf '\\n'; "
+                "done; "
+                "printf 'PTY_SCROLL_END\\n'",
+                clipboard_dir,
+                (
+                    b"PTY_SCROLL_BEGIN",
+                    b"PTY_SCROLL_01:",
+                    b"PTY_SCROLL_15:",
+                    b"PTY_SCROLL_30:",
+                    b"PTY_SCROLL_END",
+                ),
+                (b"\xef\xbf\xbd",),
+            )
+            scroll_markers = (
+                b"PTY_SCROLL_BEGIN",
+                b"PTY_SCROLL_01:",
+                b"PTY_SCROLL_15:",
+                b"PTY_SCROLL_30:",
+                b"PTY_SCROLL_END",
+            )
+            check(
+                "preserves wrapped scrollback marker order",
+                [scroll_payload.find(marker) for marker in scroll_markers]
+                == sorted(
+                    scroll_payload.find(marker) for marker in scroll_markers
+                )
+                and all(marker in scroll_payload for marker in scroll_markers),
+                scroll_payload,
+            )
+
             # Send several commands without waiting between them.
             burst_before = len(clipboard_files(clipboard_dir))
             burst_commands = [
