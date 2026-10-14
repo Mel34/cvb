@@ -238,6 +238,28 @@ fi""",
                 (b"\x1b",),
             )
 
+            # Carriage return should replace the existing line contents.
+            run_command(
+                "handles carriage-return line rewrites",
+                "printf 'PTY_CR_BEGIN\\n'; "
+                "printf 'PTY_CR_OLD\\rPTY_CR_NEW\\n'; "
+                "printf 'PTY_CR_END\\n'",
+                clipboard_dir,
+                (b"PTY_CR_BEGIN", b"PTY_CR_NEW", b"PTY_CR_END"),
+                (b"PTY_CR_OLD",),
+            )
+
+            # Backspace moves left; subsequent characters overwrite existing text.
+            run_command(
+                "handles backspace cursor movement",
+                "printf 'PTY_BS_BEGIN\\n'; "
+                "printf 'ABCDE\\b\\bXY\\n'; "
+                "printf 'PTY_BS_END\\n'",
+                clipboard_dir,
+                (b"PTY_BS_BEGIN", b"ABCXY", b"PTY_BS_END"),
+                (b"ABCDE",),
+            )
+
             # Send several commands without waiting between them.
             burst_before = len(clipboard_files(clipboard_dir))
             burst_commands = [
