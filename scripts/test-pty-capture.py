@@ -300,6 +300,21 @@ fi""",
                 (b"\xef\xbf\xbd",),
             )
 
+            # Wide Unicode characters occupy two terminal cells.
+            run_command(
+                "handles wide Unicode terminal characters",
+                "printf 'PTY_WIDE_BEGIN\\n'; "
+                "printf '界X\\n'; "
+                "printf 'PTY_WIDE_END\\n'",
+                clipboard_dir,
+                (
+                    b"PTY_WIDE_BEGIN",
+                    "界X".encode("utf-8"),
+                    b"PTY_WIDE_END",
+                ),
+                (b"\xef\xbf\xbd",),
+            )
+
             # Send several commands without waiting between them.
             burst_before = len(clipboard_files(clipboard_dir))
             burst_commands = [
