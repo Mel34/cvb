@@ -227,6 +227,17 @@ fi""",
                 (b"PTY_STDERR_OK",),
             )
 
+            # ANSI formatting should preserve visible text without leaking escapes.
+            run_command(
+                "handles ANSI color control sequences",
+                "printf 'PTY_ANSI_BEGIN\\n'; "
+                "printf '\\033[31mPTY_ANSI_TEXT\\033[0m\\n'; "
+                "printf 'PTY_ANSI_END\\n'",
+                clipboard_dir,
+                (b"PTY_ANSI_BEGIN", b"PTY_ANSI_TEXT", b"PTY_ANSI_END"),
+                (b"\x1b",),
+            )
+
             # Send several commands without waiting between them.
             burst_before = len(clipboard_files(clipboard_dir))
             burst_commands = [
