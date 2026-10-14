@@ -315,6 +315,21 @@ fi""",
                 (b"\xef\xbf\xbd",),
             )
 
+            # Combining marks have zero width and must stay attached to the base character.
+            run_command(
+                "preserves combining Unicode characters",
+                "printf 'PTY_COMBINING_BEGIN\\n'; "
+                "printf 'éX\\n'; "
+                "printf 'PTY_COMBINING_END\\n'",
+                clipboard_dir,
+                (
+                    b"PTY_COMBINING_BEGIN",
+                    "e\u0301X".encode("utf-8"),
+                    b"PTY_COMBINING_END",
+                ),
+                (b"\xef\xbf\xbd",),
+            )
+
             # Send several commands without waiting between them.
             burst_before = len(clipboard_files(clipboard_dir))
             burst_commands = [
