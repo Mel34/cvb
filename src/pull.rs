@@ -5,7 +5,9 @@ use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-fn tracked_files(dir: Option<&Path>) -> Result<Vec<OsString>, String> {
+use crate::cascade;
+
+pub fn tracked_files(dir: Option<&Path>) -> Result<Vec<OsString>, String> {
     let mut cmd = Command::new("git");
     cmd.args(["ls-files", "-z"]);
     if let Some(d) = dir {
@@ -45,7 +47,7 @@ fn tracked_files(dir: Option<&Path>) -> Result<Vec<OsString>, String> {
     Ok(files)
 }
 
-fn normalize_path_str(path: &str, base_dir: Option<&Path>) -> String {
+pub fn normalize_path_str(path: &str, base_dir: Option<&Path>) -> String {
     let p = Path::new(path);
     let p = if let Some(base) = base_dir {
         p.strip_prefix(base).unwrap_or(p)
@@ -138,7 +140,11 @@ fn extract_file_scope(
     let mut query_args = Vec::new();
 
     for arg in args {
-        if arg.starts_with("-file:") || arg.starts_with("-lines:") || arg.starts_with("-callers:") {
+        if arg.starts_with("-file:")
+            || arg.starts_with("-lines:")
+            || arg.starts_with("-callers:")
+            || arg.starts_with("-cascade:")
+        {
             return Err(format!(
                 "CVB pull: negated selector '{arg}' is not supported; exclusions only apply to content terms."
             ));
@@ -170,7 +176,7 @@ fn extract_file_scope(
     Ok((scope, line_ranges, query_args))
 }
 
-fn filter_file_scope(
+pub fn filter_file_scope(
     files: Vec<OsString>,
     scope: Option<&str>,
     base_dir: Option<&Path>,
@@ -237,7 +243,11 @@ pub fn parse_query(args: &[String]) -> Result<SearchQuery, String> {
     let mut query = SearchQuery::default();
 
     for arg in args {
-        if arg.starts_with("-file:") || arg.starts_with("-lines:") || arg.starts_with("-callers:") {
+        if arg.starts_with("-file:")
+            || arg.starts_with("-lines:")
+            || arg.starts_with("-callers:")
+            || arg.starts_with("-cascade:")
+        {
             return Err(format!(
                 "CVB pull: negated selector '{arg}' is not supported; exclusions only apply to content terms."
             ));
@@ -439,7 +449,11 @@ pub fn filter_matches(query: &SearchQuery, matches: &str) -> String {
 
 fn extract_callers_scope(args: &[String]) -> Result<Option<(String, Option<String>)>, String> {
     for arg in args {
-        if arg.starts_with("-callers:") || arg.starts_with("-file:") || arg.starts_with("-lines:") {
+        if arg.starts_with("-callers:")
+            || arg.starts_with("-file:")
+            || arg.starts_with("-lines:")
+            || arg.starts_with("-cascade:")
+        {
             return Err(format!(
                 "CVB pull: negated selector '{arg}' is not supported; exclusions only apply to content terms."
             ));
@@ -602,16 +616,17 @@ fn callers_exit_status(found: bool, incomplete: bool) -> i32 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct UnitKey {
-    path: String,
-    start: usize,
-    end: usize,
+pub struct UnitKey {
+    pub path: String,
+    pub start: usize,
+    pub end: usize,
 }
 
-struct SearchUnit {
-    key: UnitKey,
-    label: &'static str,
-    warning: Option<String>,
+#[derive(Debug, Clone)]
+pub struct SearchUnit {
+    pub key: UnitKey,
+    pub label: &'static str,
+    pub warning: Option<String>,
 }
 
 fn resolve_unit(path: &str, line: usize, source: &str) -> SearchUnit {
@@ -753,7 +768,15 @@ pub fn run_capture(args: &[String], dir: Option<&Path>) -> (i32, String, String)
     let mut stdout = String::new();
     let mut stderr = String::new();
 
-    match extract_callers_scope(args) {
+    let (cascade_depth, args_without_cascade) = match cascade::extract_directive(args) {
+        Ok(result) => result,
+        Err(error) => {
+            stderr.push_str(&format!("{error}\n"));
+            return (2, stdout, stderr);
+        }
+    };
+
+    match extract_callers_scope(&args_without_cascade) {
         Ok(Some((target, scope))) => {
             let status = run_callers(&target, scope.as_deref(), dir, &mut stdout, &mut stderr);
             return (status, stdout, stderr);
@@ -765,17 +788,18 @@ pub fn run_capture(args: &[String], dir: Option<&Path>) -> (i32, String, String)
         }
     }
 
-    let whole_file_capture = args.len() == 1 && args[0].starts_with("file:");
+    let whole_file_capture =
+        args_without_cascade.len() == 1 && args_without_cascade[0].starts_with("file:");
 
-    if args.is_empty() {
+    if args_without_cascade.is_empty() {
         stderr.push_str(format_usage());
         return (2, stdout, stderr);
     }
 
     let parsed = if whole_file_capture {
-        extract_file_scope(&[args[0].clone(), "lines:1".to_string()])
+        extract_file_scope(&[args_without_cascade[0].clone(), "lines:1".to_string()])
     } else {
-        extract_file_scope(args)
+        extract_file_scope(&args_without_cascade)
     };
     let (scope, mut line_ranges, query_args) = match parsed {
         Ok(parsed) => parsed,
@@ -1089,6 +1113,21 @@ pub fn run_capture(args: &[String], dir: Option<&Path>) -> (i32, String, String)
 
     stdout.push_str(&format!("{}\n", query.format_echo()));
 
+    if let Some(depth) = cascade_depth {
+        if depth > 0 {
+            let scope_desc = if let Some(s) = scope.as_deref() {
+                format!("initial search in {s}, dependencies repo-wide")
+            } else {
+                "repo-wide".to_string()
+            };
+            stdout.push_str(&format!(
+                "Cascade: depth {depth} | limits {} units, {} chars | scope: {scope_desc}\n",
+                cascade::MAX_ADDED_UNITS,
+                cascade::MAX_ADDED_CHARS
+            ));
+        }
+    }
+
     for exc in &query.excluded {
         if let Some(&count) = eliminated_by_exclusion.get(exc) {
             if count > 0 {
@@ -1098,8 +1137,8 @@ pub fn run_capture(args: &[String], dir: Option<&Path>) -> (i32, String, String)
         }
     }
 
-    for (unit, term_hits) in matching_units {
-        if let Some(warning) = unit.warning {
+    for (unit, term_hits) in &matching_units {
+        if let Some(warning) = &unit.warning {
             stdout.push_str(&format!("CVB pull: warning: {warning}\n"));
         }
 
@@ -1133,22 +1172,30 @@ pub fn run_capture(args: &[String], dir: Option<&Path>) -> (i32, String, String)
         }
     }
 
+    if let Some(depth) = cascade_depth {
+        if depth > 0 {
+            let cascade_bundle = cascade::run(&matching_units, dir, depth);
+            stdout.push_str(&cascade_bundle);
+        }
+    }
+
     (0, stdout, stderr)
 }
 
 fn format_usage() -> &'static str {
-    "Usage: cvb pull [file:PATH] <search-term>...\n\
+    "Usage: cvb pull [file:PATH] [cascade:N] <search-term>...\n\
            cvb pull file:PATH lines:LINE|START-END\n\
            cvb pull [file:PATH] callers:IDENT\n\n\
      Operators:\n\
          foo bar          OR: match either term\n\
          +foo             AND: require term anywhere in the matching unit\n\
          -foo             NOT: exclude any unit containing term\n\
+         cascade:N        Expand dependencies up to depth N (0..=5)\n\
          \"foo bar\"        Match exact phrase\n\
          \"--dry-run\"      Match literal term starting with - or +\n\n\
      Examples:\n\
          cvb pull CRLF BOM\n\
-         cvb pull +CRLF +BOM\n\
+         cvb pull +CRLF +BOM cascade:2\n\
          cvb pull CRLF BOM +split_inclusive -tests\n\
          cvb pull callers:run\n\
          cvb pull file:src/pull.rs lines:10-25\n"
@@ -1207,55 +1254,195 @@ pub fn bash_function_range(source: &str, hit_line: usize) -> Option<(usize, usiz
         })
 }
 
-fn rust_unit_range(source: &str, hit_line: usize) -> Result<((usize, usize), &'static str), ()> {
-    let Ok(file) = syn::parse_file(source) else {
-        return Err(());
-    };
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RustItemKind {
+    Function,
+    Struct,
+    Enum,
+    Impl,
+    Trait,
+}
 
-    let mut ranges: Vec<((usize, usize), &'static str)> = Vec::new();
+impl RustItemKind {
+    pub fn label(&self) -> &'static str {
+        match self {
+            RustItemKind::Function => "Rust function",
+            RustItemKind::Struct => "Rust struct",
+            RustItemKind::Enum => "Rust enum",
+            RustItemKind::Impl => "Rust impl",
+            RustItemKind::Trait => "Rust trait",
+        }
+    }
+}
 
-    fn collect_ranges(items: &[syn::Item], ranges: &mut Vec<((usize, usize), &'static str)>) {
+#[derive(Debug, Clone)]
+pub struct RustItem {
+    pub kind: RustItemKind,
+    pub name: Option<String>,
+    pub owner: Option<String>,
+    pub start: usize,
+    pub end: usize,
+    pub in_test_mod: bool,
+}
+
+impl RustItem {
+    pub fn label(&self) -> &'static str {
+        self.kind.label()
+    }
+}
+
+fn meta_is_test(meta: &syn::meta::ParseNestedMeta) -> bool {
+    if meta.path.is_ident("test") {
+        return true;
+    }
+    if meta.path.is_ident("all") || meta.path.is_ident("any") {
+        let mut found = false;
+        let _ = meta.parse_nested_meta(|inner| {
+            if meta_is_test(&inner) {
+                found = true;
+            }
+            Ok(())
+        });
+        return found;
+    }
+    false
+}
+
+fn has_test_attr(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        if attr.path().is_ident("test") {
+            true
+        } else if attr.path().is_ident("cfg") {
+            let mut is_test = false;
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta_is_test(&meta) {
+                    is_test = true;
+                }
+                Ok(())
+            });
+            is_test
+        } else {
+            false
+        }
+    })
+}
+
+fn type_ident_name(ty: &syn::Type) -> Option<String> {
+    match ty {
+        syn::Type::Path(type_path) => type_path
+            .path
+            .segments
+            .last()
+            .map(|seg| seg.ident.to_string()),
+        _ => None,
+    }
+}
+
+pub fn rust_items(file: &syn::File) -> Vec<RustItem> {
+    let mut items = Vec::new();
+
+    fn walk_items(syn_items: &[syn::Item], in_test: bool, items: &mut Vec<RustItem>) {
         use syn::spanned::Spanned;
 
-        for item in items {
+        for item in syn_items {
             match item {
                 syn::Item::Fn(function) => {
                     let span = function.span();
-                    ranges.push(((span.start().line, span.end().line), "Rust function"));
+                    let is_test = in_test || has_test_attr(&function.attrs);
+                    items.push(RustItem {
+                        kind: RustItemKind::Function,
+                        name: Some(function.sig.ident.to_string()),
+                        owner: None,
+                        start: span.start().line,
+                        end: span.end().line,
+                        in_test_mod: is_test,
+                    });
                 }
-                syn::Item::Struct(item) => {
-                    let span = item.span();
-                    ranges.push(((span.start().line, span.end().line), "Rust struct"));
+                syn::Item::Struct(s) => {
+                    let span = s.span();
+                    let is_test = in_test || has_test_attr(&s.attrs);
+                    items.push(RustItem {
+                        kind: RustItemKind::Struct,
+                        name: Some(s.ident.to_string()),
+                        owner: None,
+                        start: span.start().line,
+                        end: span.end().line,
+                        in_test_mod: is_test,
+                    });
                 }
-                syn::Item::Enum(item) => {
-                    let span = item.span();
-                    ranges.push(((span.start().line, span.end().line), "Rust enum"));
+                syn::Item::Enum(e) => {
+                    let span = e.span();
+                    let is_test = in_test || has_test_attr(&e.attrs);
+                    items.push(RustItem {
+                        kind: RustItemKind::Enum,
+                        name: Some(e.ident.to_string()),
+                        owner: None,
+                        start: span.start().line,
+                        end: span.end().line,
+                        in_test_mod: is_test,
+                    });
                 }
                 syn::Item::Impl(implementation) => {
                     let span = implementation.span();
-                    ranges.push(((span.start().line, span.end().line), "Rust impl"));
+                    let is_test = in_test || has_test_attr(&implementation.attrs);
+                    let owner_name = type_ident_name(&implementation.self_ty);
+                    items.push(RustItem {
+                        kind: RustItemKind::Impl,
+                        name: owner_name.clone(),
+                        owner: None,
+                        start: span.start().line,
+                        end: span.end().line,
+                        in_test_mod: is_test,
+                    });
                     for impl_item in &implementation.items {
                         if let syn::ImplItem::Fn(function) = impl_item {
                             let f_span = function.span();
-                            ranges
-                                .push(((f_span.start().line, f_span.end().line), "Rust function"));
+                            let fn_test = is_test || has_test_attr(&function.attrs);
+                            items.push(RustItem {
+                                kind: RustItemKind::Function,
+                                name: Some(function.sig.ident.to_string()),
+                                owner: owner_name.clone(),
+                                start: f_span.start().line,
+                                end: f_span.end().line,
+                                in_test_mod: fn_test,
+                            });
                         }
                     }
                 }
                 syn::Item::Trait(trait_item) => {
                     let span = trait_item.span();
-                    ranges.push(((span.start().line, span.end().line), "Rust trait"));
+                    let is_test = in_test || has_test_attr(&trait_item.attrs);
+                    let trait_name = trait_item.ident.to_string();
+                    items.push(RustItem {
+                        kind: RustItemKind::Trait,
+                        name: Some(trait_name.clone()),
+                        owner: None,
+                        start: span.start().line,
+                        end: span.end().line,
+                        in_test_mod: is_test,
+                    });
                     for tr_item in &trait_item.items {
                         if let syn::TraitItem::Fn(function) = tr_item {
                             let f_span = function.span();
-                            ranges
-                                .push(((f_span.start().line, f_span.end().line), "Rust function"));
+                            let fn_test = is_test || has_test_attr(&function.attrs);
+                            items.push(RustItem {
+                                kind: RustItemKind::Function,
+                                name: Some(function.sig.ident.to_string()),
+                                owner: Some(trait_name.clone()),
+                                start: f_span.start().line,
+                                end: f_span.end().line,
+                                in_test_mod: fn_test,
+                            });
                         }
                     }
                 }
                 syn::Item::Mod(module) => {
+                    let is_test = in_test
+                        || has_test_attr(&module.attrs)
+                        || module.ident == "tests"
+                        || module.ident == "test";
                     if let Some((_, nested_items)) = &module.content {
-                        collect_ranges(nested_items, ranges);
+                        walk_items(nested_items, is_test, items);
                     }
                 }
                 _ => {}
@@ -1263,14 +1450,25 @@ fn rust_unit_range(source: &str, hit_line: usize) -> Result<((usize, usize), &'s
         }
     }
 
-    collect_ranges(&file.items, &mut ranges);
+    walk_items(&file.items, false, &mut items);
+    items
+}
 
-    let matching = ranges
+fn rust_unit_range(source: &str, hit_line: usize) -> Result<((usize, usize), &'static str), ()> {
+    let Ok(file) = syn::parse_file(source) else {
+        return Err(());
+    };
+
+    let items = rust_items(&file);
+
+    let matching = items
         .into_iter()
-        .filter(|((start, end), _)| *start <= hit_line && hit_line <= *end)
-        .min_by_key(|((start, end), _)| end - start);
+        .filter(|item| item.start <= hit_line && hit_line <= item.end)
+        .min_by_key(|item| item.end - item.start);
 
-    Ok(matching.unwrap_or(((hit_line, hit_line), "Line")))
+    Ok(matching
+        .map(|item| ((item.start, item.end), item.label()))
+        .unwrap_or(((hit_line, hit_line), "Line")))
 }
 
 #[allow(dead_code)]
@@ -1300,7 +1498,7 @@ pub struct RustCallerMatch {
     pub kind: RustCallKind,
 }
 
-fn is_call_invocation(trees: &[proc_macro2::TokenTree], i: usize) -> bool {
+pub fn is_call_invocation(trees: &[proc_macro2::TokenTree], i: usize) -> bool {
     use proc_macro2::{Delimiter, TokenTree};
 
     if let Some(next) = trees.get(i + 1) {
@@ -1625,6 +1823,76 @@ pub fn expand_rust_matches(matches: &str) -> String {
 #[cfg(test)]
 mod pull_tests {
     use super::*;
+
+    #[test]
+    fn cascade_zero_is_byte_identical_to_plain_pull() {
+        let dir = std::env::temp_dir().join(format!("cvb-test-cascade0-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+
+        let run_cmd = |args: &[&str]| {
+            Command::new(args[0])
+                .args(&args[1..])
+                .current_dir(&dir)
+                .output()
+                .unwrap();
+        };
+
+        run_cmd(&["git", "init"]);
+        run_cmd(&["git", "config", "user.name", "CVB Test"]);
+        run_cmd(&["git", "config", "user.email", "test@cvb.local"]);
+
+        let source = "fn process() {\n    let crlf = 1;\n    let split_inclusive = 2;\n}\n";
+        std::fs::write(dir.join("src/lib.rs"), source).unwrap();
+        run_cmd(&["git", "add", "src/lib.rs"]);
+        run_cmd(&["git", "commit", "-m", "init"]);
+
+        let (status_plain, stdout_plain, stderr_plain) =
+            run_capture(&["+crlf".into(), "+split_inclusive".into()], Some(&dir));
+        let (status_c0, stdout_c0, stderr_c0) =
+            run_capture(&["+crlf".into(), "+split_inclusive".into(), "cascade:0".into()], Some(&dir));
+
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(status_plain, status_c0, "exit status must match");
+        assert_eq!(stdout_plain, stdout_c0, "stdout must be byte-identical between plain pull and cascade:0");
+        assert_eq!(stderr_plain, stderr_c0, "stderr must be byte-identical between plain pull and cascade:0");
+    }
+
+    #[test]
+    fn file_scope_expands_dependencies_repo_wide() {
+        let dir = std::env::temp_dir().join(format!("cvb-test-filescope-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+
+        let run_cmd = |args: &[&str]| {
+            Command::new(args[0])
+                .args(&args[1..])
+                .current_dir(&dir)
+                .output()
+                .unwrap();
+        };
+
+        run_cmd(&["git", "init"]);
+        run_cmd(&["git", "config", "user.name", "CVB Test"]);
+        run_cmd(&["git", "config", "user.email", "test@cvb.local"]);
+
+        std::fs::write(dir.join("src/lib.rs"), "pub fn caller() {\n    helper_fn();\n}\n").unwrap();
+        std::fs::write(dir.join("src/helper.rs"), "pub fn helper_fn() -> usize {\n    42\n}\n").unwrap();
+        run_cmd(&["git", "add", "src/lib.rs", "src/helper.rs"]);
+        run_cmd(&["git", "commit", "-m", "init"]);
+
+        let (status, stdout, stderr) =
+            run_capture(&["file:src/lib.rs".into(), "caller".into(), "cascade:1".into()], Some(&dir));
+
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(status, 0);
+        assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
+        assert!(stdout.contains("Rust function: src/lib.rs:1-3"), "missing seed in stdout:\n{stdout}");
+        assert!(stdout.contains("Rust function: src/helper.rs:1-3"), "missing cascaded dependency outside file scope:\n{stdout}");
+        assert!(stdout.contains("callee of caller (call at :2)"));
+    }
 
     #[test]
     fn callers_exit_status_is_success_when_matches_are_found() {
@@ -2000,7 +2268,12 @@ fn target() {
 
     #[test]
     fn extract_file_scope_rejects_negated_selectors() {
-        for arg in ["-file:src/pull.rs", "-lines:5", "-callers:run"] {
+        for arg in [
+            "-file:src/pull.rs",
+            "-lines:5",
+            "-callers:run",
+            "-cascade:2",
+        ] {
             assert!(
                 extract_file_scope(&[arg.to_string()]).is_err(),
                 "should reject negated selector {arg}"
@@ -2390,7 +2663,6 @@ fn other() {
         let query = parse_query(&["+surgery".into(), "-protocol".into()]).unwrap();
         let lines: Vec<&str> = source.lines().collect();
 
-        // Section 1: ## surgery (lines 2-4)
         let (s1_start, s1_end) = markdown_section_range(source, 3).unwrap();
         assert_eq!((s1_start, s1_end), (2, 4));
         let s1_has_req = query
@@ -2407,7 +2679,6 @@ fn other() {
             "section 1 contains -protocol and must be excluded"
         );
 
-        // Section 2: ## clean surgery (lines 5-7)
         let (s2_start, s2_end) = markdown_section_range(source, 6).unwrap();
         assert_eq!((s2_start, s2_end), (5, 7));
         let s2_has_req = query
@@ -2458,8 +2729,6 @@ fn other() {
         let no_match_exit = run_in_dir(&["+crlf".into(), "+missing".into()], Some(&dir));
         assert_eq!(no_match_exit, 1);
 
-        // Markdown unit-level exclusion E2E:
-        // +surgery matches both sections, but -protocol drops ## surgery; ## clean surgery remains -> exit 0
         let (md_match_exit, stdout, _) =
             run_capture(&["+surgery".into(), "-protocol".into()], Some(&dir));
         assert_eq!(md_match_exit, 0);
@@ -2476,7 +2745,6 @@ fn other() {
             "exclusion note should be present in stdout:\n{stdout}"
         );
 
-        // +protocol is only in ## surgery, which also has surgery; -surgery eliminates it -> exit 1
         let (md_excluded_exit, no_match_stdout, _) =
             run_capture(&["+protocol".into(), "-surgery".into()], Some(&dir));
         assert_eq!(md_excluded_exit, 1);

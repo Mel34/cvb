@@ -2,6 +2,7 @@ use std::fmt::Write as FmtWrite;
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
+pub(crate) mod cascade;
 mod cli;
 pub(crate) mod clipboard;
 mod control;
@@ -48,7 +49,7 @@ Capture your terminal session and bridge command output to the clipboard.
 Usage:
     cvb
     cvb <PATH>...
-    cvb pull [file:PATH] <search-term>...
+    cvb pull [file:PATH] [cascade:N] <search-term>...
     cvb --help
     cvb --version
 
@@ -67,7 +68,7 @@ A capture session ends with:
         cli::Command::Version => println!("cvb {}", env!("CARGO_PKG_VERSION")),
         cli::Command::Pull(args) => {
             if args.is_empty() {
-                eprintln!("Usage: cvb pull [file:PATH] <search-term>...");
+                eprintln!("Usage: cvb pull [file:PATH] [cascade:N] <search-term>...");
                 std::process::exit(2);
             }
 
