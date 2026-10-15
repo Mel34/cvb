@@ -1420,7 +1420,7 @@ pub fn run(
                 cand.relationship,
                 cand.reason
             );
-            let rendered_len = unit_header.len() + body.len();
+            let rendered_len = unit_header.chars().count() + body.chars().count();
 
             if total_added_chars + rendered_len > (MAX_ADDED_CHARS.saturating_sub(REPORT_RESERVE_CHARS)) {
                 if primary_stop_reason.is_none() {
@@ -1493,9 +1493,27 @@ pub fn run(
         "Stopped: {stop_reason}. Budget: {total_added_units} of {MAX_ADDED_UNITS} added units, {total_added_chars} of {MAX_ADDED_CHARS} chars. {omitted_str}\n"
     ));
 
-    const MAX_REPORT_OMITTED_SHOWN: usize = 10;
-    for item in omitted_items.iter().take(MAX_REPORT_OMITTED_SHOWN) {
-        out.push_str(&format!(
+    let first_seed_name = seeds
+        .first()
+        .and_then(|k| index.file_sources.get(&k.path))
+        .and_then(|src| syn::parse_file(src).ok())
+        .and_then(|f| {
+            pull::rust_items(&f)
+                .into_iter()
+                .find(|it| it.start == seeds[0].start && it.end == seeds[0].end)
+                .and_then(|it| it.name)
+        })
+        .unwrap_or_else(|| "IDENT".to_string());
+
+    let footer_disclaimer = "Analysis is syntactic (no types, trait dispatch, generics, macro expansion or cfg). A dependency missing from this bundle may still exist.\n";
+    let scope_note = format!(
+        "Not followed, by scope: callers, tests, trait impls. See `cvb pull callers:{first_seed_name}`.\n"
+    );
+    let mandatory_footer_reserve = footer_disclaimer.chars().count() + scope_note.chars().count() + 100;
+
+    let mut omitted_shown = 0;
+    for item in &omitted_items {
+        let line = format!(
             "  {}:{}-{}  {:16}  {:24}  {:3} lines  {:12}  → cvb pull file:{} lines:{}-{}\n",
             item.key.path,
             item.key.start,
@@ -1507,56 +1525,77 @@ pub fn run(
             item.key.path,
             item.key.start,
             item.key.end
-        ));
-    }
-    if omitted_items.len() > MAX_REPORT_OMITTED_SHOWN {
-        let hidden = omitted_items.len() - MAX_REPORT_OMITTED_SHOWN;
-        out.push_str(&format!("  ... and {hidden} more omitted unit(s) not listed\n"));
+        );
+        if out.chars().count() + line.chars().count() + mandatory_footer_reserve + 80 <= MAX_ADDED_CHARS {
+            out.push_str(&line);
+            omitted_shown += 1;
+        } else {
+            let hidden = omitted_items.len() - omitted_shown;
+            out.push_str(&format!("  ... and {hidden} more omitted unit(s) not listed (reserve limit reached)\n"));
+            break;
+        }
     }
 
-    const MAX_REPORT_UNRESOLVED_SHOWN: usize = 15;
     let total_unresolved = unresolved_callbacks.len() + unresolved_unknown_receivers.len() + ambiguous_items.len();
     if total_unresolved > 0 {
-        out.push_str(&format!("Not followed, unresolved ({total_unresolved}):\n"));
-        let mut shown_unresolved = 0;
-        for (name, path, line) in &unresolved_callbacks {
-            if shown_unresolved >= MAX_REPORT_UNRESOLVED_SHOWN {
-                break;
+        let header = format!("Not followed, unresolved ({total_unresolved}):\n");
+        if out.chars().count() + header.chars().count() + mandatory_footer_reserve <= MAX_ADDED_CHARS {
+            out.push_str(&header);
+            let mut unres_shown = 0;
+            let mut hit_reserve = false;
+
+            for (name, path, line) in &unresolved_callbacks {
+                let entry = format!(
+                    "  {name:16}  {path}:{line:<5}  call through parameter `{name}` (callback; target not statically known)\n"
+                );
+                if out.chars().count() + entry.chars().count() + mandatory_footer_reserve + 80 <= MAX_ADDED_CHARS {
+                    out.push_str(&entry);
+                    unres_shown += 1;
+                } else {
+                    hit_reserve = true;
+                    break;
+                }
             }
-            out.push_str(&format!(
-                "  {name:16}  {path}:{line:<5}  call through parameter `{name}` (callback; target not statically known)\n"
-            ));
-            shown_unresolved += 1;
-        }
-        for (name, path, line) in &unresolved_unknown_receivers {
-            if shown_unresolved >= MAX_REPORT_UNRESOLVED_SHOWN {
-                break;
+            if !hit_reserve {
+                for (name, path, line) in &unresolved_unknown_receivers {
+                    let entry = format!(
+                        "  {name:16}  {path}:{line:<5}  method call, receiver type unknown\n"
+                    );
+                    if out.chars().count() + entry.chars().count() + mandatory_footer_reserve + 80 <= MAX_ADDED_CHARS {
+                        out.push_str(&entry);
+                        unres_shown += 1;
+                    } else {
+                        hit_reserve = true;
+                        break;
+                    }
+                }
             }
-            out.push_str(&format!(
-                "  {name:16}  {path}:{line:<5}  method call, receiver type unknown\n"
-            ));
-            shown_unresolved += 1;
-        }
-        for (name, path, line, locs) in &ambiguous_items {
-            if shown_unresolved >= MAX_REPORT_UNRESOLVED_SHOWN {
-                break;
+            if !hit_reserve {
+                for (name, path, line, locs) in &ambiguous_items {
+                    let loc_str = if locs.len() > 3 {
+                        format!(": {}, ... and {} more", locs[..3].join(", "), locs.len() - 3)
+                    } else if !locs.is_empty() {
+                        format!(": {}", locs.join(", "))
+                    } else {
+                        String::new()
+                    };
+                    let entry = format!(
+                        "  {name:16}  {path}:{line:<5}  ambiguous ({} candidates{loc_str})\n",
+                        locs.len()
+                    );
+                    if out.chars().count() + entry.chars().count() + mandatory_footer_reserve + 80 <= MAX_ADDED_CHARS {
+                        out.push_str(&entry);
+                        unres_shown += 1;
+                    } else {
+                        hit_reserve = true;
+                        break;
+                    }
+                }
             }
-            let loc_str = if locs.len() > 3 {
-                format!(": {}, ... and {} more", locs[..3].join(", "), locs.len() - 3)
-            } else if !locs.is_empty() {
-                format!(": {}", locs.join(", "))
-            } else {
-                String::new()
-            };
-            out.push_str(&format!(
-                "  {name:16}  {path}:{line:<5}  ambiguous ({} candidates{loc_str})\n",
-                locs.len()
-            ));
-            shown_unresolved += 1;
-        }
-        if total_unresolved > MAX_REPORT_UNRESOLVED_SHOWN {
-            let hidden = total_unresolved - MAX_REPORT_UNRESOLVED_SHOWN;
-            out.push_str(&format!("  ... and {hidden} more unresolved item(s) not listed\n"));
+            if hit_reserve {
+                let hidden = total_unresolved - unres_shown;
+                out.push_str(&format!("  ... and {hidden} more unresolved item(s) not listed (reserve limit reached)\n"));
+            }
         }
     }
 
@@ -1573,27 +1612,15 @@ pub fn run(
         ));
     }
 
-    let first_seed_name = seeds
-        .first()
-        .and_then(|k| index.file_sources.get(&k.path))
-        .and_then(|src| syn::parse_file(src).ok())
-        .and_then(|f| {
-            pull::rust_items(&f)
-                .into_iter()
-                .find(|it| it.start == seeds[0].start && it.end == seeds[0].end)
-                .and_then(|it| it.name)
-        })
-        .unwrap_or_else(|| "IDENT".to_string());
-
-    out.push_str(&format!(
-        "Not followed, by scope: callers, tests, trait impls. See `cvb pull callers:{first_seed_name}`.\n"
-    ));
+    out.push_str(&scope_note);
 
     for warning in &index.parse_warnings {
-        out.push_str(&format!("Index incomplete: {warning}\n"));
+        if out.chars().count() + warning.chars().count() + footer_disclaimer.chars().count() + 25 <= MAX_ADDED_CHARS {
+            out.push_str(&format!("Index incomplete: {warning}\n"));
+        }
     }
 
-    out.push_str("Analysis is syntactic (no types, trait dispatch, generics, macro expansion or cfg). A dependency missing from this bundle may still exist.\n");
+    out.push_str(footer_disclaimer);
 
     out
 }
@@ -1601,6 +1628,59 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn total_cascade_output_strictly_bounded_by_24000_chars() {
+        let dir = std::env::temp_dir().join(format!("cvb-test-hardcap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+
+        let run_cmd = |args: &[&str]| {
+            std::process::Command::new(args[0])
+                .args(&args[1..])
+                .current_dir(&dir)
+                .output()
+                .unwrap();
+        };
+
+        run_cmd(&["git", "init"]);
+        run_cmd(&["git", "config", "user.name", "CVB Test"]);
+        run_cmd(&["git", "config", "user.email", "test@cvb.local"]);
+
+        // Create 40 distinct functions to severely stress unit limits and generate 30+ omitted items
+        let mut source = String::from("pub fn root() {\n");
+        for i in 0..40 {
+            source.push_str(&format!("    fn_{i}();\n"));
+        }
+        source.push_str("}\n\n");
+        for i in 0..40 {
+            source.push_str(&format!("pub fn fn_{i}() {{\n    let _x = {i};\n}}\n"));
+        }
+
+        std::fs::write(dir.join("src/lib.rs"), &source).unwrap();
+        run_cmd(&["git", "add", "src/lib.rs"]);
+        run_cmd(&["git", "commit", "-m", "init"]);
+
+        let matching_seeds = vec![(
+            SearchUnit {
+                key: UnitKey { path: "src/lib.rs".to_string(), start: 1, end: 42 },
+                label: "Rust function",
+                warning: None,
+            },
+            vec![("root".to_string(), vec![1])],
+        )];
+
+        let output = run(&matching_seeds, Some(&dir), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let total_chars = output.chars().count();
+        assert!(
+            total_chars <= MAX_ADDED_CHARS,
+            "Total cascade addition output must strictly not exceed {MAX_ADDED_CHARS} chars, got {total_chars}"
+        );
+        assert!(output.contains("== CASCADE report =="));
+        assert!(output.contains("Analysis is syntactic"), "Footer disclaimer must be preserved");
+    }
 
     #[test]
     fn nested_generic_signature_types_are_extracted() {
