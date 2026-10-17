@@ -191,9 +191,32 @@ impl<'a> Parser<'a> {
         })
     }
 
+    fn check_structural_line_elsewhere(
+        &self,
+        line: &str,
+        line_num: usize,
+    ) -> Result<(), ParseFailure> {
+        if line.starts_with(&self.prefix) {
+            return Ok(());
+        }
+        if has_structural_shape(line) {
+            return Err(ParseFailure {
+                kind: ParseError::Syntax,
+                line: line_num,
+                detail: Some("structural line has wrong token or indentation".into()),
+            });
+        }
+        Err(ParseFailure {
+            kind: ParseError::Stray,
+            line: line_num,
+            detail: None,
+        })
+    }
+
     fn expect_header(&mut self, name: &str) -> Result<usize, ParseFailure> {
         let line_num = self.index + 1;
         let line = self.next_line()?;
+        self.check_structural_line_elsewhere(line, line_num)?;
         let header_prefix = format!("{}{name} n=", self.prefix);
         let count_text = line.strip_prefix(&header_prefix).ok_or(ParseFailure {
             kind: ParseError::Syntax,
@@ -276,6 +299,7 @@ impl<'a> Parser<'a> {
             line: line_num,
             detail: None,
         })?;
+        self.check_structural_line_elsewhere(line, line_num)?;
         let op_prefix = format!("{}OP ", self.prefix);
         if !line.starts_with(&op_prefix) {
             return Err(ParseFailure {
@@ -599,7 +623,7 @@ pub(crate) fn parse_envelope(input: &str) -> Result<Envelope, ParseFailure> {
             continue;
         }
 
-        if line.starts_with("CVB::") {
+        if line.starts_with(&format!("{}FILE ", parser.prefix)) {
             let file_line = parser.index + 1;
             let path = parse_file(line, &token).map_err(|k| ParseFailure {
                 kind: k,
@@ -621,6 +645,14 @@ pub(crate) fn parse_envelope(input: &str) -> Result<Envelope, ParseFailure> {
             });
             parser.index += 1;
             continue;
+        }
+
+        if has_structural_shape(line) {
+            return Err(ParseFailure {
+                kind: ParseError::Syntax,
+                line: parser.index + 1,
+                detail: Some("structural line has wrong token or indentation".into()),
+            });
         }
 
         return Err(ParseFailure {
@@ -1380,6 +1412,29 @@ CVB::k7Q2xw9R::END ops=1"
             assert_eq!(failure.kind, ParseError::Syntax, "{boundary:?}");
             assert_eq!(failure.line, 8, "{boundary:?}");
         }
+    }
+
+    #[test]
+    fn stray_text_between_file_and_operation_is_stray() {
+        let input = "\\
+CVB::k7Q2xw9R::BEGIN v=1 id=demo-01
+CVB::k7Q2xw9R::FILE path=src/main.rs
+unexpected text
+CVB::k7Q2xw9R::END ops=1";
+
+        assert_eq!(kind(parse_envelope(input)), Err(ParseError::Stray));
+    }
+
+    #[test]
+    fn wrong_token_file_boundary_is_syntax() {
+        let input = "\
+CVB::k7Q2xw9R::BEGIN v=1 id=demo-01
+CVB::A1B2C3D4::FILE path=src/main.rs
+CVB::k7Q2xw9R::END ops=1";
+
+        let failure = parse_envelope(input).unwrap_err();
+        assert_eq!(failure.kind, ParseError::Syntax);
+        assert_eq!(failure.line, 2);
     }
 
     #[test]
