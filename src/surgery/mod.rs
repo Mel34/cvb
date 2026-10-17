@@ -104,11 +104,20 @@ impl std::fmt::Display for ParseFailure {
 impl std::error::Error for ParseFailure {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PrefixSide {
+    ExpectedEnds,
+    FoundEnds,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PlanDetail {
     Precondition {
         line: usize,
+        column: usize,
+        byte_offset: usize,
         expected: String,
         found: String,
+        prefix_ended: Option<PrefixSide>,
         only_trailing_whitespace: bool,
     },
     EndOfFile {
@@ -151,7 +160,33 @@ fn format_visible_line(s: &str) -> String {
     } else {
         s.to_string()
     };
-    truncated.replace('\t', "\\t")
+
+    let non_trailing_len = truncated.trim_end_matches([' ', '\t']).len();
+    let (prefix, trailing) = truncated.split_at(non_trailing_len);
+
+    let mut result = String::with_capacity(truncated.len());
+    for c in prefix.chars() {
+        match c {
+            '\t' => result.push_str("\\t"),
+            '\r' => result.push_str("\\r"),
+            '\n' => result.push_str("\\n"),
+            '\0' => result.push_str("\\0"),
+            c if (c as u32) < 32 || c as u32 == 127 => {
+                result.push_str(&format!("\\x{:02x}", c as u8));
+            }
+            c => result.push(c),
+        }
+    }
+    for c in trailing.chars() {
+        match c {
+            ' ' => result.push_str("\\x20"),
+            '\t' => result.push_str("\\t"),
+            '\r' => result.push_str("\\r"),
+            '\n' => result.push_str("\\n"),
+            c => result.push(c),
+        }
+    }
+    result
 }
 
 impl std::fmt::Display for PlanFailure {
@@ -159,19 +194,30 @@ impl std::fmt::Display for PlanFailure {
         match &self.detail {
             Some(PlanDetail::Precondition {
                 line,
+                column,
+                byte_offset,
                 expected,
                 found,
+                prefix_ended,
                 only_trailing_whitespace,
             }) => {
                 write!(
                     f,
-                    "CVB: {}: operation {}: precondition mismatch at line {}:\n  expected: \"{}\"\n     found: \"{}\"",
+                    "CVB: {}: operation {}: precondition mismatch at line {}, column {} (byte offset {}):\n  expected: \"{}\"\n     found: \"{}\"",
                     self.path,
                     self.op_index,
                     line,
+                    column,
+                    byte_offset,
                     format_visible_line(expected),
                     format_visible_line(found)
                 )?;
+                if let Some(side) = prefix_ended {
+                    match side {
+                        PrefixSide::ExpectedEnds => write!(f, "\n  note: expected ends here")?,
+                        PrefixSide::FoundEnds => write!(f, "\n  note: found ends here")?,
+                    }
+                }
                 if *only_trailing_whitespace {
                     write!(f, "\n  note: differs only in trailing whitespace")?;
                 }

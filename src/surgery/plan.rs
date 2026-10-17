@@ -10,6 +10,66 @@ pub(crate) fn validate_operation(
     validate_operation_detail(original, operation).map_err(|(err, _)| err)
 }
 
+fn find_differing_position(
+    expected: &str,
+    found: &str,
+) -> (usize, usize, Option<PrefixSide>) {
+    let mut col = 1;
+    let mut byte_offset = 0;
+    let mut exp_chars = expected.chars();
+    let mut fnd_chars = found.chars();
+
+    loop {
+        match (exp_chars.next(), fnd_chars.next()) {
+            (Some(e), Some(f)) => {
+                if e != f {
+                    return (col, byte_offset, None);
+                }
+                col += 1;
+                byte_offset += e.len_utf8();
+            }
+            (None, Some(_)) => return (col, byte_offset, Some(PrefixSide::ExpectedEnds)),
+            (Some(_), None) => return (col, byte_offset, Some(PrefixSide::FoundEnds)),
+            (None, None) => return (col, byte_offset, None),
+        }
+    }
+}
+
+fn precondition_detail(
+    start: usize,
+    original_slice: &[String],
+    declared_slice: &[String],
+) -> PlanDetail {
+    let mut mismatch_line = start;
+    let mut exp = String::new();
+    let mut fnd = String::new();
+
+    for (k, (orig_l, decl_l)) in
+        original_slice.iter().zip(declared_slice.iter()).enumerate()
+    {
+        if orig_l != decl_l {
+            mismatch_line = start + k;
+            exp = decl_l.clone();
+            fnd = orig_l.clone();
+            break;
+        }
+    }
+
+    let only_ws = exp.trim_end() == fnd.trim_end();
+    let (column, byte_offset, prefix_ended) =
+        find_differing_position(&exp, &fnd);
+
+    PlanDetail::Precondition {
+        line: mismatch_line,
+        column,
+        byte_offset,
+        expected: exp,
+        found: fnd,
+        prefix_ended,
+        only_trailing_whitespace: only_ws,
+    }
+}
+
 pub(crate) fn validate_operation_detail(
     original: &[String],
     operation: &Operation,
@@ -47,27 +107,9 @@ pub(crate) fn validate_operation_detail(
             let last = *end;
 
             if original[first..last] != old[..] {
-                let mut mismatch_line = *start;
-                let mut exp = String::new();
-                let mut fnd = String::new();
-                for (k, (orig_l, old_l)) in original[first..last].iter().zip(old.iter()).enumerate()
-                {
-                    if orig_l != old_l {
-                        mismatch_line = start + k;
-                        exp = old_l.clone();
-                        fnd = orig_l.clone();
-                        break;
-                    }
-                }
-                let only_ws = exp.trim_end() == fnd.trim_end();
                 return Err((
                     PlanError::Precondition,
-                    PlanDetail::Precondition {
-                        line: mismatch_line,
-                        expected: exp,
-                        found: fnd,
-                        only_trailing_whitespace: only_ws,
-                    },
+                    precondition_detail(*start, &original[first..last], &old[..]),
                 ));
             }
             if old == new {
@@ -92,27 +134,9 @@ pub(crate) fn validate_operation_detail(
             let last = *end;
 
             if original[first..last] != old[..] {
-                let mut mismatch_line = *start;
-                let mut exp = String::new();
-                let mut fnd = String::new();
-                for (k, (orig_l, old_l)) in original[first..last].iter().zip(old.iter()).enumerate()
-                {
-                    if orig_l != old_l {
-                        mismatch_line = start + k;
-                        exp = old_l.clone();
-                        fnd = orig_l.clone();
-                        break;
-                    }
-                }
-                let only_ws = exp.trim_end() == fnd.trim_end();
                 return Err((
                     PlanError::Precondition,
-                    PlanDetail::Precondition {
-                        line: mismatch_line,
-                        expected: exp,
-                        found: fnd,
-                        only_trailing_whitespace: only_ws,
-                    },
+                    precondition_detail(*start, &original[first..last], &old[..]),
                 ));
             }
             if first == 0 && last == original.len() {
@@ -159,28 +183,9 @@ pub(crate) fn validate_operation_detail(
             }
 
             if original[first..last] != anchor[..] {
-                let mut mismatch_line = *start;
-                let mut exp = String::new();
-                let mut fnd = String::new();
-                for (k, (orig_l, anc_l)) in
-                    original[first..last].iter().zip(anchor.iter()).enumerate()
-                {
-                    if orig_l != anc_l {
-                        mismatch_line = start + k;
-                        exp = anc_l.clone();
-                        fnd = orig_l.clone();
-                        break;
-                    }
-                }
-                let only_ws = exp.trim_end() == fnd.trim_end();
                 return Err((
                     PlanError::Precondition,
-                    PlanDetail::Precondition {
-                        line: mismatch_line,
-                        expected: exp,
-                        found: fnd,
-                        only_trailing_whitespace: only_ws,
-                    },
+                    precondition_detail(*start, &original[first..last], &anchor[..]),
                 ));
             }
         }
