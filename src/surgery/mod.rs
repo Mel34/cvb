@@ -225,6 +225,7 @@ pub(crate) enum LoadError {
     Inspect { path: String, message: String },
     SymlinkTarget(String),
     NotRegularFile(String),
+    FileTooLarge { path: String, size: u64, limit: u64 },
     Read { path: String, message: String },
     InvalidUtf8(String),
     NulByte(String),
@@ -252,6 +253,9 @@ impl std::fmt::Display for LoadError {
             }
             LoadError::NotRegularFile(path) => {
                 write!(f, "CVB: target is not a regular file: '{path}'")
+            }
+            LoadError::FileTooLarge { path, size, limit } => {
+                write!(f, "CVB: target file '{path}' is too large ({size} bytes, limit is {limit} bytes)")
             }
             LoadError::Read { path, message } => {
                 write!(f, "CVB: unable to read '{path}': {message}")

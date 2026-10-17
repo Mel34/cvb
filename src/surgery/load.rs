@@ -6,9 +6,19 @@ use super::*;
 ///
 /// Paths must be safe relative paths. Symlinks are rejected so a target cannot
 /// redirect a read outside the supplied root.
+pub(crate) const MAX_TARGET_BYTES: u64 = 16 * 1024 * 1024;
+
 pub(crate) fn load_originals(
     root: &Path,
     envelope: &Envelope,
+) -> Result<HashMap<String, String>, LoadError> {
+    load_originals_with_limit(root, envelope, MAX_TARGET_BYTES)
+}
+
+pub(crate) fn load_originals_with_limit(
+    root: &Path,
+    envelope: &Envelope,
+    max_target_bytes: u64,
 ) -> Result<HashMap<String, String>, LoadError> {
     let mut originals = HashMap::new();
 
@@ -42,6 +52,15 @@ pub(crate) fn load_originals(
         })?;
         if !metadata.is_file() {
             return Err(LoadError::NotRegularFile(current.display().to_string()));
+        }
+
+        let size = metadata.len();
+        if size > max_target_bytes {
+            return Err(LoadError::FileTooLarge {
+                path: current.display().to_string(),
+                size,
+                limit: max_target_bytes,
+            });
         }
 
         let bytes = std::fs::read(&current).map_err(|error| LoadError::Read {
@@ -257,6 +276,41 @@ mod tests {
             original,
             "rejecting a lone CR must preserve the original bytes"
         );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn load_originals_accepts_file_at_size_limit() {
+        let root = test_directory("size-limit-exact");
+        let path = root.join("exact.rs");
+        // Use a test limit constant or parameter to test without allocating 16 MiB:
+        let test_limit: u64 = 100;
+        let content = "a".repeat(test_limit as usize);
+        fs::write(&path, &content).unwrap();
+
+        let result = load_originals_with_limit(&root, &envelope("exact.rs"), test_limit);
+        assert!(result.is_ok());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn load_originals_rejects_file_over_size_limit_without_reading() {
+        let root = test_directory("size-limit-over");
+        let path = root.join("oversize.rs");
+        let test_limit: u64 = 100;
+        let content = "a".repeat((test_limit + 1) as usize);
+        fs::write(&path, &content).unwrap();
+
+        let result = load_originals_with_limit(&root, &envelope("oversize.rs"), test_limit);
+        match result {
+            Err(LoadError::FileTooLarge { path, size, limit }) => {
+                assert_eq!(size, 101);
+                assert_eq!(limit, 100);
+                assert!(path.contains("oversize.rs"));
+            }
+            other => panic!("expected FileTooLarge error, got {other:?}"),
+        }
 
         fs::remove_dir_all(root).unwrap();
     }

@@ -1,6 +1,15 @@
 use std::collections::HashSet;
 use super::*;
 
+/// GNOME's Mutter silently truncates clipboard transfers over ~4 MB.
+/// By setting `MAX_INPUT_BYTES` conservatively below this threshold (3 MiB),
+/// pastes truncated by Mutter to ~4 MB arrive above `MAX_INPUT_BYTES` and are
+/// rejected with `ParseError::Limit` (warning the user about clipboard truncation)
+/// rather than reaching the parser. Incomplete envelopes below 3 MiB are caught
+/// by the mandatory terminal `END ops=N` validation.
+pub(crate) const CLIPBOARD_TRUNCATION_BYTES: usize = 4_000_000;
+pub(crate) const MAX_INPUT_BYTES: usize = 3 * 1024 * 1024;
+
 pub(crate) fn valid_token(token: &str) -> bool {
     (8..=32).contains(&token.len()) && token.bytes().all(|b| b.is_ascii_alphanumeric())
 }
@@ -397,14 +406,23 @@ fn read_payload(
 }
 
 pub(crate) fn parse_envelope(input: &str) -> Result<Envelope, ParseFailure> {
-    const MAX_INPUT_BYTES: usize = 4 * 1024 * 1024;
     const MAX_OPERATIONS: usize = 500;
 
     if input.len() > MAX_INPUT_BYTES {
+        let note = if input.len() >= CLIPBOARD_TRUNCATION_BYTES.saturating_sub(100_000) {
+            "; input is close to or exceeds 4 MB: the clipboard may have truncated the paste; split the change into several smaller envelopes"
+        } else {
+            "; split the change into several smaller envelopes"
+        };
+
         return Err(ParseFailure {
             kind: ParseError::Limit,
             line: 1,
-            detail: Some("input exceeds maximum size".into()),
+            detail: Some(format!(
+                "input size ({} bytes) exceeds limit ({} bytes){note}",
+                input.len(),
+                MAX_INPUT_BYTES
+            )),
         });
     }
     let normalized = input.replace("\r\n", "\n");
@@ -812,17 +830,84 @@ CVB::k7Q2xw9R::END ops=2";
     }
 
     #[test]
-    fn rejects_input_over_four_mebibytes() {
-        let input = "x".repeat(4 * 1024 * 1024 + 1);
+    fn rejects_input_over_limit() {
+        let input = "x".repeat(MAX_INPUT_BYTES + 1);
         assert_eq!(kind(parse_envelope(&input)), Err(ParseError::Limit));
     }
 
     #[test]
     fn input_at_limit_passes_size_check() {
-        let mut input = "x".repeat(4 * 1024 * 1024);
+        let mut input = "x".repeat(MAX_INPUT_BYTES);
         assert_eq!(kind(parse_envelope(&input)), Err(ParseError::NoEnvelope));
         input.push('x');
         assert_eq!(kind(parse_envelope(&input)), Err(ParseError::Limit));
+    }
+
+    #[test]
+    fn limit_error_message_for_moderate_overflow_advises_splitting() {
+        let input = "x".repeat(MAX_INPUT_BYTES + 1);
+        let failure = parse_envelope(&input).unwrap_err();
+        assert_eq!(failure.kind, ParseError::Limit);
+        let message = failure.to_string();
+        assert!(message.contains(&MAX_INPUT_BYTES.to_string()), "{message}");
+        assert!(message.contains(&(MAX_INPUT_BYTES + 1).to_string()), "{message}");
+        assert!(
+            message.contains("; split the change into several smaller envelopes"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("clipboard may have truncated"),
+            "moderate overflow should not mention clipboard truncation"
+        );
+    }
+
+    #[test]
+    fn limit_error_message_near_four_megabytes_warns_about_clipboard_truncation() {
+        let input = "x".repeat(CLIPBOARD_TRUNCATION_BYTES);
+        let failure = parse_envelope(&input).unwrap_err();
+        assert_eq!(failure.kind, ParseError::Limit);
+        let message = failure.to_string();
+        assert!(
+            message.contains("clipboard may have truncated the paste"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn truncation_never_parses_as_success() {
+        let envelope = concat!(
+            "CVB::k7Q2xw9R::BEGIN v=1 id=truncation-test\n",
+            "CVB::k7Q2xw9R::FILE path=first.rs\n",
+            "CVB::k7Q2xw9R::OP replace lines=1-1\n",
+            "CVB::k7Q2xw9R::OLD n=1\n",
+            "first\n",
+            "CVB::k7Q2xw9R::NEW n=1\n",
+            "new first\n",
+            "CVB::k7Q2xw9R::ENDOP\n",
+            "CVB::k7Q2xw9R::OP insert after=1-1\n",
+            "CVB::k7Q2xw9R::ANCHOR n=1\n",
+            "first\n",
+            "CVB::k7Q2xw9R::NEW n=1\n",
+            "inserted\n",
+            "CVB::k7Q2xw9R::ENDOP\n",
+            "CVB::k7Q2xw9R::FILE path=second.rs\n",
+            "CVB::k7Q2xw9R::OP delete lines=1-1\n",
+            "CVB::k7Q2xw9R::OLD n=1\n",
+            "second\n",
+            "CVB::k7Q2xw9R::ENDOP\n",
+            "CVB::k7Q2xw9R::END ops=3",
+        );
+
+        for cut in 0..envelope.len() {
+            let prefix = &envelope[..cut];
+            let result = parse_envelope(prefix);
+            assert!(
+                result.is_err(),
+                "prefix up to byte {cut} must not parse successfully: {prefix:?}"
+            );
+        }
+
+        assert!(parse_envelope(envelope).is_ok());
     }
 
     #[test]
