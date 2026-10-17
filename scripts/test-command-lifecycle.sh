@@ -30,6 +30,7 @@ import time
 control_script, work = sys.argv[1:]
 start_marker = b"\x1b]777;CVB;START\x07"
 end_marker = b"\x1b]777;CVB;END\x07"
+skip_marker = b"\x1b]777;CVB;SKIP\x07"
 
 passed = 0
 failed = 0
@@ -111,6 +112,10 @@ try:
     open(history_file, "wb").close()
     open(parent_history, "wb").close()
 
+    skip_file = os.path.join(work, "skip")
+    with open(skip_file, "w", encoding="utf-8") as skip:
+        skip.write("# Commands that may be skipped\n\ncd\n  pushd   # trailing comment\n")
+
     rcfile = os.path.join(work, "test.rc")
     with open(rcfile, "w", encoding="utf-8") as rc:
         rc.write("set +o history\n")
@@ -125,6 +130,7 @@ try:
         os.environ["HISTFILE"] = history_file
         os.environ["CVB_HISTORY_FILE"] = history_file
         os.environ["CVB_PARENT_HISTORY_FILE"] = parent_history
+        os.environ["CVB_SKIP_FILE"] = skip_file
         os.environ["TERM"] = "xterm"
         os.environ["PS1"] = "PROMPT> "
         os.execvp(
@@ -222,6 +228,51 @@ CVB_TEST_EOF""",
         "printf 'ADJACENT_SECOND\\n'",
         b"ADJACENT_SECOND",
     )
+
+    # 9. Skip list: the SKIP marker is emitted only when every top-level
+    #    command of the line is listed. Whether the capture is dropped is
+    #    decided by CVB from the output, so errors still carry the marker here.
+    def run_skip(name, command, expect_skip, expected=None):
+        try:
+            os.write(master, command.encode() + b"\n")
+            read_until(start_marker)
+            output = read_until(end_marker)
+            has_skip = skip_marker in output
+            ok = has_skip == expect_skip and (expected is None or expected in output)
+            check(name, ok, output)
+        except Exception as error:
+            check(name, False, str(error))
+            raise
+
+    run_skip("skip: listed command", "cd /", True)
+    run_skip("skip: listed command with argument and quotes", "cd '/'", True)
+    run_skip("skip: error output still reaches the capture", "cd /cvb-no-such-dir", True, b"No such file")
+    run_skip("skip: unlisted command", "printf 'UNLISTED\\n'", False, b"UNLISTED")
+    run_skip("skip: empty unlisted command", ":", False)
+    run_skip("skip: silent failure of unlisted command", "false", False)
+    run_skip("skip: all commands of a list are listed", "cd /; cd /tmp", True)
+    run_skip("skip: && chain of listed commands", "cd / && cd /tmp", True)
+    run_skip("skip: listed then unlisted", "cd / && printf 'MIXED\\n'", False, b"MIXED")
+    run_skip("skip: unlisted then listed", "printf 'MIXED2\\n'; cd /", False, b"MIXED2")
+    run_skip("skip: comment and spacing in skip file", "pushd / >/dev/null", True)
+    run_skip("skip: unlisted name is not skipped", "popd >/dev/null", False)
+    run_skip("skip: compound command is not listed", "if true; then cd /; fi", False)
+    run_skip("skip: command inside a function is not recorded", "cvb_test_function", False, b"FUNCTION_BLOCK_OK")
+
+    # The list is re-read on every command, so edits apply immediately.
+    with open(skip_file, "w", encoding="utf-8") as skip:
+        skip.write("popd\n")
+    run_skip("skip: removed entry is no longer skipped", "cd /", False)
+    run_skip("skip: added entry is skipped", "popd 2>/dev/null; popd 2>/dev/null", True)
+
+    os.unlink(skip_file)
+    run_skip("skip: missing skip file skips nothing", "popd 2>/dev/null", False)
+
+    # A skipped line must not leak into the next command's decision.
+    with open(skip_file, "w", encoding="utf-8") as skip:
+        skip.write("cd\n")
+    run_skip("skip: skipped line does not leak into the next command", "cd /", True)
+    run_skip("skip: next command starts clean", "printf 'CLEAN\\n'", False, b"CLEAN")
 
 except Exception as error:
     print(f"FAIL: test runner stopped: {error}", file=sys.stderr, flush=True)

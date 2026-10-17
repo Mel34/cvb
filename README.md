@@ -260,6 +260,26 @@ When a captured command produces no visible terminal output, CVB copies:
 [NO_VISIBLE_OUTPUT]
 ```
 
+### Skip list
+
+Some commands, such as `cd`, normally print nothing. Capturing `[NO_VISIBLE_OUTPUT]` for them would replace useful clipboard contents. Commands listed in the skip list leave the clipboard untouched when they produce no visible output.
+
+CVB creates `~/.config/cvb/skip` when a resident session starts. If `XDG_CONFIG_HOME` is set, the file is instead located at `$XDG_CONFIG_HOME/cvb/skip`.
+
+The file contains one command name per line. Blank lines and text after `#` are ignored. The initial file lists `cd`.
+
+With `cd` listed:
+
+```text
+cd existing-directory      clipboard unchanged
+cd /nonexistent            clipboard: bash: cd: /nonexistent: No such file or directory
+cd existing && ls          clipboard: output of ls
+```
+
+A command line is skipped only when every top-level command in it is listed (matched by its first word) and the line produced no visible output. Any output, including error messages, is captured as usual. Commands inside functions or compound commands such as `if` are not matched; those lines are captured normally.
+
+The file is read on every command, so edits take effect immediately in running sessions. Screen captures are not affected.
+
 Screen captures copy the textual contents of the currently visible terminal screen.
 
 ## CLI

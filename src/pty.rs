@@ -26,6 +26,13 @@ ioctl_write_ptr_bad!(tiocswinsz, libc::TIOCSWINSZ, Winsize);
 const CONTROL_FD: i32 = 3;
 const NO_OUTPUT: &str = "[NO_VISIBLE_OUTPUT]";
 
+const DEFAULT_SKIP_LIST: &str = "\
+# Commands listed here (one name per line) do not replace the clipboard when
+# they produce no visible output. Output, including errors, is still captured.
+# Blank lines and lines starting with # are ignored.
+cd
+";
+
 static DEBUG_LOG_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static DEBUG_LOG_START: OnceLock<Instant> = OnceLock::new();
 
@@ -55,6 +62,7 @@ enum MarkerEvent {
     Data(Vec<u8>),
     Start,
     Pathop,
+    Skip,
     End(i32),
 }
 
@@ -62,6 +70,7 @@ struct MarkerScanner {
     start: Vec<u8>,
     end: Vec<u8>,
     pathop: Vec<u8>,
+    skip: Vec<u8>,
     pending: Vec<u8>,
 }
 
@@ -189,6 +198,22 @@ impl Transcript {
     }
 }
 
+fn render_terminal_segment(bytes: &[u8], rows: u16, cols: u16) -> String {
+    let mut renderer = vt100::Parser::new(rows, cols, bytes.len());
+    renderer.process(bytes);
+
+    screen_to_text(&mut renderer)
+}
+
+/// True when rendering the transcript would yield only `[NO_VISIBLE_OUTPUT]`:
+/// no literal (file bridge) content and no terminal segment with visible text.
+fn transcript_is_visibly_empty(transcript: &Transcript, rows: u16, cols: u16) -> bool {
+    transcript.segments.iter().all(|segment| match segment {
+        TranscriptSegment::Terminal(bytes) => render_terminal_segment(bytes, rows, cols).is_empty(),
+        TranscriptSegment::Literal(_) => false,
+    })
+}
+
 fn render_transcript(transcript: &Transcript, rows: u16, cols: u16) -> Vec<u8> {
     if transcript.segments.is_empty() {
         return NO_OUTPUT.as_bytes().to_vec();
@@ -201,10 +226,7 @@ fn render_transcript(transcript: &Transcript, rows: u16, cols: u16) -> Vec<u8> {
             TranscriptSegment::Terminal(bytes) => {
                 output.extend_from_slice(b"[Terminal output]\n--------\n");
 
-                let mut renderer = vt100::Parser::new(rows, cols, bytes.len());
-                renderer.process(bytes);
-
-                let text = screen_to_text(&mut renderer);
+                let text = render_terminal_segment(bytes, rows, cols);
                 let processed = if text.is_empty() {
                     NO_OUTPUT.to_string()
                 } else {
@@ -228,7 +250,7 @@ fn render_transcript(transcript: &Transcript, rows: u16, cols: u16) -> Vec<u8> {
 
 #[cfg(test)]
 mod transcript_tests {
-    use super::{Transcript, TranscriptSegment, render_transcript};
+    use super::{Transcript, TranscriptSegment, render_transcript, transcript_is_visibly_empty};
 
     #[test]
     fn renders_terminal_and_preserves_literal_bytes_in_order() {
@@ -244,6 +266,38 @@ mod transcript_tests {
             rendered,
             b"[Terminal output]\n--------\nRED\n[file.txt]\n--------\n\x1b[31mRAW\x1b[0m\n[Terminal output]\n--------\nNEXT\n"
         );
+    }
+
+    #[test]
+    fn empty_transcript_is_visibly_empty() {
+        assert!(transcript_is_visibly_empty(&Transcript::default(), 24, 80));
+    }
+
+    #[test]
+    fn terminal_segment_without_text_is_visibly_empty() {
+        let mut transcript = Transcript::default();
+
+        transcript.push_terminal(b"\x1b[0m\r\n\r\n");
+
+        assert!(transcript_is_visibly_empty(&transcript, 24, 80));
+    }
+
+    #[test]
+    fn terminal_text_is_not_visibly_empty() {
+        let mut transcript = Transcript::default();
+
+        transcript.push_terminal(b"bash: cd: /nope: No such file or directory\r\n");
+
+        assert!(!transcript_is_visibly_empty(&transcript, 24, 80));
+    }
+
+    #[test]
+    fn literal_segment_is_not_visibly_empty() {
+        let mut transcript = Transcript::default();
+
+        transcript.push_literal(b"[file.txt]\n--------\n");
+
+        assert!(!transcript_is_visibly_empty(&transcript, 24, 80));
     }
 
     #[test]
@@ -304,6 +358,7 @@ impl MarkerScanner {
             start: b"\x1b]777;CVB;START\x07".to_vec(),
             end: b"\x1b]777;CVB;END\x07".to_vec(),
             pathop: b"\x1b]777;CVB;PATHOP\x07".to_vec(),
+            skip: b"\x1b]777;CVB;SKIP\x07".to_vec(),
             pending: Vec::new(),
         }
     }
@@ -330,6 +385,11 @@ impl MarkerScanner {
                     self.pathop.len(),
                     MarkerEvent::Pathop,
                 ),
+                (
+                    find_subslice(&self.pending, &self.skip),
+                    self.skip.len(),
+                    MarkerEvent::Skip,
+                ),
             ]
             .into_iter()
             .filter_map(|(position, length, event)| {
@@ -355,6 +415,7 @@ impl MarkerScanner {
                 .len()
                 .max(self.end.len())
                 .max(self.pathop.len())
+                .max(self.skip.len())
                 .saturating_sub(1);
 
             if self.pending.len() > keep {
@@ -402,6 +463,28 @@ mod marker_scanner_tests {
                 MarkerEvent::End(0),
             ]
         );
+    }
+
+    #[test]
+    fn recognizes_skip_marker_before_end() {
+        let mut scanner = MarkerScanner::new();
+
+        let events = scanner
+            .process(b"\x1b]777;CVB;START\x07\x1b]777;CVB;SKIP\x07\x1b]777;CVB;END\x07");
+
+        assert_eq!(
+            events,
+            vec![MarkerEvent::Start, MarkerEvent::Skip, MarkerEvent::End(0)]
+        );
+    }
+
+    #[test]
+    fn recognizes_skip_marker_split_across_reads() {
+        let marker = b"\x1b]777;CVB;SKIP\x07";
+        let mut scanner = MarkerScanner::new();
+
+        assert_eq!(scanner.process(&marker[..10]), Vec::<MarkerEvent>::new());
+        assert_eq!(scanner.process(&marker[10..]), vec![MarkerEvent::Skip]);
     }
 
     #[test]
@@ -463,6 +546,58 @@ mod marker_scanner_tests {
     }
 }
 
+#[cfg(test)]
+mod skip_file_tests {
+    use super::{DEFAULT_SKIP_LIST, ensure_skip_file, skip_file_path};
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    #[test]
+    fn prefers_xdg_config_home() {
+        assert_eq!(
+            skip_file_path(Some("/x/config".into()), Some("/home/u".into())),
+            Some(PathBuf::from("/x/config/cvb/skip"))
+        );
+    }
+
+    #[test]
+    fn falls_back_to_home_dot_config() {
+        assert_eq!(
+            skip_file_path(None, Some("/home/u".into())),
+            Some(PathBuf::from("/home/u/.config/cvb/skip"))
+        );
+    }
+
+    #[test]
+    fn empty_xdg_config_home_counts_as_unset() {
+        assert_eq!(
+            skip_file_path(Some(OsString::new()), Some("/home/u".into())),
+            Some(PathBuf::from("/home/u/.config/cvb/skip"))
+        );
+    }
+
+    #[test]
+    fn no_location_without_xdg_or_home() {
+        assert_eq!(skip_file_path(None, None), None);
+    }
+
+    #[test]
+    fn creates_default_file_once_and_keeps_user_edits() {
+        let dir = std::env::temp_dir().join(format!("cvb-skip-test-{}", std::process::id()));
+        let path = dir.join("cvb").join("skip");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        ensure_skip_file(&path);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), DEFAULT_SKIP_LIST);
+
+        std::fs::write(&path, "pushd\n").unwrap();
+        ensure_skip_file(&path);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "pushd\n");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() {
         return Some(0);
@@ -520,6 +655,11 @@ fn run_pty(rcfile: &Path) -> Result<i32, String> {
 
     let winsize = terminal_size()?;
 
+    let skip_file = skip_file_path(std::env::var_os("XDG_CONFIG_HOME"), std::env::var_os("HOME"));
+    if let Some(path) = &skip_file {
+        ensure_skip_file(path);
+    }
+
     let result = unsafe { forkpty(Some(&winsize), None) }
         .map_err(|error| format!("CVB: unable to create PTY: {error}"))?;
 
@@ -539,6 +679,14 @@ fn run_pty(rcfile: &Path) -> Result<i32, String> {
             if let Err(error) = install_control_fd(control_child) {
                 eprintln!("{error}");
                 std::process::exit(127);
+            }
+
+            // Tell the Bash integration where the skip list lives. Left unset
+            // when no config directory can be determined.
+            match &skip_file {
+                // Safe: the forked child is single-threaded here.
+                Some(path) => unsafe { std::env::set_var("CVB_SKIP_FILE", path) },
+                None => unsafe { std::env::remove_var("CVB_SKIP_FILE") },
             }
 
             unsafe {
@@ -618,6 +766,39 @@ fn run_pty(rcfile: &Path) -> Result<i32, String> {
 
             Ok(status_to_code(status))
         }
+    }
+}
+
+/// Location of the skip list: `$XDG_CONFIG_HOME/cvb/skip`, falling back to
+/// `~/.config/cvb/skip`. An empty `XDG_CONFIG_HOME` counts as unset.
+fn skip_file_path(
+    xdg_config_home: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Option<std::path::PathBuf> {
+    let config_dir = xdg_config_home
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| home.map(|home| std::path::PathBuf::from(home).join(".config")))?;
+
+    Some(config_dir.join("cvb").join("skip"))
+}
+
+/// Create the skip list with defaults on first use. Failure is not fatal:
+/// without the file nothing is skipped.
+fn ensure_skip_file(path: &Path) {
+    if path.exists() {
+        return;
+    }
+
+    if let Some(parent) = path.parent() {
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            eprintln!("CVB: unable to create config directory {}: {error}", parent.display());
+            return;
+        }
+    }
+
+    if let Err(error) = std::fs::write(path, DEFAULT_SKIP_LIST) {
+        eprintln!("CVB: unable to create skip list {}: {error}", path.display());
     }
 }
 
@@ -701,6 +882,9 @@ fn proxy(
     let mut marker_scanner = MarkerScanner::new();
     let mut transcript = Transcript::default();
     let mut capture = CaptureState::default();
+    // Set by the SKIP marker: the finished command line consisted only of
+    // commands from the skip list. Consumed by the next END marker.
+    let mut skip_requested = false;
     debug_log("proxy_start", &format!("pid={}", std::process::id()));
 
     loop {
@@ -836,8 +1020,15 @@ fn proxy(
                         );
                     }
 
+                    MarkerEvent::Skip => {
+                        skip_requested = capture.capturing;
+
+                        debug_log("marker_skip", &format!("skip_requested={skip_requested}"));
+                    }
+
                     MarkerEvent::Start => {
                         let capturing_before = capture.capturing;
+                        skip_requested = false;
                         capture.start();
 
                         debug_log(
@@ -851,6 +1042,7 @@ fn proxy(
 
                     MarkerEvent::End(_status) => {
                         let capturing_before = capture.capturing;
+                        let skip_listed = std::mem::take(&mut skip_requested);
 
                         if !capture.capturing {
                             debug_log(
@@ -864,6 +1056,16 @@ fn proxy(
                         }
 
                         let _captured = capture.end();
+
+                        // A skip-listed command line with no visible output
+                        // leaves the clipboard untouched. Any output, such as
+                        // an error message, is captured as usual.
+                        if skip_listed && transcript_is_visibly_empty(&transcript, rows, cols) {
+                            debug_log("capture_skipped", "reason=skip_listed_no_output");
+                            transcript = Transcript::default();
+                            continue;
+                        }
+
                         let rendered = render_transcript(&transcript, rows, cols);
                         let captured_bytes = rendered.len();
                         let buffer = crate::clipboard::ClipboardBuffer::new(rendered);

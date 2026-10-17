@@ -202,7 +202,28 @@ for Wayland clipboard integration.
 When a captured command produces no visible terminal output, CVB copies the marker
 .BR "[NO_VISIBLE_OUTPUT]" .
 .PP
+Commands listed in the skip list are an exception: when they produce no visible output the clipboard is left unchanged.
+Output, including error messages, is captured as usual.
+.PP
 Screen captures copy the textual contents of the currently visible terminal screen.
+.SH SKIP LIST
+CVB creates
+.I ~/.config/cvb/skip
+when a resident session starts. If
+.B XDG_CONFIG_HOME
+is set, the file is instead located at
+.IR $XDG_CONFIG_HOME/cvb/skip .
+.PP
+The file contains one command name per line. Blank lines and text after
+.B #
+are ignored. The initial file lists
+.BR cd .
+.PP
+A command line is skipped only when every top-level command in it is listed, matched by its first word, and the line produced no visible output.
+Commands inside functions and compound commands such as
+.B if
+are not matched.
+The file is read on every command, so changes apply immediately. Screen captures are not affected.
 .SH TARGET RESOLUTION
 Existing filesystem paths take precedence over external commands.
 .PP

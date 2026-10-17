@@ -770,6 +770,70 @@ fi""",
                 (b"PTY_AFTER_FAILURE_OK",),
             )
 
+            # Skip list: CVB creates it on first start with `cd` listed.
+            skip_file = cvb_config / "skip"
+            check(
+                "skip list is created with cd listed",
+                skip_file.is_file()
+                and "cd" in skip_file.read_text().splitlines(),
+                skip_file.read_text() if skip_file.is_file() else "missing",
+            )
+
+            run_command(
+                "skip setup leaves a unique prior capture",
+                "printf 'PTY_SKIP_PREVIOUS\\n'",
+                clipboard_dir,
+                (b"PTY_SKIP_PREVIOUS",),
+            )
+            skip_before = len(clipboard_files(clipboard_dir))
+            os.write(master, b"cd /\n")
+            # A skipped command adds no capture, so the next capture is the
+            # one at the same index; it must belong to the next command.
+            run_command(
+                "listed silent command does not touch the clipboard",
+                "printf 'PTY_SKIP_NEXT\\n'",
+                clipboard_dir,
+                (b"PTY_SKIP_NEXT",),
+                (b"[NO_VISIBLE_OUTPUT]",),
+            )
+            check(
+                "listed silent command adds no capture",
+                len(clipboard_files(clipboard_dir)) == skip_before + 1,
+                len(clipboard_files(clipboard_dir)) - skip_before,
+            )
+
+            run_command(
+                "listed command that fails captures its error",
+                "cd /cvb-no-such-directory",
+                clipboard_dir,
+                (b"No such file or directory",),
+                (b"[NO_VISIBLE_OUTPUT]",),
+            )
+
+            run_command(
+                "listed command followed by unlisted command is captured",
+                "cd / && printf 'PTY_SKIP_MIXED\\n'",
+                clipboard_dir,
+                (b"PTY_SKIP_MIXED",),
+            )
+
+            run_command(
+                "unlisted silent command still captures the marker",
+                "true",
+                clipboard_dir,
+                (b"[NO_VISIBLE_OUTPUT]",),
+            )
+
+            # Edits to the skip list apply to the running session.
+            skip_file.write_text("# nothing skipped\n")
+            run_command(
+                "removed entry is captured again",
+                "cd /",
+                clipboard_dir,
+                (b"[NO_VISIBLE_OUTPUT]",),
+            )
+            skip_file.write_text("cd\n")
+
             fixture = work / "bridge-fixture.txt"
             fixture.write_bytes(b"PTY_FILE_BRIDGE_OK\n")
             run_command(
