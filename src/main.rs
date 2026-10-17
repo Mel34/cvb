@@ -12,7 +12,7 @@ mod pty;
 mod pull;
 mod shell;
 mod sound;
-///mod surgery;
+mod surgery;
 
 const DEFAULT_IGNORE_LIST: &str = "\
 # This file contains directory names that CVB excludes from directory inventories.

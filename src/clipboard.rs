@@ -204,16 +204,212 @@ where
     copy_sequence(&chunks)
 }
 
+const ESCAPE_SEQUENCE_TIMEOUT_MS: u16 = 50;
+const PROGRESS_BAR_MAX_CELLS: usize = 30;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChunkKey {
+    /// Space: next part; finishes after the last part.
+    Space,
+    Left,
+    Right,
+    Cancel,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChunkMove {
+    To(usize),
+    Done,
+    Cancel,
+    Ignore,
+}
+
+fn navigate(index: usize, total: usize, key: ChunkKey) -> ChunkMove {
+    let has_next = index + 1 < total;
+
+    match key {
+        ChunkKey::Space if has_next => ChunkMove::To(index + 1),
+        ChunkKey::Space => ChunkMove::Done,
+        ChunkKey::Right if has_next => ChunkMove::To(index + 1),
+        ChunkKey::Right => ChunkMove::Ignore,
+        ChunkKey::Left => ChunkMove::To(index.saturating_sub(1)),
+        ChunkKey::Cancel => ChunkMove::Cancel,
+        ChunkKey::Other => ChunkMove::Ignore,
+    }
+}
+
+/// Decodes one key press. `first` is the byte already read; `next` supplies
+/// follow-up bytes of an escape sequence and returns `None` when none arrive
+/// in time (so a lone Escape is distinguishable from an arrow key).
+fn decode_chunk_key(first: u8, mut next: impl FnMut() -> Option<u8>) -> ChunkKey {
+    match first {
+        b' ' => ChunkKey::Space,
+        b'q' | b'Q' | 0x03 => ChunkKey::Cancel,
+        0x1b => match next() {
+            Some(b'[') => decode_csi(&mut next),
+            Some(b'O') => match next() {
+                Some(b'C') => ChunkKey::Right,
+                Some(b'D') => ChunkKey::Left,
+                _ => ChunkKey::Other,
+            },
+            _ => ChunkKey::Other,
+        },
+        _ => ChunkKey::Other,
+    }
+}
+
+fn decode_csi(next: &mut impl FnMut() -> Option<u8>) -> ChunkKey {
+    // Parameter and intermediate bytes (0x20..=0x3f) precede the final byte
+    // (0x40..=0x7e). Consume the whole sequence so modified or unrelated keys
+    // (Ctrl+Right, Up, Delete, ...) never leak their tail bytes as key presses.
+    let mut parameters = 0;
+
+    loop {
+        match next() {
+            Some(b'C') if parameters == 0 => return ChunkKey::Right,
+            Some(b'D') if parameters == 0 => return ChunkKey::Left,
+            Some(0x20..=0x3f) if parameters < 16 => parameters += 1,
+            _ => return ChunkKey::Other,
+        }
+    }
+}
+
+fn progress_bar(index: usize, total: usize) -> String {
+    let cells = total.clamp(1, PROGRESS_BAR_MAX_CELLS);
+    let current = if total <= PROGRESS_BAR_MAX_CELLS {
+        index
+    } else {
+        index * cells / total
+    };
+
+    (0..cells)
+        .map(|cell| match cell.cmp(&current) {
+            std::cmp::Ordering::Less => '=',
+            std::cmp::Ordering::Equal => 'O',
+            std::cmp::Ordering::Greater => '-',
+        })
+        .collect()
+}
+
+fn chunk_status_line(index: usize, total: usize) -> String {
+    let bar = progress_bar(index, total);
+    let number = index + 1;
+
+    if number == total {
+        format!("[{bar}]({number}/{total}) \u{2190} back, Space/q done")
+    } else {
+        format!("[{bar}]({number}/{total}) \u{2190}/\u{2192} Space next, q cancel")
+    }
+}
+
+fn read_stdin_byte() -> Result<u8, String> {
+    use std::os::fd::{FromRawFd, RawFd};
+
+    // Read fd 0 directly: std's buffered Stdin could swallow the tail of an
+    // escape sequence, which would then be invisible to the poll() timeout.
+    let mut stdin = std::mem::ManuallyDrop::new(unsafe { fs::File::from_raw_fd(0 as RawFd) });
+    let mut byte = [0u8; 1];
+
+    loop {
+        match stdin.read(&mut byte) {
+            Ok(1) => return Ok(byte[0]),
+            Ok(_) => {
+                return Err("CVB: unable to read chunk control key: end of input".to_string());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => {
+                return Err(format!("CVB: unable to read chunk control key: {error}"));
+            }
+        }
+    }
+}
+
+fn read_stdin_byte_within(timeout_ms: u16) -> Option<u8> {
+    use std::os::fd::AsFd;
+
+    let stdin = std::io::stdin();
+    let mut fds = [nix::poll::PollFd::new(
+        stdin.as_fd(),
+        nix::poll::PollFlags::POLLIN,
+    )];
+
+    match nix::poll::poll(&mut fds, timeout_ms) {
+        Ok(ready) if ready > 0 => read_stdin_byte().ok(),
+        _ => None,
+    }
+}
+
+/// Switches a cooked terminal to unbuffered, no-echo input for the duration
+/// of the chunk sequence, and restores it on drop. When CVB runs inside its
+/// own raw-mode pty wrapper the terminal is already non-canonical, so nothing
+/// is changed. ISIG is cleared so Ctrl+C arrives as a key and the terminal is
+/// always restored by `Drop` rather than left half-configured by a signal.
+struct ChunkKeyTerminal {
+    fd: std::os::fd::OwnedFd,
+    original: nix::sys::termios::Termios,
+}
+
+impl ChunkKeyTerminal {
+    fn enter_on(fd: std::os::fd::BorrowedFd<'_>) -> Option<Self> {
+        use nix::sys::termios::{self, LocalFlags, SetArg, SpecialCharacterIndices};
+
+        let original = termios::tcgetattr(fd).ok()?;
+
+        if !original.local_flags.contains(LocalFlags::ICANON) {
+            return None;
+        }
+
+        let mut unbuffered = original.clone();
+        unbuffered
+            .local_flags
+            .remove(LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::ISIG);
+        unbuffered.control_chars[SpecialCharacterIndices::VMIN as usize] = 1;
+        unbuffered.control_chars[SpecialCharacterIndices::VTIME as usize] = 0;
+
+        let owned = fd.try_clone_to_owned().ok()?;
+        // TCSAFLUSH drops anything typed before the prompt appeared, such as
+        // the Enter that launched the command.
+        termios::tcsetattr(fd, SetArg::TCSAFLUSH, &unbuffered).ok()?;
+
+        Some(Self {
+            fd: owned,
+            original,
+        })
+    }
+}
+
+impl Drop for ChunkKeyTerminal {
+    fn drop(&mut self) {
+        use std::os::fd::AsFd;
+
+        let _ = nix::sys::termios::tcsetattr(
+            self.fd.as_fd(),
+            nix::sys::termios::SetArg::TCSANOW,
+            &self.original,
+        );
+    }
+}
+
 fn copy_chunk_sequence(chunks: &[String]) -> Result<(), String> {
-    let mut stdin = std::io::stdin();
+    use std::os::fd::AsFd;
+
+    let stdin = std::io::stdin();
+    let _terminal = ChunkKeyTerminal::enter_on(stdin.as_fd());
 
     copy_chunk_sequence_with(chunks, copy_to_clipboard, || {
-        let mut key = [0u8; 1];
-        stdin
-            .read_exact(&mut key)
-            .map_err(|error| format!("CVB: unable to read chunk control key: {error}"))?;
-        Ok(key[0])
+        let first = read_stdin_byte()?;
+        Ok(decode_chunk_key(first, || {
+            read_stdin_byte_within(ESCAPE_SEQUENCE_TIMEOUT_MS)
+        }))
     })
+}
+
+fn clear_chunk_status() -> Result<(), String> {
+    eprint!("\r\x1b[2K");
+    std::io::stderr()
+        .flush()
+        .map_err(|error| format!("CVB: unable to clear chunk status: {error}"))
 }
 
 fn copy_chunk_sequence_with<C, R>(
@@ -223,47 +419,36 @@ fn copy_chunk_sequence_with<C, R>(
 ) -> Result<(), String>
 where
     C: FnMut(&ClipboardBuffer) -> Result<(), String>,
-    R: FnMut() -> Result<u8, String>,
+    R: FnMut() -> Result<ChunkKey, String>,
 {
     let total = chunks.len();
+    let mut index = 0;
 
-    for (index, chunk) in chunks.iter().enumerate() {
-        let number = index + 1;
-        let buffer = ClipboardBuffer::new(chunk.as_bytes().to_vec());
-        copy(&buffer)?;
+    if total == 0 {
+        return Ok(());
+    }
 
-        if number == total {
-            eprint!("\r\x1b[2K");
-            std::io::stderr()
-                .flush()
-                .map_err(|error| format!("CVB: unable to clear final chunk status: {error}"))?;
-            break;
-        }
+    loop {
+        copy(&ClipboardBuffer::new(chunks[index].as_bytes().to_vec()))?;
 
-        eprint!(
-            "\r\x1b[2KPart {number}/{total} is available in clipboard. \
-Press Space for next part; q or Ctrl+C to cancel."
-        );
+        eprint!("\r\x1b[2K{}", chunk_status_line(index, total));
         std::io::stderr()
             .flush()
             .map_err(|error| format!("CVB: unable to update chunk status: {error}"))?;
 
-        loop {
-            match read_key()? {
-                b' ' => break,
-                b'q' | b'Q' | 0x03 => {
-                    eprint!("\r\x1b[2K");
-                    std::io::stderr().flush().map_err(|error| {
-                        format!("CVB: unable to clear cancelled chunk status: {error}")
-                    })?;
-                    return Ok(());
-                }
-                _ => {}
+        let movement = loop {
+            match navigate(index, total, read_key()?) {
+                ChunkMove::Ignore => {}
+                other => break other,
             }
+        };
+
+        match movement {
+            ChunkMove::To(target) => index = target,
+            ChunkMove::Done | ChunkMove::Cancel => return clear_chunk_status(),
+            ChunkMove::Ignore => unreachable!("ignored keys are consumed above"),
         }
     }
-
-    Ok(())
 }
 
 impl ClipboardBuffer {
@@ -473,7 +658,7 @@ mod tests {
         let chunks = super::chunk_messages(&input, 300).unwrap();
         let expected_chunks = chunks.clone();
         let mut copied = Vec::<Vec<u8>>::new();
-        let mut keys = vec![b' '; chunks.len().saturating_sub(1)].into_iter();
+        let mut keys = vec![super::ChunkKey::Space; chunks.len()].into_iter();
 
         super::copy_chunk_sequence_with(
             &chunks,
@@ -484,7 +669,7 @@ mod tests {
             || {
                 Ok(keys
                     .next()
-                    .expect("a key should advance each non-final part"))
+                    .expect("a key should advance each part and finish the last"))
             },
         )
         .unwrap();
@@ -515,7 +700,9 @@ mod tests {
 
     #[test]
     fn chunk_sequence_cancellation_stops_after_current_part() {
-        for cancel_key in [b'q', b'Q', 0x03] {
+        for raw_key in [b'q', b'Q', 0x03] {
+            let cancel_key = super::decode_chunk_key(raw_key, || None);
+            assert_eq!(cancel_key, super::ChunkKey::Cancel);
             let chunks = vec![
                 "first framed chunk".to_string(),
                 "second framed chunk".to_string(),
@@ -549,7 +736,9 @@ mod tests {
             "third framed chunk".to_string(),
         ];
         let mut copied = Vec::<Vec<u8>>::new();
-        let mut keys = [b'x', b'\n', b' ', b'!', b' '].into_iter().map(|key| key);
+        let mut keys = [b'x', b'\n', b' ', b'!', b' ', b' ']
+            .into_iter()
+            .map(|key| super::decode_chunk_key(key, || None));
 
         super::copy_chunk_sequence_with(
             &chunks,
@@ -589,6 +778,168 @@ mod tests {
 
         assert_eq!(result.unwrap_err(), "simulated key read failure");
         assert_eq!(copy_attempts, 1);
+    }
+
+    fn key_from(bytes: &[u8]) -> super::ChunkKey {
+        let mut rest = bytes[1..].iter().copied();
+        super::decode_chunk_key(bytes[0], || rest.next())
+    }
+
+    #[test]
+    fn decoder_recognizes_arrow_keys_in_both_cursor_modes() {
+        assert_eq!(key_from(b"\x1b[C"), super::ChunkKey::Right);
+        assert_eq!(key_from(b"\x1b[D"), super::ChunkKey::Left);
+        assert_eq!(key_from(b"\x1bOC"), super::ChunkKey::Right);
+        assert_eq!(key_from(b"\x1bOD"), super::ChunkKey::Left);
+        assert_eq!(key_from(b" "), super::ChunkKey::Space);
+    }
+
+    #[test]
+    fn decoder_treats_lone_escape_and_other_sequences_as_other() {
+        assert_eq!(key_from(b"\x1b"), super::ChunkKey::Other);
+        assert_eq!(key_from(b"\x1b[A"), super::ChunkKey::Other);
+        assert_eq!(key_from(b"\x1b[B"), super::ChunkKey::Other);
+        assert_eq!(key_from(b"\x1b[1;5C"), super::ChunkKey::Other);
+        assert_eq!(key_from(b"\x1b[3~"), super::ChunkKey::Other);
+    }
+
+    #[test]
+    fn decoder_consumes_whole_unrecognized_sequences() {
+        // Ctrl+Right is ESC [ 1 ; 5 C; the trailing bytes must not remain.
+        let bytes = b"\x1b[1;5C q";
+        let mut rest = bytes[1..].iter().copied();
+        let key = super::decode_chunk_key(bytes[0], || rest.next());
+        assert_eq!(key, super::ChunkKey::Other);
+        assert_eq!(rest.collect::<Vec<_>>(), b" q");
+    }
+
+    #[test]
+    fn navigate_moves_within_bounds() {
+        use super::{ChunkKey as K, ChunkMove as M, navigate};
+
+        assert_eq!(navigate(0, 4, K::Space), M::To(1));
+        assert_eq!(navigate(0, 4, K::Right), M::To(1));
+        assert_eq!(navigate(2, 4, K::Left), M::To(1));
+        assert_eq!(
+            navigate(0, 4, K::Left),
+            M::To(0),
+            "left on first part re-copies it"
+        );
+        assert_eq!(
+            navigate(3, 4, K::Right),
+            M::Ignore,
+            "right clamps on the last part"
+        );
+        assert_eq!(
+            navigate(3, 4, K::Space),
+            M::Done,
+            "space finishes on the last part"
+        );
+        assert_eq!(navigate(1, 4, K::Cancel), M::Cancel);
+        assert_eq!(navigate(1, 4, K::Other), M::Ignore);
+    }
+
+    #[test]
+    fn chunk_sequence_left_recopies_previous_part_after_accidental_space() {
+        let chunks = vec![
+            "first framed chunk".to_string(),
+            "second framed chunk".to_string(),
+            "third framed chunk".to_string(),
+        ];
+        let mut copied = Vec::<Vec<u8>>::new();
+        let mut keys = [
+            super::ChunkKey::Space, // -> part 2
+            super::ChunkKey::Space, // -> part 3 (user did not paste part 2)
+            super::ChunkKey::Left,  // -> part 2 again
+            super::ChunkKey::Right, // -> part 3 again
+            super::ChunkKey::Right, // clamped, ignored
+            super::ChunkKey::Space, // finish
+        ]
+        .into_iter();
+
+        super::copy_chunk_sequence_with(
+            &chunks,
+            |buffer| {
+                copied.push(buffer.as_bytes().to_vec());
+                Ok(())
+            },
+            || Ok(keys.next().expect("expected scripted key")),
+        )
+        .unwrap();
+
+        let order: Vec<&str> = copied
+            .iter()
+            .map(|bytes| std::str::from_utf8(bytes).unwrap())
+            .collect();
+        assert_eq!(
+            order,
+            [
+                "first framed chunk",
+                "second framed chunk",
+                "third framed chunk",
+                "second framed chunk",
+                "third framed chunk",
+            ]
+        );
+        assert_eq!(keys.next(), None);
+    }
+
+    #[test]
+    fn progress_bar_marks_done_current_and_pending_parts() {
+        assert_eq!(super::progress_bar(0, 8), "O-------");
+        assert_eq!(super::progress_bar(2, 8), "==O-----");
+        assert_eq!(super::progress_bar(7, 8), "=======O");
+    }
+
+    #[test]
+    fn progress_bar_scales_to_a_bounded_width() {
+        let bar = super::progress_bar(50, 100);
+        assert_eq!(bar.chars().count(), super::PROGRESS_BAR_MAX_CELLS);
+        assert_eq!(bar.chars().filter(|c| *c == 'O').count(), 1);
+        assert!(bar.starts_with('='));
+        assert!(bar.ends_with('-'));
+        assert!(super::progress_bar(99, 100).ends_with('O'));
+    }
+
+    #[test]
+    fn status_line_shows_position_and_hints() {
+        let middle = super::chunk_status_line(2, 8);
+        assert!(middle.starts_with("[==O-----](3/8)"));
+        assert!(middle.contains("Space next"));
+
+        let last = super::chunk_status_line(7, 8);
+        assert!(last.starts_with("[=======O](8/8)"));
+        assert!(last.contains("back"));
+    }
+
+    #[test]
+    fn chunk_key_terminal_disables_line_buffering_and_restores_it() {
+        use nix::sys::termios::{self, LocalFlags};
+        use std::os::fd::AsFd;
+
+        let pty = nix::pty::openpty(None, None).unwrap();
+        let slave = pty.slave;
+
+        let before = termios::tcgetattr(slave.as_fd()).unwrap();
+        assert!(before.local_flags.contains(LocalFlags::ICANON));
+        assert!(before.local_flags.contains(LocalFlags::ECHO));
+
+        {
+            let guard = super::ChunkKeyTerminal::enter_on(slave.as_fd())
+                .expect("a cooked terminal must be switched");
+            let during = termios::tcgetattr(slave.as_fd()).unwrap();
+            assert!(!during.local_flags.contains(LocalFlags::ICANON));
+            assert!(!during.local_flags.contains(LocalFlags::ECHO));
+            assert!(!during.local_flags.contains(LocalFlags::ISIG));
+
+            // An already non-canonical terminal (CVB's own raw pty wrapper)
+            // must be left alone.
+            assert!(super::ChunkKeyTerminal::enter_on(slave.as_fd()).is_none());
+            drop(guard);
+        }
+
+        let after = termios::tcgetattr(slave.as_fd()).unwrap();
+        assert_eq!(after.local_flags, before.local_flags);
     }
 
     #[test]
@@ -764,7 +1115,7 @@ mod tests {
             },
             || {
                 key_reads += 1;
-                Ok(b' ')
+                Ok(super::ChunkKey::Space)
             },
         );
 
