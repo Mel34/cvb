@@ -8,10 +8,10 @@ CVB bridges terminal activity and repository content into a transcript that can 
 
 ## `cvb pull`
 
-`cvb pull` searches Git-tracked files. Matching is case-sensitive and, where supported, operates on syntactic units rather than individual lines.
+`cvb pull` searches Git-tracked files. Matching is case-sensitive and, where supported, operates on syntactic units rather than individual lines. CVB pull: only one file: scope is allowed.
 
 - `cvb pull QUERY...` — search tracked files.
-- `cvb pull [file:PATH] [cascade:N] QUERY...` — search, optionally expanding Rust dependencies.
+- `cvb pull [file:PATH] [cascade:N] QUERY...` — search, optionally expanding Rust dependencies. 
 - `cvb pull file:PATH` — capture one tracked file; empty files are reported as empty.
 - `cvb pull file:PATH QUERY...` — restrict search to a tracked file. Invalid paths are errors; don't assume a repository-wide fallback.
 - `cvb pull file:PATH lines:N` or `lines:START-END` — capture inclusive line ranges. Multiple selections may preserve overlaps. Don't combine `lines:` with search terms.
@@ -114,12 +114,23 @@ Distinguish command text, terminal output, file content, and CVB-generated statu
 - Never use base64 replacement commands. Don't rewrite unrelated code or discard existing user changes.
 - Explain nontrivial intended changes before asking the user to apply them.
 
+## Editing strategy
+- When working on CVB-mediated code, inspect first, then edit based on structure—not guessed text anchors.
+- Use CVB to discover. Retrieve the relevant function or line range before proposing a repair. If Rust parsing fails, use cvb pull file:PATH lines:START-END to inspect the raw source.
+- Understand the actual failure before editing. Trace exactly what the previous script changed and identify the malformed region from the observed output. Don't invent another explanation without evidence.
+- Prefer structural boundaries over brittle anchors. Use function declarations, ordered occurrences, and validated line ranges. If an anchor fails, treat that as evidence that the model of the file is wrong—not an invitation to guess another anchor.
+- Make the smallest atomic repair. Validate the expected structure and occurrence counts before writing. Abort without changes if the source differs. Write atomically, reread, and verify.
+- Don't make the user debug the assistant's repair scripts. Before giving a script, mentally trace its indices and slices against the actual retrieved source. Check that it removes exactly the intended region and preserves both boundaries.
+- Verify once the repair succeeds. Run the relevant compile or test command and respond to the actual result. Don't repeat checks unnecessarily.
+- After one failed approach, change methods. Never keep producing near-identical scripts with slightly different guessed anchors. Step back, inspect, and choose a more reliable technique.
+
 ## Validation and evidence
 
 - After Rust changes, run appropriate `cargo check` and focused tests; run the full suite when warranted.
 - Report exactly what was run and what it establishes. Never claim checks passed unless the user supplied results or a tool ran them.
 - Inspect diff and repository status before committing; preserve unrelated modified and untracked files.
 - Treat warnings, skipped tests and incomplete scans as evidence, not success. Prefer deterministic tests and explicit invariants where possible.
+- Remember cargo check and cargo test results for the current task. Do not needlessly ask the user to rerun them if you already know the results.
 
 ## Terminal and copy/paste
 
@@ -130,4 +141,4 @@ Distinguish command text, terminal output, file content, and CVB-generated statu
 
 ## Checkpoints
 
-Before a commit, summarize the change, tests performed and known limitations. Don't commit, push or overwrite user work without explicit instruction.
+When a task is validated, inspect the diff and repository status and summarize the change and test results. Commit only when the user explicitly authorizes the commit.
