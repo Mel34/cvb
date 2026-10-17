@@ -1,5 +1,5 @@
-use std::collections::HashSet;
 use super::*;
+use std::collections::HashSet;
 
 /// GNOME's Mutter silently truncates clipboard transfers over ~4 MB.
 /// By setting `MAX_INPUT_BYTES` conservatively below this threshold (3 MiB),
@@ -51,6 +51,17 @@ fn is_begin_shaped(line: &str) -> bool {
         return false;
     };
 
+    valid_token(token)
+}
+
+fn has_structural_shape(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let Some(rest) = trimmed.strip_prefix("CVB::") else {
+        return false;
+    };
+    let Some((token, _)) = rest.split_once("::") else {
+        return false;
+    };
     valid_token(token)
 }
 
@@ -138,17 +149,57 @@ impl<'a> Parser<'a> {
         Ok(*line)
     }
 
+    fn check_structural_line_after_block(
+        &self,
+        line: &str,
+        line_num: usize,
+    ) -> Result<(), ParseFailure> {
+        if line.starts_with(&self.prefix) {
+            return Ok(());
+        }
+        if has_structural_shape(line) {
+            return Err(ParseFailure {
+                kind: ParseError::Syntax,
+                line: line_num,
+                detail: Some("structural line has wrong token or indentation".into()),
+            });
+        }
+        Err(ParseFailure {
+            kind: ParseError::Count,
+            line: line_num,
+            detail: Some(
+                "expected structural line directly after counted block; count may be too small"
+                    .into(),
+            ),
+        })
+    }
+
+    fn expect_header_after_block(&mut self, name: &str) -> Result<usize, ParseFailure> {
+        let line_num = self.index + 1;
+        let line = self.next_line()?;
+        self.check_structural_line_after_block(line, line_num)?;
+        let header_prefix = format!("{}{name} n=", self.prefix);
+        let count_text = line.strip_prefix(&header_prefix).ok_or(ParseFailure {
+            kind: ParseError::Syntax,
+            line: line_num,
+            detail: None,
+        })?;
+        parse_count(count_text).map_err(|kind| ParseFailure {
+            kind,
+            line: line_num,
+            detail: None,
+        })
+    }
+
     fn expect_header(&mut self, name: &str) -> Result<usize, ParseFailure> {
         let line_num = self.index + 1;
         let line = self.next_line()?;
         let header_prefix = format!("{}{name} n=", self.prefix);
-        let count_text = line
-            .strip_prefix(&header_prefix)
-            .ok_or(ParseFailure {
-                kind: ParseError::Syntax,
-                line: line_num,
-                detail: None,
-            })?;
+        let count_text = line.strip_prefix(&header_prefix).ok_or(ParseFailure {
+            kind: ParseError::Syntax,
+            line: line_num,
+            detail: None,
+        })?;
         parse_count(count_text).map_err(|k| ParseFailure {
             kind: k,
             line: line_num,
@@ -156,10 +207,11 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn consume_endop(&mut self) -> Result<(), ParseFailure> {
+    fn consume_endop_after_block(&mut self) -> Result<(), ParseFailure> {
         let is_last_line = self.index + 1 == self.lines.len();
         let line_num = self.index + 1;
         let line = self.next_line()?;
+        self.check_structural_line_after_block(line, line_num)?;
         let endop = format!("{}ENDOP", self.prefix);
         if line != endop {
             return Err(ParseFailure {
@@ -279,7 +331,7 @@ impl<'a> Parser<'a> {
         let old = self.read_payload(old_count)?;
 
         let new_line = self.index + 1;
-        let new_count = self.expect_header("NEW")?;
+        let new_count = self.expect_header_after_block("NEW")?;
         if new_count == 0 {
             return Err(ParseFailure {
                 kind: ParseError::Count,
@@ -289,7 +341,7 @@ impl<'a> Parser<'a> {
         }
 
         let new = self.read_payload(new_count)?;
-        self.consume_endop()?;
+        self.consume_endop_after_block()?;
 
         Ok(Operation::Replace {
             start,
@@ -326,7 +378,7 @@ impl<'a> Parser<'a> {
         }
 
         let old = self.read_payload(count)?;
-        self.consume_endop()?;
+        self.consume_endop_after_block()?;
 
         Ok(Operation::Delete { start, end, old })
     }
@@ -369,7 +421,7 @@ impl<'a> Parser<'a> {
         let anchor = self.read_payload(count)?;
 
         let new_line = self.index + 1;
-        let new_count = self.expect_header("NEW")?;
+        let new_count = self.expect_header_after_block("NEW")?;
         if new_count == 0 {
             return Err(ParseFailure {
                 kind: ParseError::Count,
@@ -379,7 +431,7 @@ impl<'a> Parser<'a> {
         }
 
         let new = self.read_payload(new_count)?;
-        self.consume_endop()?;
+        self.consume_endop_after_block()?;
 
         Ok(Operation::Insert {
             position,
@@ -850,7 +902,10 @@ CVB::k7Q2xw9R::END ops=2";
         assert_eq!(failure.kind, ParseError::Limit);
         let message = failure.to_string();
         assert!(message.contains(&MAX_INPUT_BYTES.to_string()), "{message}");
-        assert!(message.contains(&(MAX_INPUT_BYTES + 1).to_string()), "{message}");
+        assert!(
+            message.contains(&(MAX_INPUT_BYTES + 1).to_string()),
+            "{message}"
+        );
         assert!(
             message.contains("; split the change into several smaller envelopes"),
             "{message}"
@@ -1278,6 +1333,52 @@ CVB::k7Q2xw9R::END ops=0";
                 Err(ParseError::InvalidPath),
                 "{path:?}"
             );
+        }
+    }
+
+    #[test]
+    fn plain_line_after_counted_new_payload_is_count_error() {
+        let input = "\
+CVB::k7Q2xw9R::BEGIN v=1 id=demo-01
+CVB::k7Q2xw9R::FILE path=src/main.rs
+CVB::k7Q2xw9R::OP replace lines=1-1
+CVB::k7Q2xw9R::OLD n=1
+old
+CVB::k7Q2xw9R::NEW n=1
+new
+unexpected text
+CVB::k7Q2xw9R::END ops=1";
+
+        let failure = parse_envelope(input).unwrap_err();
+        assert_eq!(failure.kind, ParseError::Count);
+        assert_eq!(failure.line, 8);
+        assert!(
+            failure
+                .detail
+                .as_deref()
+                .unwrap()
+                .contains("count may be too small")
+        );
+    }
+
+    #[test]
+    fn malformed_structural_line_after_counted_payload_is_syntax() {
+        for boundary in [" CVB::k7Q2xw9R::ENDOP", "CVB::A1B2C3D4::ENDOP"] {
+            let input = format!(
+                "CVB::k7Q2xw9R::BEGIN v=1 id=demo-01\n\
+CVB::k7Q2xw9R::FILE path=src/main.rs\n\
+CVB::k7Q2xw9R::OP replace lines=1-1\n\
+CVB::k7Q2xw9R::OLD n=1\n\
+old\n\
+CVB::k7Q2xw9R::NEW n=1\n\
+new\n\
+{boundary}\n\
+CVB::k7Q2xw9R::END ops=1"
+            );
+
+            let failure = parse_envelope(&input).unwrap_err();
+            assert_eq!(failure.kind, ParseError::Syntax, "{boundary:?}");
+            assert_eq!(failure.line, 8, "{boundary:?}");
         }
     }
 

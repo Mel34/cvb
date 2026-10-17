@@ -256,10 +256,16 @@ impl std::fmt::Display for LoadError {
                 write!(f, "CVB: target is not a regular file: '{path}'")
             }
             LoadError::FileTooLarge { path, size, limit } => {
-                write!(f, "CVB: target file '{path}' is too large ({size} bytes, limit is {limit} bytes)")
+                write!(
+                    f,
+                    "CVB: target file '{path}' is too large ({size} bytes, limit is {limit} bytes)"
+                )
             }
             LoadError::AggregateTooLarge { size, limit } => {
-                write!(f, "CVB: aggregate target file size ({size} bytes) exceeds limit ({limit} bytes)")
+                write!(
+                    f,
+                    "CVB: aggregate target file size ({size} bytes) exceeds limit ({limit} bytes)"
+                )
             }
             LoadError::Read { path, message } => {
                 write!(f, "CVB: unable to read '{path}': {message}")
@@ -408,10 +414,7 @@ pub(crate) enum PipelineError {
 
 /// Parses an envelope, reads its target files, and builds an in-memory plan.
 /// This function never writes to disk.
-pub(crate) fn parse_load_plan(
-    root: &Path,
-    input: &str,
-) -> Result<(Envelope, Plan), PipelineError> {
+pub(crate) fn parse_load_plan(root: &Path, input: &str) -> Result<(Envelope, Plan), PipelineError> {
     let envelope = parse_envelope(input).map_err(PipelineError::Parse)?;
     let originals = load_originals(root, &envelope).map_err(PipelineError::Load)?;
     let plan = plan_envelope(&envelope, &originals).map_err(PipelineError::Plan)?;

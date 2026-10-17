@@ -1,5 +1,5 @@
-use std::collections::{HashMap, HashSet};
 use super::*;
+use std::collections::{HashMap, HashSet};
 
 /// Applies one operation to an original file represented as lines.
 /// All operation ranges are one-based and refer to the original lines.

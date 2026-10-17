@@ -1,6 +1,6 @@
+use super::*;
 use std::collections::HashMap;
 use std::path::Path;
-use super::*;
 
 /// Reads the existing target files without modifying them.
 ///
@@ -123,7 +123,9 @@ pub(crate) fn load_originals_with_limits(
                 return Err(LoadError::LoneCr(target.fs_path.display().to_string()));
             }
             Err(NewlineError::Mixed) => {
-                return Err(LoadError::MixedLineEndings(target.fs_path.display().to_string()));
+                return Err(LoadError::MixedLineEndings(
+                    target.fs_path.display().to_string(),
+                ));
             }
             Ok(_) => {}
         }
@@ -370,8 +372,14 @@ mod tests {
             token: "TOKEN123".to_owned(),
             id: "load-test".to_owned(),
             files: vec![
-                FileSection { path: "file1.rs".to_owned(), operations: vec![] },
-                FileSection { path: "file2.rs".to_owned(), operations: vec![] },
+                FileSection {
+                    path: "file1.rs".to_owned(),
+                    operations: vec![],
+                },
+                FileSection {
+                    path: "file2.rs".to_owned(),
+                    operations: vec![],
+                },
             ],
         };
 
@@ -391,8 +399,14 @@ mod tests {
             token: "TOKEN123".to_owned(),
             id: "load-test".to_owned(),
             files: vec![
-                FileSection { path: "file1.rs".to_owned(), operations: vec![] },
-                FileSection { path: "file2.rs".to_owned(), operations: vec![] },
+                FileSection {
+                    path: "file1.rs".to_owned(),
+                    operations: vec![],
+                },
+                FileSection {
+                    path: "file2.rs".to_owned(),
+                    operations: vec![],
+                },
             ],
         };
 
