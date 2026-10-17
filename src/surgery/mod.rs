@@ -226,6 +226,7 @@ pub(crate) enum LoadError {
     SymlinkTarget(String),
     NotRegularFile(String),
     FileTooLarge { path: String, size: u64, limit: u64 },
+    AggregateTooLarge { size: u64, limit: u64 },
     Read { path: String, message: String },
     InvalidUtf8(String),
     NulByte(String),
@@ -256,6 +257,9 @@ impl std::fmt::Display for LoadError {
             }
             LoadError::FileTooLarge { path, size, limit } => {
                 write!(f, "CVB: target file '{path}' is too large ({size} bytes, limit is {limit} bytes)")
+            }
+            LoadError::AggregateTooLarge { size, limit } => {
+                write!(f, "CVB: aggregate target file size ({size} bytes) exceeds limit ({limit} bytes)")
             }
             LoadError::Read { path, message } => {
                 write!(f, "CVB: unable to read '{path}': {message}")

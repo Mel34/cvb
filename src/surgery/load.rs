@@ -6,13 +6,14 @@ use super::*;
 ///
 /// Paths must be safe relative paths. Symlinks are rejected so a target cannot
 /// redirect a read outside the supplied root.
-pub(crate) const MAX_TARGET_BYTES: u64 = 16 * 1024 * 1024;
+pub(crate) const MAX_TARGET_BYTES: u64 = 8 * 1024 * 1024;
+pub(crate) const MAX_AGGREGATE_BYTES: u64 = 32 * 1024 * 1024;
 
 pub(crate) fn load_originals(
     root: &Path,
     envelope: &Envelope,
 ) -> Result<HashMap<String, String>, LoadError> {
-    load_originals_with_limit(root, envelope, MAX_TARGET_BYTES)
+    load_originals_with_limits(root, envelope, MAX_TARGET_BYTES, MAX_AGGREGATE_BYTES)
 }
 
 pub(crate) fn load_originals_with_limit(
@@ -20,19 +21,38 @@ pub(crate) fn load_originals_with_limit(
     envelope: &Envelope,
     max_target_bytes: u64,
 ) -> Result<HashMap<String, String>, LoadError> {
-    let mut originals = HashMap::new();
+    load_originals_with_limits(root, envelope, max_target_bytes, MAX_AGGREGATE_BYTES)
+}
 
+pub(crate) fn load_originals_with_limits(
+    root: &Path,
+    envelope: &Envelope,
+    max_target_bytes: u64,
+    max_aggregate_bytes: u64,
+) -> Result<HashMap<String, String>, LoadError> {
+    use std::collections::HashSet;
+
+    struct TargetFile {
+        rel_path: String,
+        fs_path: std::path::PathBuf,
+    }
+
+    let mut targets = Vec::with_capacity(envelope.files.len());
+    let mut seen_paths = HashSet::new();
+    let mut aggregate_bytes: u64 = 0;
+
+    // Inspect target metadata and enforce size limits before reading file contents.
     for section in &envelope.files {
         if validate_relative_path(&section.path).is_err() {
             return Err(LoadError::UnsafePath(section.path.clone()));
         }
-        let relative = Path::new(&section.path);
-
-        if originals.contains_key(&section.path) {
+        if !seen_paths.insert(section.path.clone()) {
             return Err(LoadError::DuplicatePath(section.path.clone()));
         }
 
+        let relative = Path::new(&section.path);
         let mut current = root.to_path_buf();
+
         for component in relative.components() {
             current.push(component.as_os_str());
             let metadata =
@@ -50,6 +70,7 @@ pub(crate) fn load_originals_with_limit(
             path: current.display().to_string(),
             message: error.to_string(),
         })?;
+
         if !metadata.is_file() {
             return Err(LoadError::NotRegularFile(current.display().to_string()));
         }
@@ -63,33 +84,51 @@ pub(crate) fn load_originals_with_limit(
             });
         }
 
-        let bytes = std::fs::read(&current).map_err(|error| LoadError::Read {
-            path: current.display().to_string(),
+        aggregate_bytes = aggregate_bytes.saturating_add(size);
+        if aggregate_bytes > max_aggregate_bytes {
+            return Err(LoadError::AggregateTooLarge {
+                size: aggregate_bytes,
+                limit: max_aggregate_bytes,
+            });
+        }
+
+        targets.push(TargetFile {
+            rel_path: section.path.clone(),
+            fs_path: current,
+        });
+    }
+
+    // All target sizes have been checked before any full-file read.
+    let mut originals = HashMap::new();
+
+    for target in targets {
+        let bytes = std::fs::read(&target.fs_path).map_err(|error| LoadError::Read {
+            path: target.fs_path.display().to_string(),
             message: error.to_string(),
         })?;
 
         let contents = String::from_utf8(bytes)
-            .map_err(|_| LoadError::InvalidUtf8(current.display().to_string()))?;
+            .map_err(|_| LoadError::InvalidUtf8(target.fs_path.display().to_string()))?;
 
         if contents.contains('\0') {
-            return Err(LoadError::NulByte(current.display().to_string()));
+            return Err(LoadError::NulByte(target.fs_path.display().to_string()));
         }
 
         if contents.starts_with('\u{FEFF}') {
-            return Err(LoadError::Bom(current.display().to_string()));
+            return Err(LoadError::Bom(target.fs_path.display().to_string()));
         }
 
         match detect_newline(&contents) {
             Err(NewlineError::LoneCr) => {
-                return Err(LoadError::LoneCr(current.display().to_string()));
+                return Err(LoadError::LoneCr(target.fs_path.display().to_string()));
             }
             Err(NewlineError::Mixed) => {
-                return Err(LoadError::MixedLineEndings(current.display().to_string()));
+                return Err(LoadError::MixedLineEndings(target.fs_path.display().to_string()));
             }
             Ok(_) => {}
         }
 
-        originals.insert(section.path.clone(), contents);
+        originals.insert(target.rel_path, contents);
     }
 
     Ok(originals)
@@ -310,6 +349,60 @@ mod tests {
                 assert!(path.contains("oversize.rs"));
             }
             other => panic!("expected FileTooLarge error, got {other:?}"),
+        }
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn load_originals_uses_eight_mebibytes_default_cap() {
+        assert_eq!(MAX_TARGET_BYTES, 8 * 1024 * 1024);
+        assert_eq!(MAX_AGGREGATE_BYTES, 32 * 1024 * 1024);
+    }
+
+    #[test]
+    fn load_originals_accepts_aggregate_size_at_limit() {
+        let root = test_directory("aggregate-exact");
+        fs::write(root.join("file1.rs"), "a".repeat(50)).unwrap();
+        fs::write(root.join("file2.rs"), "b".repeat(50)).unwrap();
+
+        let env = Envelope {
+            token: "TOKEN123".to_owned(),
+            id: "load-test".to_owned(),
+            files: vec![
+                FileSection { path: "file1.rs".to_owned(), operations: vec![] },
+                FileSection { path: "file2.rs".to_owned(), operations: vec![] },
+            ],
+        };
+
+        let result = load_originals_with_limits(&root, &env, 80, 100);
+        assert!(result.is_ok());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn load_originals_rejects_aggregate_size_over_limit_without_reading() {
+        let root = test_directory("aggregate-over");
+        fs::write(root.join("file1.rs"), "a".repeat(60)).unwrap();
+        fs::write(root.join("file2.rs"), "b".repeat(60)).unwrap();
+
+        let env = Envelope {
+            token: "TOKEN123".to_owned(),
+            id: "load-test".to_owned(),
+            files: vec![
+                FileSection { path: "file1.rs".to_owned(), operations: vec![] },
+                FileSection { path: "file2.rs".to_owned(), operations: vec![] },
+            ],
+        };
+
+        let result = load_originals_with_limits(&root, &env, 80, 100);
+        match result {
+            Err(LoadError::AggregateTooLarge { size, limit }) => {
+                assert_eq!(size, 120);
+                assert_eq!(limit, 100);
+            }
+            other => panic!("expected AggregateTooLarge error, got {other:?}"),
         }
 
         fs::remove_dir_all(root).unwrap();
