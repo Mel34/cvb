@@ -33,13 +33,13 @@ pub(crate) enum Operation {
     },
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InsertPosition {
     Before,
     After,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ParseError {
     Syntax,
     Range,
@@ -55,10 +55,206 @@ pub(crate) enum ParseError {
     DuplicateFile,
     InvalidPath,
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ParseFailure {
+    pub kind: ParseError,
+    pub line: usize,
+    pub detail: Option<String>,
+}
+
+impl PartialEq<ParseError> for ParseFailure {
+    fn eq(&self, other: &ParseError) -> bool {
+        self.kind == *other
+    }
+}
+
+impl PartialEq<ParseFailure> for ParseError {
+    fn eq(&self, other: &ParseFailure) -> bool {
+        *self == other.kind
+    }
+}
+
+impl std::fmt::Display for ParseFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(detail) = &self.detail {
+            write!(
+                f,
+                "CVB: line {}: parse error ({:?}): {}",
+                self.line, self.kind, detail
+            )
+        } else {
+            write!(f, "CVB: line {}: parse error ({:?})", self.line, self.kind)
+        }
+    }
+}
+impl std::error::Error for ParseFailure {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PlanDetail {
+    Precondition {
+        line: usize,
+        expected: String,
+        found: String,
+        only_trailing_whitespace: bool,
+    },
+    EndOfFile {
+        suggestion: String,
+    },
+    Overlap {
+        other_op_index: usize,
+    },
+    Range {
+        file_lines: usize,
+    },
+    Other(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PlanFailure {
+    pub kind: PlanError,
+    pub path: String,
+    pub op_index: usize,
+    pub detail: Option<PlanDetail>,
+}
+
+impl PartialEq<PlanError> for PlanFailure {
+    fn eq(&self, other: &PlanError) -> bool {
+        self.kind == *other
+    }
+}
+
+impl PartialEq<PlanFailure> for PlanError {
+    fn eq(&self, other: &PlanFailure) -> bool {
+        *self == other.kind
+    }
+}
+
+fn format_visible_line(s: &str) -> String {
+    let truncated = if s.chars().count() > 200 {
+        let mut t: String = s.chars().take(200).collect();
+        t.push_str("...");
+        t
+    } else {
+        s.to_string()
+    };
+    truncated.replace('\t', "\\t")
+}
+
+impl std::fmt::Display for PlanFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.detail {
+            Some(PlanDetail::Precondition {
+                line,
+                expected,
+                found,
+                only_trailing_whitespace,
+            }) => {
+                write!(
+                    f,
+                    "CVB: {}: operation {}: precondition mismatch at line {}:\n  expected: \"{}\"\n     found: \"{}\"",
+                    self.path,
+                    self.op_index,
+                    line,
+                    format_visible_line(expected),
+                    format_visible_line(found)
+                )?;
+                if *only_trailing_whitespace {
+                    write!(f, "\n  note: differs only in trailing whitespace")?;
+                }
+                Ok(())
+            }
+            Some(PlanDetail::EndOfFile { suggestion }) => {
+                write!(
+                    f,
+                    "CVB: {}: operation {}: {suggestion}",
+                    self.path, self.op_index
+                )
+            }
+            Some(PlanDetail::Overlap { other_op_index }) => {
+                write!(
+                    f,
+                    "CVB: {}: operation {} overlaps with operation {}",
+                    self.path, self.op_index, other_op_index
+                )
+            }
+            Some(PlanDetail::Range { file_lines }) => {
+                write!(
+                    f,
+                    "CVB: {}: operation {}: line range out of bounds (file has {file_lines} lines)",
+                    self.path, self.op_index
+                )
+            }
+            Some(PlanDetail::Other(msg)) => {
+                write!(
+                    f,
+                    "CVB: {}: operation {}: {:?}: {msg}",
+                    self.path, self.op_index, self.kind
+                )
+            }
+            None => {
+                write!(
+                    f,
+                    "CVB: {}: operation {}: {:?}",
+                    self.path, self.op_index, self.kind
+                )
+            }
+        }
+    }
+}
+impl std::error::Error for PlanFailure {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LoadError {
+    UnsafePath(String),
+    DuplicatePath(String),
+    Inspect { path: String, message: String },
+    SymlinkTarget(String),
+    NotRegularFile(String),
+    Read { path: String, message: String },
+    InvalidUtf8(String),
+    NulByte(String),
+    Bom(String),
+    LoneCr(String),
+    MixedLineEndings(String),
+}
+
+impl LoadError {
+    pub(crate) fn contains(&self, needle: &str) -> bool {
+        self.to_string().contains(needle)
+    }
+}
+
+impl std::fmt::Display for LoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LoadError::UnsafePath(path) => write!(f, "CVB: unsafe target path '{path}'"),
+            LoadError::DuplicatePath(path) => write!(f, "CVB: duplicate target path '{path}'"),
+            LoadError::Inspect { path, message } => {
+                write!(f, "CVB: unable to inspect '{path}': {message}")
+            }
+            LoadError::SymlinkTarget(path) => {
+                write!(f, "CVB: symlink target is not allowed: '{path}'")
+            }
+            LoadError::NotRegularFile(path) => {
+                write!(f, "CVB: target is not a regular file: '{path}'")
+            }
+            LoadError::Read { path, message } => {
+                write!(f, "CVB: unable to read '{path}': {message}")
+            }
+            LoadError::InvalidUtf8(path) => write!(f, "CVB: invalid UTF-8 in '{path}'"),
+            LoadError::NulByte(path) => write!(f, "CVB: NUL byte is not allowed: '{path}'"),
+            LoadError::Bom(path) => write!(f, "CVB: UTF-8 BOM is not allowed: '{path}'"),
+            LoadError::LoneCr(path) => write!(f, "CVB: lone CR is not allowed: '{path}'"),
+            LoadError::MixedLineEndings(path) => {
+                write!(f, "CVB: mixed LF/CRLF line endings: '{path}'")
+            }
+        }
+    }
+}
+impl std::error::Error for LoadError {}
 
 pub(crate) fn valid_token(token: &str) -> bool {
-    (8..=32).contains(&token.len())
-        && token.bytes().all(|b| b.is_ascii_alphanumeric())
+    (8..=32).contains(&token.len()) && token.bytes().all(|b| b.is_ascii_alphanumeric())
 }
 
 pub(crate) fn parse_count(value: &str) -> Result<usize, ParseError> {
@@ -87,6 +283,101 @@ pub(crate) fn parse_range(value: &str) -> Result<(usize, usize), ParseError> {
     }
 
     Ok((start, end))
+}
+
+/// Validates relative paths: rejects empty, backslashes, absolute paths,
+/// non-normal components (`.` / `..`), and `.git` components (case-insensitive).
+pub(crate) fn validate_relative_path(path: &str) -> Result<(), PlanError> {
+    use std::path::{Component, Path};
+
+    if path.is_empty() || path.contains('\\') || path.starts_with('/') || path.ends_with('/') {
+        return Err(PlanError::InvalidPath);
+    }
+
+    let p = Path::new(path);
+    if p.is_absolute() {
+        return Err(PlanError::InvalidPath);
+    }
+
+    for segment in path.split('/') {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            return Err(PlanError::InvalidPath);
+        }
+        if segment.eq_ignore_ascii_case(".git") {
+            return Err(PlanError::InvalidPath);
+        }
+    }
+
+    for component in p.components() {
+        match component {
+            Component::Normal(c) => {
+                if let Some(s) = c.to_str() {
+                    if s.eq_ignore_ascii_case(".git") {
+                        return Err(PlanError::InvalidPath);
+                    }
+                }
+            }
+            _ => return Err(PlanError::InvalidPath),
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Newline {
+    Lf,
+    Crlf,
+}
+
+impl Newline {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Newline::Lf => "\n",
+            Newline::Crlf => "\r\n",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NewlineError {
+    LoneCr,
+    Mixed,
+}
+
+pub(crate) fn detect_newline(contents: &str) -> Result<Newline, NewlineError> {
+    let bytes = contents.as_bytes();
+    let mut has_lf = false;
+    let mut has_crlf = false;
+    let mut index = 0;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\r' => {
+                if bytes.get(index + 1) == Some(&b'\n') {
+                    has_crlf = true;
+                    index += 2;
+                } else {
+                    return Err(NewlineError::LoneCr);
+                }
+            }
+            b'\n' => {
+                has_lf = true;
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+
+    if has_lf && has_crlf {
+        return Err(NewlineError::Mixed);
+    }
+
+    if has_crlf {
+        Ok(Newline::Crlf)
+    } else {
+        Ok(Newline::Lf)
+    }
 }
 
 fn is_begin_shaped(line: &str) -> bool {
@@ -139,17 +430,13 @@ fn parse_begin(line: &str) -> Result<(String, String), ParseError> {
 
 fn parse_file(line: &str, token: &str) -> Result<String, ParseError> {
     let prefix = format!("CVB::{token}::FILE path=");
-
     let path = line.strip_prefix(&prefix).ok_or(ParseError::Syntax)?;
 
-    if path.is_empty()
-        || path.starts_with('/')
-        || !path
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"._/-".contains(&b))
-        || path
-            .split('/')
-            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+    validate_relative_path(path).map_err(|_| ParseError::InvalidPath)?;
+
+    if !path
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"._/-".contains(&b))
     {
         return Err(ParseError::InvalidPath);
     }
@@ -157,211 +444,343 @@ fn parse_file(line: &str, token: &str) -> Result<String, ParseError> {
     Ok(path.to_string())
 }
 
-fn read_payload<'a>(
+struct Parser<'a> {
     lines: &'a [&'a str],
+    index: usize,
+    token: &'a str,
+    prefix: String,
+}
+
+impl<'a> Parser<'a> {
+    fn new(lines: &'a [&'a str], token: &'a str) -> Self {
+        Self {
+            lines,
+            index: 0,
+            token,
+            prefix: format!("CVB::{token}::"),
+        }
+    }
+
+    fn peek(&self) -> Option<&'a str> {
+        self.lines.get(self.index).copied()
+    }
+
+    fn next_line(&mut self) -> Result<&'a str, ParseFailure> {
+        let line_num = self.index + 1;
+        let line = self.lines.get(self.index).ok_or_else(|| ParseFailure {
+            kind: ParseError::Truncated,
+            line: line_num,
+            detail: None,
+        })?;
+        self.index += 1;
+        Ok(*line)
+    }
+
+    fn expect_header(&mut self, name: &str) -> Result<usize, ParseFailure> {
+        let line_num = self.index + 1;
+        let line = self.next_line()?;
+        let header_prefix = format!("{}{name} n=", self.prefix);
+        let count_text = line
+            .strip_prefix(&header_prefix)
+            .ok_or_else(|| ParseFailure {
+                kind: ParseError::Syntax,
+                line: line_num,
+                detail: None,
+            })?;
+        parse_count(count_text).map_err(|k| ParseFailure {
+            kind: k,
+            line: line_num,
+            detail: None,
+        })
+    }
+
+    fn consume_endop(&mut self) -> Result<(), ParseFailure> {
+        let is_last_line = self.index + 1 == self.lines.len();
+        let line_num = self.index + 1;
+        let line = self.next_line()?;
+        let endop = format!("{}ENDOP", self.prefix);
+        if line != endop {
+            return Err(ParseFailure {
+                kind: if is_last_line {
+                    ParseError::Truncated
+                } else {
+                    ParseError::Syntax
+                },
+                line: line_num,
+                detail: None,
+            });
+        }
+        Ok(())
+    }
+
+    fn read_payload(&mut self, count: usize) -> Result<Vec<String>, ParseFailure> {
+        if count > self.lines.len().saturating_sub(self.index) {
+            return Err(ParseFailure {
+                kind: ParseError::Truncated,
+                line: self.lines.len(),
+                detail: None,
+            });
+        }
+
+        let mut payload = Vec::with_capacity(count);
+
+        for _ in 0..count {
+            let line_num = self.index + 1;
+            let line = self.lines.get(self.index).ok_or_else(|| ParseFailure {
+                kind: ParseError::Truncated,
+                line: self.lines.len(),
+                detail: None,
+            })?;
+
+            if line.starts_with(&self.prefix) {
+                return Err(ParseFailure {
+                    kind: ParseError::Collision,
+                    line: line_num,
+                    detail: None,
+                });
+            }
+
+            if line.contains('\0') || line.contains('\r') {
+                return Err(ParseFailure {
+                    kind: ParseError::InvalidBytes,
+                    line: line_num,
+                    detail: None,
+                });
+            }
+
+            payload.push((*line).to_owned());
+            self.index += 1;
+        }
+
+        Ok(payload)
+    }
+
+    fn parse_operation(&mut self) -> Result<Operation, ParseFailure> {
+        let line_num = self.index + 1;
+        let line = self.peek().ok_or_else(|| ParseFailure {
+            kind: ParseError::Truncated,
+            line: line_num,
+            detail: None,
+        })?;
+        let op_prefix = format!("{}OP ", self.prefix);
+        if !line.starts_with(&op_prefix) {
+            return Err(ParseFailure {
+                kind: ParseError::Syntax,
+                line: line_num,
+                detail: None,
+            });
+        }
+
+        if line.starts_with(&format!("{}OP replace ", self.prefix)) {
+            self.parse_replace()
+        } else if line.starts_with(&format!("{}OP delete ", self.prefix)) {
+            self.parse_delete()
+        } else if line.starts_with(&format!("{}OP insert ", self.prefix)) {
+            self.parse_insert()
+        } else {
+            Err(ParseFailure {
+                kind: ParseError::Syntax,
+                line: line_num,
+                detail: None,
+            })
+        }
+    }
+
+    fn parse_replace(&mut self) -> Result<Operation, ParseFailure> {
+        let prefix = format!("{}OP replace lines=", self.prefix);
+        let op_line = self.index + 1;
+        let line = self.next_line()?;
+        let range_text = line.strip_prefix(&prefix).ok_or_else(|| ParseFailure {
+            kind: ParseError::Syntax,
+            line: op_line,
+            detail: None,
+        })?;
+        let (start, end) = parse_range(range_text).map_err(|k| ParseFailure {
+            kind: k,
+            line: op_line,
+            detail: None,
+        })?;
+
+        let old_line = self.index + 1;
+        let old_count = self.expect_header("OLD")?;
+        let expected_old = end - start + 1;
+        if old_count != expected_old {
+            return Err(ParseFailure {
+                kind: ParseError::Count,
+                line: old_line,
+                detail: Some(format!(
+                    "declared count {old_count}, expected {expected_old}"
+                )),
+            });
+        }
+
+        let old = self.read_payload(old_count)?;
+
+        let new_line = self.index + 1;
+        let new_count = self.expect_header("NEW")?;
+        if new_count == 0 {
+            return Err(ParseFailure {
+                kind: ParseError::Count,
+                line: new_line,
+                detail: Some("declared count 0, expected at least 1".into()),
+            });
+        }
+
+        let new = self.read_payload(new_count)?;
+        self.consume_endop()?;
+
+        Ok(Operation::Replace {
+            start,
+            end,
+            old,
+            new,
+        })
+    }
+
+    fn parse_delete(&mut self) -> Result<Operation, ParseFailure> {
+        let prefix = format!("{}OP delete lines=", self.prefix);
+        let op_line = self.index + 1;
+        let line = self.next_line()?;
+        let range_text = line.strip_prefix(&prefix).ok_or_else(|| ParseFailure {
+            kind: ParseError::Syntax,
+            line: op_line,
+            detail: None,
+        })?;
+        let (start, end) = parse_range(range_text).map_err(|k| ParseFailure {
+            kind: k,
+            line: op_line,
+            detail: None,
+        })?;
+
+        let old_line = self.index + 1;
+        let count = self.expect_header("OLD")?;
+        let expected_count = end - start + 1;
+        if count != expected_count {
+            return Err(ParseFailure {
+                kind: ParseError::Count,
+                line: old_line,
+                detail: Some(format!("declared count {count}, expected {expected_count}")),
+            });
+        }
+
+        let old = self.read_payload(count)?;
+        self.consume_endop()?;
+
+        Ok(Operation::Delete { start, end, old })
+    }
+
+    fn parse_insert(&mut self) -> Result<Operation, ParseFailure> {
+        let op_line = self.index + 1;
+        let line = self.next_line()?;
+        let after_prefix = format!("{}OP insert after=", self.prefix);
+        let before_prefix = format!("{}OP insert before=", self.prefix);
+
+        let (position, range_text) = if let Some(value) = line.strip_prefix(&after_prefix) {
+            (InsertPosition::After, value)
+        } else if let Some(value) = line.strip_prefix(&before_prefix) {
+            (InsertPosition::Before, value)
+        } else {
+            return Err(ParseFailure {
+                kind: ParseError::Syntax,
+                line: op_line,
+                detail: None,
+            });
+        };
+
+        let (start, end) = parse_range(range_text).map_err(|k| ParseFailure {
+            kind: k,
+            line: op_line,
+            detail: None,
+        })?;
+
+        let anchor_line = self.index + 1;
+        let count = self.expect_header("ANCHOR")?;
+        let expected_count = end - start + 1;
+        if count != expected_count {
+            return Err(ParseFailure {
+                kind: ParseError::Count,
+                line: anchor_line,
+                detail: Some(format!("declared count {count}, expected {expected_count}")),
+            });
+        }
+
+        let anchor = self.read_payload(count)?;
+
+        let new_line = self.index + 1;
+        let new_count = self.expect_header("NEW")?;
+        if new_count == 0 {
+            return Err(ParseFailure {
+                kind: ParseError::Count,
+                line: new_line,
+                detail: Some("declared count 0, expected at least 1".into()),
+            });
+        }
+
+        let new = self.read_payload(new_count)?;
+        self.consume_endop()?;
+
+        Ok(Operation::Insert {
+            position,
+            start,
+            end,
+            anchor,
+            new,
+        })
+    }
+}
+
+#[cfg(test)]
+fn read_payload(
+    lines: &[&str],
     index: &mut usize,
     token: &str,
     count: usize,
 ) -> Result<Vec<String>, ParseError> {
-    let mut payload = Vec::with_capacity(count);
-
-    for _ in 0..count {
-        let line = lines.get(*index).ok_or(ParseError::Truncated)?;
-
-        if line.starts_with(&format!("CVB::{token}::")) {
-            return Err(ParseError::Collision);
-        }
-
-        if line.contains('\0') || line.contains('\r') {
-            return Err(ParseError::InvalidBytes);
-        }
-
-        payload.push((*line).to_owned());
-        *index += 1;
-    }
-
-    Ok(payload)
+    let mut parser = Parser::new(lines, token);
+    parser.index = *index;
+    let res = parser.read_payload(count);
+    *index = parser.index;
+    res.map_err(|f| f.kind)
 }
 
-fn parse_operation(
-    lines: &[&str],
-    index: &mut usize,
-    token: &str,
-) -> Result<Operation, ParseError> {
-    let line = lines.get(*index).ok_or(ParseError::Truncated)?;
+#[cfg(test)]
+pub(crate) trait ErrorKind<K> {
+    fn kind(&self) -> K;
+}
 
-    if line.starts_with(&format!("CVB::{token}::OP replace ")) {
-        parse_replace(lines, index, token)
-    } else if line.starts_with(&format!("CVB::{token}::OP delete ")) {
-        parse_delete(lines, index, token)
-    } else if line.starts_with(&format!("CVB::{token}::OP insert ")) {
-        parse_insert(lines, index, token)
-    } else {
-        Err(ParseError::Syntax)
+#[cfg(test)]
+impl ErrorKind<ParseError> for ParseFailure {
+    fn kind(&self) -> ParseError {
+        self.kind
     }
 }
 
-fn parse_replace(
-    lines: &[&str],
-    index: &mut usize,
-    token: &str,
-) -> Result<Operation, ParseError> {
-    let prefix = format!("CVB::{token}::OP replace lines=");
-    let line = lines.get(*index).ok_or(ParseError::Truncated)?;
-    let range_text = line.strip_prefix(&prefix).ok_or(ParseError::Syntax)?;
-    let (start, end) = parse_range(range_text)?;
-    *index += 1;
-
-    let old_header = lines.get(*index).ok_or(ParseError::Truncated)?;
-    let old_prefix = format!("CVB::{token}::OLD n=");
-    let old_count_text = old_header
-        .strip_prefix(&old_prefix)
-        .ok_or(ParseError::Syntax)?;
-    let old_count = parse_count(old_count_text)?;
-    *index += 1;
-
-    if old_count != end - start + 1 {
-        return Err(ParseError::Count);
+#[cfg(test)]
+impl ErrorKind<PlanError> for PlanFailure {
+    fn kind(&self) -> PlanError {
+        self.kind
     }
-
-    let old = read_payload(lines, index, token, old_count)?;
-
-    let new_header = lines.get(*index).ok_or(ParseError::Truncated)?;
-    let new_prefix = format!("CVB::{token}::NEW n=");
-    let new_count_text = new_header
-        .strip_prefix(&new_prefix)
-        .ok_or(ParseError::Syntax)?;
-    let new_count = parse_count(new_count_text)?;
-    *index += 1;
-
-    if new_count == 0 {
-        return Err(ParseError::Count);
-    }
-
-    let new = read_payload(lines, index, token, new_count)?;
-    consume_endop(lines, index, token)?;
-
-    Ok(Operation::Replace {
-        start,
-        end,
-        old,
-        new,
-    })
 }
 
-fn parse_delete(
-    lines: &[&str],
-    index: &mut usize,
-    token: &str,
-) -> Result<Operation, ParseError> {
-    let prefix = format!("CVB::{token}::OP delete lines=");
-    let line = lines.get(*index).ok_or(ParseError::Truncated)?;
-    let range_text = line.strip_prefix(&prefix).ok_or(ParseError::Syntax)?;
-    let (start, end) = parse_range(range_text)?;
-    *index += 1;
-
-    let header = lines.get(*index).ok_or(ParseError::Truncated)?;
-    let count_text = header
-        .strip_prefix(&format!("CVB::{token}::OLD n="))
-        .ok_or(ParseError::Syntax)?;
-    let count = parse_count(count_text)?;
-    *index += 1;
-
-    if count != end - start + 1 {
-        return Err(ParseError::Count);
-    }
-
-    let old = read_payload(lines, index, token, count)?;
-    consume_endop(lines, index, token)?;
-
-    Ok(Operation::Delete { start, end, old })
+#[cfg(test)]
+pub(crate) fn kind<T, E: ErrorKind<K>, K>(r: Result<T, E>) -> Result<T, K> {
+    r.map_err(|e| e.kind())
 }
 
-fn parse_insert(
-    lines: &[&str],
-    index: &mut usize,
-    token: &str,
-) -> Result<Operation, ParseError> {
-    let line = lines.get(*index).ok_or(ParseError::Truncated)?;
-    let (position, range_text) =
-        if let Some(value) = line.strip_prefix(&format!("CVB::{token}::OP insert after=")) {
-            (InsertPosition::After, value)
-        } else if let Some(value) =
-            line.strip_prefix(&format!("CVB::{token}::OP insert before="))
-        {
-            (InsertPosition::Before, value)
-        } else {
-            return Err(ParseError::Syntax);
-        };
-
-    let (start, end) = parse_range(range_text)?;
-    *index += 1;
-
-    let header = lines.get(*index).ok_or(ParseError::Truncated)?;
-    let count_text = header
-        .strip_prefix(&format!("CVB::{token}::ANCHOR n="))
-        .ok_or(ParseError::Syntax)?;
-    let count = parse_count(count_text)?;
-    *index += 1;
-
-    if count != end - start + 1 {
-        return Err(ParseError::Count);
-    }
-
-    let anchor = read_payload(lines, index, token, count)?;
-
-    let header = lines.get(*index).ok_or(ParseError::Truncated)?;
-    let new_count_text = header
-        .strip_prefix(&format!("CVB::{token}::NEW n="))
-        .ok_or(ParseError::Syntax)?;
-    let new_count = parse_count(new_count_text)?;
-    *index += 1;
-
-    if new_count == 0 {
-        return Err(ParseError::Count);
-    }
-
-    let new = read_payload(lines, index, token, new_count)?;
-    consume_endop(lines, index, token)?;
-
-    Ok(Operation::Insert {
-        position,
-        start,
-        end,
-        anchor,
-        new,
-    })
-}
-
-fn consume_endop(
-    lines: &[&str],
-    index: &mut usize,
-    token: &str,
-) -> Result<(), ParseError> {
-    let line = lines.get(*index).ok_or(ParseError::Truncated)?;
-    if *line != format!("CVB::{token}::ENDOP") {
-        return Err(if *index + 1 == lines.len() {
-            ParseError::Truncated
-        } else {
-            ParseError::Syntax
-        });
-    }
-
-    *index += 1;
-    Ok(())
-}
-
-pub(crate) fn parse_envelope(input: &str) -> Result<Envelope, ParseError> {
+pub(crate) fn parse_envelope(input: &str) -> Result<Envelope, ParseFailure> {
     const MAX_INPUT_BYTES: usize = 4 * 1024 * 1024;
     const MAX_OPERATIONS: usize = 500;
 
     if input.len() > MAX_INPUT_BYTES {
-        return Err(ParseError::Limit);
+        return Err(ParseFailure {
+            kind: ParseError::Limit,
+            line: 1,
+            detail: Some("input exceeds maximum size".into()),
+        });
     }
     let normalized = input.replace("\r\n", "\n");
     let mut lines: Vec<&str> = normalized.split('\n').collect();
 
-    // Ignore the single empty split item caused by a final newline.
     if lines.last() == Some(&"") {
         lines.pop();
     }
@@ -369,38 +788,69 @@ pub(crate) fn parse_envelope(input: &str) -> Result<Envelope, ParseError> {
     let begin_index = lines
         .iter()
         .position(|line| is_begin_shaped(line))
-        .ok_or(ParseError::NoEnvelope)?;
+        .ok_or_else(|| ParseFailure {
+            kind: ParseError::NoEnvelope,
+            line: lines.len(),
+            detail: None,
+        })?;
 
-    let (token, id) = parse_begin(lines[begin_index])?;
+    let (token, id) = parse_begin(lines[begin_index]).map_err(|k| ParseFailure {
+        kind: k,
+        line: begin_index + 1,
+        detail: None,
+    })?;
+    let mut parser = Parser::new(&lines, &token);
+    parser.index = begin_index + 1;
+
     let mut files = Vec::new();
     let mut seen_paths = std::collections::HashSet::new();
-    let mut index = begin_index + 1;
     let mut operation_count = 0usize;
 
-    while index < lines.len() {
-        let line = lines[index];
-
-        if line.starts_with(&format!("CVB::{token}::END ")) {
-            let value = match line.strip_prefix(&format!("CVB::{token}::END ops=")) {
+    while let Some(line) = parser.peek() {
+        let end_prefix = format!("{}END ", parser.prefix);
+        if line.starts_with(&end_prefix) {
+            let ops_prefix = format!("{}END ops=", parser.prefix);
+            let is_last_line = parser.index + 1 == parser.lines.len();
+            let value = match line.strip_prefix(&ops_prefix) {
                 Some(value) => value,
                 None => {
-                    return Err(if index + 1 == lines.len() {
-                        ParseError::Truncated
-                    } else {
-                        ParseError::Syntax
+                    return Err(ParseFailure {
+                        kind: if is_last_line {
+                            ParseError::Truncated
+                        } else {
+                            ParseError::Syntax
+                        },
+                        line: parser.index + 1,
+                        detail: None,
                     });
                 }
             };
             let declared_count = match parse_count(value) {
                 Ok(count) => count,
-                Err(_) if index + 1 == lines.len() => {
-                    return Err(ParseError::Truncated);
+                Err(_) if is_last_line => {
+                    return Err(ParseFailure {
+                        kind: ParseError::Truncated,
+                        line: parser.index + 1,
+                        detail: None,
+                    });
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    return Err(ParseFailure {
+                        kind: error,
+                        line: parser.index + 1,
+                        detail: None,
+                    });
+                }
             };
 
             if declared_count != operation_count || operation_count == 0 {
-                return Err(ParseError::Syntax);
+                return Err(ParseFailure {
+                    kind: ParseError::Syntax,
+                    line: parser.index + 1,
+                    detail: Some(format!(
+                        "declared count {declared_count} does not match actual operations {operation_count}"
+                    )),
+                });
             }
 
             if files.is_empty()
@@ -408,53 +858,84 @@ pub(crate) fn parse_envelope(input: &str) -> Result<Envelope, ParseError> {
                     .iter()
                     .any(|file: &FileSection| file.operations.is_empty())
             {
-                return Err(ParseError::Syntax);
+                return Err(ParseFailure {
+                    kind: ParseError::Syntax,
+                    line: parser.index + 1,
+                    detail: None,
+                });
             }
 
-            if lines[index + 1..]
+            if parser.lines[parser.index + 1..]
                 .iter()
                 .any(|line| is_begin_shaped(line))
             {
-                return Err(ParseError::MultipleEnvelopes);
+                return Err(ParseFailure {
+                    kind: ParseError::MultipleEnvelopes,
+                    line: parser.index + 2,
+                    detail: None,
+                });
             }
 
-            return Ok(Envelope {
-                token,
-                id,
-                files,
-            });
+            return Ok(Envelope { token, id, files });
         }
 
-        if line.starts_with(&format!("CVB::{token}::OP ")) {
-            let operation = parse_operation(&lines, &mut index, &token)?;
-            let file = files.last_mut().ok_or(ParseError::Syntax)?;
+        let op_prefix = format!("{}OP ", parser.prefix);
+        if line.starts_with(&op_prefix) {
+            let op_line = parser.index + 1;
+            let operation = parser.parse_operation()?;
+            let file = files.last_mut().ok_or_else(|| ParseFailure {
+                kind: ParseError::Syntax,
+                line: op_line,
+                detail: None,
+            })?;
             file.operations.push(operation);
             operation_count += 1;
             if operation_count > MAX_OPERATIONS {
-                return Err(ParseError::Limit);
+                return Err(ParseFailure {
+                    kind: ParseError::Limit,
+                    line: op_line,
+                    detail: Some("exceeded 500 operations".into()),
+                });
             }
             continue;
         }
 
         if line.starts_with("CVB::") {
-            let path = parse_file(line, &token)?;
+            let file_line = parser.index + 1;
+            let path = parse_file(line, &token).map_err(|k| ParseFailure {
+                kind: k,
+                line: file_line,
+                detail: None,
+            })?;
 
             if !seen_paths.insert(path.clone()) {
-                return Err(ParseError::DuplicateFile);
+                return Err(ParseFailure {
+                    kind: ParseError::DuplicateFile,
+                    line: file_line,
+                    detail: None,
+                });
             }
 
             files.push(FileSection {
                 path,
                 operations: Vec::new(),
             });
-            index += 1;
+            parser.index += 1;
             continue;
         }
 
-        return Err(ParseError::Stray);
+        return Err(ParseFailure {
+            kind: ParseError::Stray,
+            line: parser.index + 1,
+            detail: None,
+        });
     }
 
-    Err(ParseError::Truncated)
+    Err(ParseFailure {
+        kind: ParseError::Truncated,
+        line: parser.lines.len(),
+        detail: None,
+    })
 }
 #[cfg(test)]
 mod tests {
@@ -479,11 +960,7 @@ mod tests {
         assert_eq!(parse_count("12"), Ok(12));
 
         for invalid in ["", "-1", "+1", "01", " 1", "1 ", "1.0"] {
-            assert_eq!(
-                parse_count(invalid),
-                Err(ParseError::Syntax),
-                "{invalid:?}"
-            );
+            assert_eq!(parse_count(invalid), Err(ParseError::Syntax), "{invalid:?}");
         }
     }
 
@@ -496,11 +973,7 @@ mod tests {
         assert_eq!(parse_range("4-3"), Err(ParseError::Range));
 
         for invalid in ["", "1", "1-2-3", "01-2", "1-02", "1 -2", "1- 2"] {
-            assert_eq!(
-                parse_range(invalid),
-                Err(ParseError::Syntax),
-                "{invalid:?}"
-            );
+            assert_eq!(parse_range(invalid), Err(ParseError::Syntax), "{invalid:?}");
         }
     }
 
@@ -541,13 +1014,13 @@ mod tests {
             "CVB::k7Q2xw9R::FILE path=src/main.rs\n",
         );
 
-        assert_eq!(parse_envelope(input), Err(ParseError::Truncated));
+        assert_eq!(kind(parse_envelope(input)), Err(ParseError::Truncated));
     }
 
     #[test]
     fn malformed_begin_header_is_syntax_not_no_envelope() {
         assert_eq!(
-            parse_envelope("CVB::k7Q2xw9R::BEGIN \\n"),
+            kind(parse_envelope("CVB::k7Q2xw9R::BEGIN \n")),
             Err(ParseError::Syntax)
         );
     }
@@ -565,7 +1038,80 @@ new
 CVB::k7Q2xw9R::ENDOP
 CVB::k7Q2xw9R::END ops=1";
 
-        assert_eq!(parse_envelope(input), Err(ParseError::InvalidBytes));
+        assert_eq!(kind(parse_envelope(input)), Err(ParseError::InvalidBytes));
+    }
+
+    #[test]
+    fn rejects_huge_new_count_in_replace_without_panicking() {
+        let input = "\
+CVB::k7Q2xw9R::BEGIN v=1 id=demo-01
+CVB::k7Q2xw9R::FILE path=src/main.rs
+CVB::k7Q2xw9R::OP replace lines=1-1
+CVB::k7Q2xw9R::OLD n=1
+old
+CVB::k7Q2xw9R::NEW n=18446744073709551615
+CVB::k7Q2xw9R::ENDOP
+CVB::k7Q2xw9R::END ops=1";
+
+        assert_eq!(kind(parse_envelope(input)), Err(ParseError::Truncated));
+    }
+
+    #[test]
+    fn rejects_huge_old_count_in_replace_without_panicking() {
+        let input = "\
+CVB::k7Q2xw9R::BEGIN v=1 id=demo-01
+CVB::k7Q2xw9R::FILE path=src/main.rs
+CVB::k7Q2xw9R::OP replace lines=1-18446744073709551615
+CVB::k7Q2xw9R::OLD n=18446744073709551615
+CVB::k7Q2xw9R::NEW n=1
+new
+CVB::k7Q2xw9R::ENDOP
+CVB::k7Q2xw9R::END ops=1";
+
+        assert_eq!(kind(parse_envelope(input)), Err(ParseError::Truncated));
+    }
+
+    #[test]
+    fn rejects_huge_old_count_in_delete_without_panicking() {
+        let input = "\
+CVB::k7Q2xw9R::BEGIN v=1 id=demo-01
+CVB::k7Q2xw9R::FILE path=src/main.rs
+CVB::k7Q2xw9R::OP delete lines=1-18446744073709551615
+CVB::k7Q2xw9R::OLD n=18446744073709551615
+CVB::k7Q2xw9R::ENDOP
+CVB::k7Q2xw9R::END ops=1";
+
+        assert_eq!(kind(parse_envelope(input)), Err(ParseError::Truncated));
+    }
+
+    #[test]
+    fn rejects_huge_anchor_count_in_insert_without_panicking() {
+        let input = "\
+CVB::k7Q2xw9R::BEGIN v=1 id=demo-01
+CVB::k7Q2xw9R::FILE path=src/main.rs
+CVB::k7Q2xw9R::OP insert after=1-18446744073709551615
+CVB::k7Q2xw9R::ANCHOR n=18446744073709551615
+CVB::k7Q2xw9R::NEW n=1
+new
+CVB::k7Q2xw9R::ENDOP
+CVB::k7Q2xw9R::END ops=1";
+
+        assert_eq!(kind(parse_envelope(input)), Err(ParseError::Truncated));
+    }
+
+    #[test]
+    fn rejects_count_exceeding_remaining_lines_as_truncated() {
+        let input = "\
+CVB::k7Q2xw9R::BEGIN v=1 id=demo-01
+CVB::k7Q2xw9R::FILE path=src/main.rs
+CVB::k7Q2xw9R::OP replace lines=1-1
+CVB::k7Q2xw9R::OLD n=1
+old
+CVB::k7Q2xw9R::NEW n=5
+line 1
+line 2";
+
+        assert_eq!(kind(parse_envelope(input)), Err(ParseError::Truncated));
     }
 
     #[test]
@@ -584,10 +1130,7 @@ CVB::k7Q2xw9R::END ops=1";
     fn payload_collision_precedes_invalid_bytes() {
         let token = "k7Q2xw9R";
 
-        for payload_line in [
-            "CVB::k7Q2xw9R::FIELD\0",
-            "CVB::k7Q2xw9R::FIELD\r",
-        ] {
+        for payload_line in ["CVB::k7Q2xw9R::FIELD\0", "CVB::k7Q2xw9R::FIELD\r"] {
             let lines = [payload_line];
             let mut index = 0;
 
@@ -635,29 +1178,28 @@ new2
 CVB::k7Q2xw9R::ENDOP
 CVB::k7Q2xw9R::END ops=2";
 
-        assert_eq!(parse_envelope(input), Err(ParseError::DuplicateFile));
+        assert_eq!(kind(parse_envelope(input)), Err(ParseError::DuplicateFile));
     }
 
-
     #[test]
-    fn rejects_input_over_four_mibibytes() {
+    fn rejects_input_over_four_mebibytes() {
         let input = "x".repeat(4 * 1024 * 1024 + 1);
-        assert_eq!(parse_envelope(&input), Err(ParseError::Limit));
+        assert_eq!(kind(parse_envelope(&input)), Err(ParseError::Limit));
     }
 
     #[test]
-    fn accepts_input_at_four_mibibytes_before_normalization() {
+    fn input_at_limit_passes_size_check() {
         let mut input = "x".repeat(4 * 1024 * 1024);
-        assert_eq!(parse_envelope(&input), Err(ParseError::NoEnvelope));
+        assert_eq!(kind(parse_envelope(&input)), Err(ParseError::NoEnvelope));
         input.push('x');
-        assert_eq!(parse_envelope(&input), Err(ParseError::Limit));
+        assert_eq!(kind(parse_envelope(&input)), Err(ParseError::Limit));
     }
 
     #[test]
     fn rejects_more_than_five_hundred_operations() {
         let mut input = String::from(
             "CVB::k7Q2xw9R::BEGIN v=1 id=demo-01\n\
-             CVB::k7Q2xw9R::FILE path=src/main.rs\n"
+             CVB::k7Q2xw9R::FILE path=src/main.rs\n",
         );
 
         for _ in 0..501 {
@@ -667,14 +1209,57 @@ CVB::k7Q2xw9R::END ops=2";
                  old\n\
                  CVB::k7Q2xw9R::NEW n=1\n\
                  new\n\
-                 CVB::k7Q2xw9R::ENDOP\n"
+                 CVB::k7Q2xw9R::ENDOP\n",
             );
         }
 
         input.push_str("CVB::k7Q2xw9R::END ops=501");
-        assert_eq!(parse_envelope(&input), Err(ParseError::Limit));
+        assert_eq!(kind(parse_envelope(&input)), Err(ParseError::Limit));
     }
 
+    #[test]
+    fn rejects_git_components_in_relative_file_paths() {
+        for path in [
+            ".git",
+            ".git/hooks/pre-commit",
+            ".git/config",
+            "sub/.git/hooks/x",
+            ".GIT/hooks/x",
+        ] {
+            let line = format!("CVB::k7Q2xw9R::FILE path={path}");
+            assert_eq!(
+                parse_file(&line, "k7Q2xw9R"),
+                Err(ParseError::InvalidPath),
+                "{path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_git_lookalikes_in_relative_file_paths() {
+        for path in [
+            ".gitignore",
+            ".gitattributes",
+            ".github/workflows/ci.yml",
+            "src/git.rs",
+        ] {
+            let line = format!("CVB::k7Q2xw9R::FILE path={path}");
+            assert_eq!(
+                parse_file(&line, "k7Q2xw9R"),
+                Ok(path.to_string()),
+                "{path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn detect_newline_distinguishes_lf_crlf_mixed_and_lone_cr() {
+        assert_eq!(detect_newline("hello\nworld\n"), Ok(Newline::Lf));
+        assert_eq!(detect_newline("hello\r\nworld\r\n"), Ok(Newline::Crlf));
+        assert_eq!(detect_newline("hello\nworld\r\n"), Err(NewlineError::Mixed));
+        assert_eq!(detect_newline("hello\rworld\n"), Err(NewlineError::LoneCr));
+        assert_eq!(detect_newline("no newlines"), Ok(Newline::Lf));
+    }
 
     #[test]
     fn preserves_blank_lines_inside_payload() {
@@ -828,7 +1413,10 @@ CVB::k7Q2xw9R::END ops=1";
 
     #[test]
     fn rejects_input_without_begin() {
-        assert_eq!(parse_envelope("nothing here\n"), Err(ParseError::NoEnvelope));
+        assert_eq!(
+            kind(parse_envelope("nothing here\n")),
+            Err(ParseError::NoEnvelope)
+        );
     }
 
     #[test]
@@ -846,14 +1434,14 @@ CVB::k7Q2xw9R::END ops=1
 CVB::A1B2C3D4::BEGIN nonsense";
 
         assert_eq!(
-            parse_envelope(input),
+            kind(parse_envelope(input)),
             Err(ParseError::MultipleEnvelopes)
         );
     }
 
     #[test]
     fn malformed_final_end_line_is_truncated() {
-        let input = "\\
+        let input = "\
 CVB::k7Q2xw9R::BEGIN v=1 id=demo-01
 CVB::k7Q2xw9R::FILE path=src/main.rs
 CVB::k7Q2xw9R::OP replace lines=1-1
@@ -865,12 +1453,12 @@ CVB::k7Q2xw9R::ENDOP
 CVB::k7Q2xw9R::END ops=
 ";
 
-        assert_eq!(parse_envelope(input), Err(ParseError::Truncated));
+        assert_eq!(kind(parse_envelope(input)), Err(ParseError::Truncated));
     }
 
     #[test]
     fn malformed_end_line_before_more_input_is_syntax() {
-        let input = "\\
+        let input = "\
 CVB::k7Q2xw9R::BEGIN v=1 id=demo-01
 CVB::k7Q2xw9R::FILE path=src/main.rs
 CVB::k7Q2xw9R::OP replace lines=1-1
@@ -882,7 +1470,7 @@ CVB::k7Q2xw9R::ENDOP
 CVB::k7Q2xw9R::END ops=
 extra";
 
-        assert_eq!(parse_envelope(input), Err(ParseError::Syntax));
+        assert_eq!(kind(parse_envelope(input)), Err(ParseError::Syntax));
     }
 
     #[test]
@@ -898,13 +1486,12 @@ new
 CVB::k7Q2xw9R::ENDOP
 CVB::k7Q2xw9R::END ops=2";
 
-        assert_eq!(parse_envelope(input), Err(ParseError::Syntax));
+        assert_eq!(kind(parse_envelope(input)), Err(ParseError::Syntax));
     }
-
 
     #[test]
     fn malformed_final_endop_is_truncated() {
-        let input = "\\
+        let input = "\
 CVB::k7Q2xw9R::BEGIN v=1 id=demo-01
 CVB::k7Q2xw9R::FILE path=src/main.rs
 CVB::k7Q2xw9R::OP replace lines=1-1
@@ -914,7 +1501,7 @@ CVB::k7Q2xw9R::NEW n=1
 new
 CVB::k7Q2xw9R::NOT_ENDOP";
 
-        assert_eq!(parse_envelope(input), Err(ParseError::Truncated));
+        assert_eq!(kind(parse_envelope(input)), Err(ParseError::Truncated));
     }
 
     #[test]
@@ -930,7 +1517,7 @@ new
 CVB::k7Q2xw9R::NOT_ENDOP
 CVB::k7Q2xw9R::END ops=1";
 
-        assert_eq!(parse_envelope(input), Err(ParseError::Syntax));
+        assert_eq!(kind(parse_envelope(input)), Err(ParseError::Syntax));
     }
 
     #[test]
@@ -940,9 +1527,8 @@ CVB::k7Q2xw9R::BEGIN v=1 id=demo-01
 CVB::k7Q2xw9R::FILE path=src/main.rs
 CVB::k7Q2xw9R::END ops=0";
 
-        assert_eq!(parse_envelope(input), Err(ParseError::Syntax));
+        assert_eq!(kind(parse_envelope(input)), Err(ParseError::Syntax));
     }
-
 
     #[test]
     fn accepts_valid_relative_file_paths() {
@@ -979,7 +1565,6 @@ CVB::k7Q2xw9R::END ops=0";
             );
         }
     }
-
 }
 
 /// Reads the existing target files without modifying them.
@@ -989,89 +1574,67 @@ CVB::k7Q2xw9R::END ops=0";
 pub(crate) fn load_originals(
     root: &std::path::Path,
     envelope: &Envelope,
-) -> Result<std::collections::HashMap<String, String>, String> {
+) -> Result<std::collections::HashMap<String, String>, LoadError> {
     use std::path::{Component, Path};
 
     let mut originals = std::collections::HashMap::new();
 
     for section in &envelope.files {
+        if validate_relative_path(&section.path).is_err() {
+            return Err(LoadError::UnsafePath(section.path.clone()));
+        }
         let relative = Path::new(&section.path);
 
-        if section.path.is_empty()
-            || section.path.contains('\\')
-            || relative.is_absolute()
-            || !relative.components().all(|part| matches!(part, Component::Normal(_)))
-        {
-            return Err(format!("CVB: unsafe target path '{}'", section.path));
-        }
-
         if originals.contains_key(&section.path) {
-            return Err(format!("CVB: duplicate target path '{}'", section.path));
+            return Err(LoadError::DuplicatePath(section.path.clone()));
         }
 
         let mut current = root.to_path_buf();
         for component in relative.components() {
             current.push(component.as_os_str());
-            let metadata = std::fs::symlink_metadata(&current).map_err(|error| {
-                format!("CVB: unable to inspect '{}': {error}", current.display())
-            })?;
+            let metadata =
+                std::fs::symlink_metadata(&current).map_err(|error| LoadError::Inspect {
+                    path: current.display().to_string(),
+                    message: error.to_string(),
+                })?;
 
             if metadata.file_type().is_symlink() {
-                return Err(format!("CVB: symlink target is not allowed: '{}'", current.display()));
+                return Err(LoadError::SymlinkTarget(current.display().to_string()));
             }
         }
 
-        let metadata = std::fs::metadata(&current)
-            .map_err(|error| format!("CVB: unable to inspect '{}': {error}", current.display()))?;
+        let metadata = std::fs::metadata(&current).map_err(|error| LoadError::Inspect {
+            path: current.display().to_string(),
+            message: error.to_string(),
+        })?;
         if !metadata.is_file() {
-            return Err(format!("CVB: target is not a regular file: '{}'", current.display()));
+            return Err(LoadError::NotRegularFile(current.display().to_string()));
         }
 
-        let bytes = std::fs::read(&current)
-            .map_err(|error| format!("CVB: unable to read '{}': {error}", current.display()))?;
+        let bytes = std::fs::read(&current).map_err(|error| LoadError::Read {
+            path: current.display().to_string(),
+            message: error.to_string(),
+        })?;
 
         let contents = String::from_utf8(bytes)
-            .map_err(|_| format!("CVB: invalid UTF-8 in '{}'", current.display()))?;
+            .map_err(|_| LoadError::InvalidUtf8(current.display().to_string()))?;
 
         if contents.contains('\0') {
-            return Err(format!("CVB: NUL byte is not allowed: '{}'", current.display()));
+            return Err(LoadError::NulByte(current.display().to_string()));
         }
 
         if contents.starts_with('\u{FEFF}') {
-            return Err(format!("CVB: UTF-8 BOM is not allowed: '{}'", current.display()));
+            return Err(LoadError::Bom(current.display().to_string()));
         }
 
-        let bytes = contents.as_bytes();
-        let mut has_lf = false;
-        let mut has_crlf = false;
-        let mut index = 0;
-
-        while index < bytes.len() {
-            match bytes[index] {
-                b'\r' => {
-                    if bytes.get(index + 1) == Some(&b'\n') {
-                        has_crlf = true;
-                        index += 2;
-                    } else {
-                        return Err(format!(
-                            "CVB: lone CR is not allowed: '{}'",
-                            current.display()
-                        ));
-                    }
-                }
-                b'\n' => {
-                    has_lf = true;
-                    index += 1;
-                }
-                _ => index += 1,
+        match detect_newline(&contents) {
+            Err(NewlineError::LoneCr) => {
+                return Err(LoadError::LoneCr(current.display().to_string()));
             }
-        }
-
-        if has_lf && has_crlf {
-            return Err(format!(
-                "CVB: mixed LF/CRLF line endings: '{}'",
-                current.display()
-            ));
+            Err(NewlineError::Mixed) => {
+                return Err(LoadError::MixedLineEndings(current.display().to_string()));
+            }
+            Ok(_) => {}
         }
 
         originals.insert(section.path.clone(), contents);
@@ -1083,9 +1646,9 @@ pub(crate) fn load_originals(
 /// Error from parsing, loading, or planning a surgery envelope.
 #[derive(Debug)]
 pub(crate) enum PipelineError {
-    Parse(ParseError),
-    Load(String),
-    Plan(PlanError),
+    Parse(ParseFailure),
+    Load(LoadError),
+    Plan(PlanFailure),
 }
 
 /// Parses an envelope, reads its target files, and builds an in-memory plan.
@@ -1096,8 +1659,7 @@ pub(crate) fn parse_load_plan(
 ) -> Result<(Envelope, Plan), PipelineError> {
     let envelope = parse_envelope(input).map_err(PipelineError::Parse)?;
     let originals = load_originals(root, &envelope).map_err(PipelineError::Load)?;
-    let plan =
-        plan_envelope(&envelope, &originals).map_err(PipelineError::Plan)?;
+    let plan = plan_envelope(&envelope, &originals).map_err(PipelineError::Plan)?;
 
     Ok((envelope, plan))
 }
@@ -1119,7 +1681,7 @@ pub(crate) struct PlannedFile {
 }
 
 /// Failures the pure planner can report.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PlanError {
     InvalidPath,
     DuplicateFile,
@@ -1132,164 +1694,266 @@ pub(crate) enum PlanError {
     NoOp,
 }
 
-
 /// Applies one operation to an original file represented as lines.
 /// All operation ranges are one-based and refer to the original lines.
-pub(crate) fn apply_operation(
+pub(crate) fn validate_operation(
     original: &[String],
     operation: &Operation,
-) -> Result<Vec<String>, PlanError> {
+) -> Result<(), PlanError> {
+    validate_operation_detail(original, operation).map_err(|(err, _)| err)
+}
+
+pub(crate) fn validate_operation_detail(
+    original: &[String],
+    operation: &Operation,
+) -> Result<(), (PlanError, PlanDetail)> {
     if original.is_empty() {
-        return Err(PlanError::InvalidFile);
+        return Err((
+            PlanError::InvalidFile,
+            PlanDetail::Other("target file is empty".into()),
+        ));
     }
 
-    let mut proposed = original.to_vec();
-
     match operation {
-        Operation::Replace { start, end, old, new } => {
+        Operation::Replace {
+            start,
+            end,
+            old,
+            new,
+        } => {
             if *start == 0 || start > end || *end > original.len() {
-                return Err(PlanError::Range);
+                return Err((
+                    PlanError::Range,
+                    PlanDetail::Range {
+                        file_lines: original.len(),
+                    },
+                ));
             }
             if new.is_empty() {
-                return Err(PlanError::InvalidFile);
+                return Err((
+                    PlanError::InvalidFile,
+                    PlanDetail::Other("new payload cannot be empty".into()),
+                ));
             }
 
             let first = start - 1;
             let last = *end;
 
             if original[first..last] != old[..] {
-                return Err(PlanError::Precondition);
+                let mut mismatch_line = *start;
+                let mut exp = String::new();
+                let mut fnd = String::new();
+                for (k, (orig_l, old_l)) in original[first..last].iter().zip(old.iter()).enumerate()
+                {
+                    if orig_l != old_l {
+                        mismatch_line = start + k;
+                        exp = old_l.clone();
+                        fnd = orig_l.clone();
+                        break;
+                    }
+                }
+                let only_ws = exp.trim_end() == fnd.trim_end();
+                return Err((
+                    PlanError::Precondition,
+                    PlanDetail::Precondition {
+                        line: mismatch_line,
+                        expected: exp,
+                        found: fnd,
+                        only_trailing_whitespace: only_ws,
+                    },
+                ));
             }
             if old == new {
-                return Err(PlanError::NoOp);
+                return Err((
+                    PlanError::NoOp,
+                    PlanDetail::Other("replacement is identical to original".into()),
+                ));
             }
-
-            proposed.splice(first..last, new.iter().cloned());
         }
 
         Operation::Delete { start, end, old } => {
             if *start == 0 || start > end || *end > original.len() {
-                return Err(PlanError::Range);
+                return Err((
+                    PlanError::Range,
+                    PlanDetail::Range {
+                        file_lines: original.len(),
+                    },
+                ));
             }
 
             let first = start - 1;
             let last = *end;
 
             if original[first..last] != old[..] {
-                return Err(PlanError::Precondition);
+                let mut mismatch_line = *start;
+                let mut exp = String::new();
+                let mut fnd = String::new();
+                for (k, (orig_l, old_l)) in original[first..last].iter().zip(old.iter()).enumerate()
+                {
+                    if orig_l != old_l {
+                        mismatch_line = start + k;
+                        exp = old_l.clone();
+                        fnd = orig_l.clone();
+                        break;
+                    }
+                }
+                let only_ws = exp.trim_end() == fnd.trim_end();
+                return Err((
+                    PlanError::Precondition,
+                    PlanDetail::Precondition {
+                        line: mismatch_line,
+                        expected: exp,
+                        found: fnd,
+                        only_trailing_whitespace: only_ws,
+                    },
+                ));
             }
             if first == 0 && last == original.len() {
-                return Err(PlanError::EndOfFile);
+                return Err((
+                    PlanError::EndOfFile,
+                    PlanDetail::EndOfFile {
+                        suggestion:
+                            "cannot delete the entire file; cvb surgery modifies existing files"
+                                .into(),
+                    },
+                ));
             }
-
-            proposed.drain(first..last);
         }
 
-        Operation::Insert { position, start, end, anchor, new } => {
+        Operation::Insert {
+            position,
+            start,
+            end,
+            anchor,
+            new,
+        } => {
             if *start == 0 || start > end || *end > original.len() {
-                return Err(PlanError::Range);
+                return Err((
+                    PlanError::Range,
+                    PlanDetail::Range {
+                        file_lines: original.len(),
+                    },
+                ));
             }
             if new.is_empty() {
-                return Err(PlanError::InvalidFile);
+                return Err((
+                    PlanError::InvalidFile,
+                    PlanDetail::Other("inserted text cannot be empty".into()),
+                ));
             }
 
             let first = start - 1;
             let last = *end;
 
-            if original[first..last] != anchor[..] {
-                return Err(PlanError::Precondition);
-            }
-
             if (matches!(position, InsertPosition::Before) && first == 0)
                 || (matches!(position, InsertPosition::After) && last == original.len())
             {
-                return Err(PlanError::EndOfFile);
+                return Err((PlanError::EndOfFile, PlanDetail::EndOfFile { suggestion: "cannot insert before first line or after last line; include the boundary line in a replace operation rather than inserting before/after it".into() }));
             }
 
-            let insertion_index = match position {
-                InsertPosition::Before => first,
-                InsertPosition::After => last,
-            };
-
-            proposed.splice(insertion_index..insertion_index, new.iter().cloned());
+            if original[first..last] != anchor[..] {
+                let mut mismatch_line = *start;
+                let mut exp = String::new();
+                let mut fnd = String::new();
+                for (k, (orig_l, anc_l)) in
+                    original[first..last].iter().zip(anchor.iter()).enumerate()
+                {
+                    if orig_l != anc_l {
+                        mismatch_line = start + k;
+                        exp = anc_l.clone();
+                        fnd = orig_l.clone();
+                        break;
+                    }
+                }
+                let only_ws = exp.trim_end() == fnd.trim_end();
+                return Err((
+                    PlanError::Precondition,
+                    PlanDetail::Precondition {
+                        line: mismatch_line,
+                        expected: exp,
+                        found: fnd,
+                        only_trailing_whitespace: only_ws,
+                    },
+                ));
+            }
         }
     }
 
-    Ok(proposed)
+    Ok(())
 }
 
 #[cfg(test)]
-mod apply_operation_tests {
+mod validate_operation_tests {
     use super::*;
 
     fn lines(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_string()).collect()
     }
 
+    fn make_test_envelope(operations: Vec<Operation>) -> Envelope {
+        Envelope {
+            token: "TOKEN123".to_owned(),
+            id: "val-test".to_owned(),
+            files: vec![FileSection {
+                path: "example.txt".to_owned(),
+                operations,
+            }],
+        }
+    }
+
+    fn make_test_originals(contents: &str) -> std::collections::HashMap<String, String> {
+        [("example.txt".to_owned(), contents.to_owned())]
+            .into_iter()
+            .collect()
+    }
+
     #[test]
     fn applies_replacement_in_memory() {
-        let original = lines(&["one", "old", "three"]);
-        let operation = Operation::Replace {
+        let envelope = make_test_envelope(vec![Operation::Replace {
             start: 2,
             end: 2,
-            old: lines(&["old"]),
-            new: lines(&["new"]),
-        };
-
-        assert_eq!(
-            apply_operation(&original, &operation),
-            Ok(lines(&["one", "new", "three"]))
-        );
-        assert_eq!(original, lines(&["one", "old", "three"]));
+            old: vec!["old".to_owned()],
+            new: vec!["new".to_owned()],
+        }]);
+        let plan = plan_envelope(&envelope, &make_test_originals("one\nold\nthree\n")).unwrap();
+        assert_eq!(plan.files[0].proposed, "one\nnew\nthree\n");
     }
 
     #[test]
     fn applies_deletion_in_memory() {
-        let original = lines(&["one", "remove", "three"]);
-        let operation = Operation::Delete {
+        let envelope = make_test_envelope(vec![Operation::Delete {
             start: 2,
             end: 2,
-            old: lines(&["remove"]),
-        };
-
-        assert_eq!(
-            apply_operation(&original, &operation),
-            Ok(lines(&["one", "three"]))
-        );
+            old: vec!["remove".to_owned()],
+        }]);
+        let plan = plan_envelope(&envelope, &make_test_originals("one\nremove\nthree\n")).unwrap();
+        assert_eq!(plan.files[0].proposed, "one\nthree\n");
     }
 
     #[test]
     fn inserts_before_anchor_in_memory() {
-        let original = lines(&["one", "anchor", "three"]);
-        let operation = Operation::Insert {
+        let envelope = make_test_envelope(vec![Operation::Insert {
             position: InsertPosition::Before,
             start: 2,
             end: 2,
-            anchor: lines(&["anchor"]),
-            new: lines(&["inserted"]),
-        };
-
-        assert_eq!(
-            apply_operation(&original, &operation),
-            Ok(lines(&["one", "inserted", "anchor", "three"]))
-        );
+            anchor: vec!["anchor".to_owned()],
+            new: vec!["inserted".to_owned()],
+        }]);
+        let plan = plan_envelope(&envelope, &make_test_originals("one\nanchor\nthree\n")).unwrap();
+        assert_eq!(plan.files[0].proposed, "one\ninserted\nanchor\nthree\n");
     }
 
     #[test]
     fn inserts_after_anchor_in_memory() {
-        let original = lines(&["one", "anchor", "three"]);
-        let operation = Operation::Insert {
+        let envelope = make_test_envelope(vec![Operation::Insert {
             position: InsertPosition::After,
             start: 2,
             end: 2,
-            anchor: lines(&["anchor"]),
-            new: lines(&["inserted"]),
-        };
-
-        assert_eq!(
-            apply_operation(&original, &operation),
-            Ok(lines(&["one", "anchor", "inserted", "three"]))
-        );
+            anchor: vec!["anchor".to_owned()],
+            new: vec!["inserted".to_owned()],
+        }]);
+        let plan = plan_envelope(&envelope, &make_test_originals("one\nanchor\nthree\n")).unwrap();
+        assert_eq!(plan.files[0].proposed, "one\nanchor\ninserted\nthree\n");
     }
 
     #[test]
@@ -1303,7 +1967,7 @@ mod apply_operation_tests {
         };
 
         assert_eq!(
-            apply_operation(&original, &operation),
+            validate_operation(&original, &operation),
             Err(PlanError::Precondition)
         );
     }
@@ -1318,7 +1982,7 @@ mod apply_operation_tests {
             old: lines(&["one"]),
         };
         assert_eq!(
-            apply_operation(&original, &zero_start),
+            validate_operation(&original, &zero_start),
             Err(PlanError::Range)
         );
 
@@ -1328,7 +1992,7 @@ mod apply_operation_tests {
             old: lines(&["two", "three"]),
         };
         assert_eq!(
-            apply_operation(&original, &past_end),
+            validate_operation(&original, &past_end),
             Err(PlanError::Range)
         );
     }
@@ -1344,7 +2008,7 @@ mod apply_operation_tests {
         };
 
         assert_eq!(
-            apply_operation(&original, &operation),
+            validate_operation(&original, &operation),
             Err(PlanError::NoOp)
         );
     }
@@ -1359,59 +2023,81 @@ mod apply_operation_tests {
         };
 
         assert_eq!(
-            apply_operation(&original, &operation),
+            validate_operation(&original, &operation),
+            Err(PlanError::EndOfFile)
+        );
+    }
+
+    #[test]
+    fn rejects_insertion_before_first_line_with_mismatched_anchor_as_end_of_file() {
+        let original = lines(&["one", "two", "three"]);
+        let operation = Operation::Insert {
+            position: InsertPosition::Before,
+            start: 1,
+            end: 1,
+            anchor: lines(&["mismatched"]),
+            new: lines(&["inserted"]),
+        };
+        assert_eq!(
+            validate_operation(&original, &operation),
             Err(PlanError::EndOfFile)
         );
     }
 }
-
 
 /// Builds a complete in-memory plan without writing to disk.
 /// All operation ranges refer to the original contents of each file.
 pub(crate) fn plan_envelope(
     envelope: &Envelope,
     originals: &std::collections::HashMap<String, String>,
-) -> Result<Plan, PlanError> {
+) -> Result<Plan, PlanFailure> {
     use std::path::{Component, Path};
 
     let mut seen = std::collections::HashSet::new();
     let mut planned_files = Vec::with_capacity(envelope.files.len());
 
     for section in &envelope.files {
-        let file_path = Path::new(&section.path);
-
-        if section.path.is_empty()
-            || section.path.contains('\\')
-            || file_path.is_absolute()
-            || !file_path.components().all(|part| matches!(part, Component::Normal(_)))
-        {
-            return Err(PlanError::InvalidPath);
+        if validate_relative_path(&section.path).is_err() {
+            return Err(PlanFailure {
+                kind: PlanError::InvalidPath,
+                path: section.path.clone(),
+                op_index: 0,
+                detail: None,
+            });
         }
 
         if !seen.insert(section.path.as_str()) {
-            return Err(PlanError::DuplicateFile);
+            return Err(PlanFailure {
+                kind: PlanError::DuplicateFile,
+                path: section.path.clone(),
+                op_index: 0,
+                detail: None,
+            });
         }
 
-        let original = originals
-            .get(&section.path)
-            .ok_or(PlanError::MissingFile)?;
+        let original = originals.get(&section.path).ok_or_else(|| PlanFailure {
+            kind: PlanError::MissingFile,
+            path: section.path.clone(),
+            op_index: 0,
+            detail: None,
+        })?;
 
         if original.is_empty() {
-            return Err(PlanError::InvalidFile);
+            return Err(PlanFailure {
+                kind: PlanError::InvalidFile,
+                path: section.path.clone(),
+                op_index: 0,
+                detail: Some(PlanDetail::Other("target file is empty".into())),
+            });
         }
 
-        // Preserve the file's newline convention. Reject mixed line endings
-        // and lone carriage returns instead of silently rewriting the file.
-        let crlf_count = original.matches("\r\n").count();
-        let remaining = original.replace("\r\n", "");
-
-        if remaining.contains('\r')
-            || (crlf_count > 0 && remaining.contains('\n'))
-        {
-            return Err(PlanError::InvalidFile);
-        }
-
-        let newline = if crlf_count > 0 { "\r\n" } else { "\n" };
+        let newline_kind = detect_newline(original).map_err(|_| PlanFailure {
+            kind: PlanError::InvalidFile,
+            path: section.path.clone(),
+            op_index: 0,
+            detail: Some(PlanDetail::Other("invalid line endings".into())),
+        })?;
+        let newline = newline_kind.as_str();
         let has_final_newline = original.ends_with(newline);
         let content = if has_final_newline {
             original.strip_suffix(newline).unwrap()
@@ -1419,41 +2105,25 @@ pub(crate) fn plan_envelope(
             original.as_str()
         };
 
-        let original_lines: Vec<String> =
-            content.split(newline).map(str::to_owned).collect();
+        let original_lines: Vec<String> = content.split(newline).map(str::to_owned).collect();
 
-        // Each edit span is represented as a half-open range of original
-        // line positions. Insertions have an empty range at their insertion
-        // point. Boundary-touching edits are conservatively considered
-        // conflicting to avoid ambiguous ordering.
         let mut edits: Vec<(usize, usize, &Operation)> = Vec::new();
 
-        for operation in &section.operations {
-            let insertion_at_boundary = match operation {
-                Operation::Insert {
-                    position: InsertPosition::Before,
-                    start,
-                    ..
-                } => *start == 1,
-                Operation::Insert {
-                    position: InsertPosition::After,
-                    end,
-                    ..
-                } => *end == original_lines.len(),
-                _ => false,
-            };
-
-            if insertion_at_boundary {
-                return Err(PlanError::EndOfFile);
-            }
-
-            // Validate range, payload preconditions, and operation-specific
-            // safety rules against the unchanged original file.
-            apply_operation(&original_lines, operation)?;
+        for (op_idx, operation) in section.operations.iter().enumerate() {
+            let op_number = op_idx + 1;
+            validate_operation_detail(&original_lines, operation).map_err(|(k, d)| {
+                PlanFailure {
+                    kind: k,
+                    path: section.path.clone(),
+                    op_index: op_number,
+                    detail: Some(d),
+                }
+            })?;
 
             let span = match operation {
-                Operation::Replace { start, end, .. }
-                | Operation::Delete { start, end, .. } => (*start - 1, *end),
+                Operation::Replace { start, end, .. } | Operation::Delete { start, end, .. } => {
+                    (*start - 1, *end)
+                }
                 Operation::Insert {
                     position: InsertPosition::Before,
                     start,
@@ -1495,7 +2165,14 @@ pub(crate) fn plan_envelope(
                 if (a_insert && anchor_overlaps(a_operation, b_operation))
                     || (b_insert && anchor_overlaps(b_operation, a_operation))
                 {
-                    return Err(PlanError::Overlap);
+                    return Err(PlanFailure {
+                        kind: PlanError::Overlap,
+                        path: section.path.clone(),
+                        op_index: i + 1,
+                        detail: Some(PlanDetail::Overlap {
+                            other_op_index: j + 1,
+                        }),
+                    });
                 }
 
                 let overlaps = match (a_insert, b_insert) {
@@ -1506,13 +2183,18 @@ pub(crate) fn plan_envelope(
                 };
 
                 if overlaps {
-                    return Err(PlanError::Overlap);
+                    return Err(PlanFailure {
+                        kind: PlanError::Overlap,
+                        path: section.path.clone(),
+                        op_index: i + 1,
+                        detail: Some(PlanDetail::Overlap {
+                            other_op_index: j + 1,
+                        }),
+                    });
                 }
             }
         }
 
-        // Work from the bottom upward so every edit retains its original
-        // line coordinates.
         edits.sort_by(|a, b| {
             b.0.cmp(&a.0).then_with(|| {
                 let a_insert = a.0 == a.1;
@@ -1524,7 +2206,9 @@ pub(crate) fn plan_envelope(
         let mut proposed_lines = original_lines;
         for (_, _, operation) in edits {
             match operation {
-                Operation::Replace { start, end, new, .. } => {
+                Operation::Replace {
+                    start, end, new, ..
+                } => {
                     proposed_lines.splice(start - 1..*end, new.iter().cloned());
                 }
                 Operation::Delete { start, end, .. } => {
@@ -1552,7 +2236,12 @@ pub(crate) fn plan_envelope(
         }
 
         if proposed == *original {
-            return Err(PlanError::NoOp);
+            return Err(PlanFailure {
+                kind: PlanError::NoOp,
+                path: section.path.clone(),
+                op_index: 0,
+                detail: Some(PlanDetail::Other("net file change is a no-op".into())),
+            });
         }
 
         planned_files.push(PlannedFile {
@@ -1588,6 +2277,159 @@ mod plan_envelope_tests {
         [("example.txt".to_owned(), contents.to_owned())]
             .into_iter()
             .collect()
+    }
+
+    #[test]
+    fn plans_large_file_with_many_operations_quickly() {
+        const TOTAL_LINES: usize = 50_000;
+        const OP_COUNT: usize = 500;
+
+        let mut lines = Vec::with_capacity(TOTAL_LINES);
+        for i in 1..=TOTAL_LINES {
+            lines.push(format!("line {i}"));
+        }
+        let original_content = lines.join("\n") + "\n";
+
+        let mut operations = Vec::with_capacity(OP_COUNT);
+        for i in 0..OP_COUNT {
+            let line_num = i * 50 + 2;
+            operations.push(Operation::Replace {
+                start: line_num,
+                end: line_num,
+                old: vec![format!("line {line_num}")],
+                new: vec![format!("replaced {line_num}")],
+            });
+        }
+
+        let envelope = make_envelope(operations);
+        let original = originals(&original_content);
+
+        let plan = plan_envelope(&envelope, &original).unwrap();
+        assert_eq!(plan.files.len(), 1);
+        assert_eq!(plan.files[0].path, "example.txt");
+    }
+
+    #[test]
+    fn precondition_error_message_shows_path_op_and_mismatch() {
+        let envelope = make_envelope(vec![Operation::Replace {
+            start: 2,
+            end: 2,
+            old: vec!["wrong".to_owned()],
+            new: vec!["replacement".to_owned()],
+        }]);
+        let original = originals("line1\nactual\nline3\n");
+        let failure = plan_envelope(&envelope, &original).unwrap_err();
+        let message = failure.to_string();
+
+        assert_eq!(failure.kind, PlanError::Precondition);
+        assert!(message.contains("example.txt"), "{message}");
+        assert!(message.contains("operation 1"), "{message}");
+        assert!(message.contains("line 2"), "{message}");
+        assert!(message.contains("expected: \"wrong\""), "{message}");
+        assert!(message.contains("found: \"actual\""), "{message}");
+    }
+
+    #[test]
+    fn precondition_error_message_notes_trailing_whitespace_only() {
+        let envelope = make_envelope(vec![Operation::Replace {
+            start: 1,
+            end: 1,
+            old: vec!["line   ".to_owned()],
+            new: vec!["new".to_owned()],
+        }]);
+        let original = originals("line\n");
+        let failure = plan_envelope(&envelope, &original).unwrap_err();
+        let message = failure.to_string();
+
+        assert_eq!(failure.kind, PlanError::Precondition);
+        assert!(
+            message.contains("differs only in trailing whitespace"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn end_of_file_error_message_suggests_replace() {
+        let envelope = make_envelope(vec![Operation::Insert {
+            position: InsertPosition::Before,
+            start: 1,
+            end: 1,
+            anchor: vec!["first".to_owned()],
+            new: vec!["inserted".to_owned()],
+        }]);
+        let original = originals("first\nsecond\n");
+        let failure = plan_envelope(&envelope, &original).unwrap_err();
+        let message = failure.to_string();
+
+        assert_eq!(failure.kind, PlanError::EndOfFile);
+        assert!(message.contains("replace"), "{message}");
+    }
+
+    #[test]
+    fn overlap_error_message_names_both_operations() {
+        let envelope = make_envelope(vec![
+            Operation::Replace {
+                start: 1,
+                end: 2,
+                old: vec!["one".to_owned(), "two".to_owned()],
+                new: vec!["combo".to_owned()],
+            },
+            Operation::Delete {
+                start: 2,
+                end: 2,
+                old: vec!["two".to_owned()],
+            },
+        ]);
+        let original = originals("one\ntwo\nthree\n");
+        let failure = plan_envelope(&envelope, &original).unwrap_err();
+        let message = failure.to_string();
+
+        assert_eq!(failure.kind, PlanError::Overlap);
+        assert!(message.contains("operation 1"), "{message}");
+        assert!(message.contains("operation 2"), "{message}");
+    }
+
+    #[test]
+    fn range_error_message_shows_file_line_count() {
+        let envelope = make_envelope(vec![Operation::Delete {
+            start: 1,
+            end: 10,
+            old: vec!["x".to_owned()],
+        }]);
+        let original = originals("one\ntwo\nthree\n");
+        let failure = plan_envelope(&envelope, &original).unwrap_err();
+        let message = failure.to_string();
+
+        assert_eq!(failure.kind, PlanError::Range);
+        assert!(message.contains("3 lines"), "{message}");
+    }
+
+    #[test]
+    fn precondition_error_message_truncates_long_lines() {
+        let long_str = "x".repeat(300);
+        let envelope = make_envelope(vec![Operation::Replace {
+            start: 1,
+            end: 1,
+            old: vec![long_str],
+            new: vec!["new".to_owned()],
+        }]);
+        let original = originals("actual\n");
+        let failure = plan_envelope(&envelope, &original).unwrap_err();
+        let message = failure.to_string();
+
+        assert!(message.contains("..."), "{message}");
+    }
+
+    #[test]
+    fn count_error_message_shows_line_and_counts() {
+        let input = "\
+CVB::k7Q2xw9R::BEGIN v=1 id=demo-01
+CVB::k7Q2xw9R::FILE path=src/main.rs
+CVB::k7Q2xw9R::END ops=0";
+        let failure = parse_envelope(input).unwrap_err();
+        let message = failure.to_string();
+        assert_eq!(failure.kind, ParseError::Syntax);
+        assert!(message.contains("line 3"), "{message}");
     }
 
     #[test]
@@ -1634,43 +2476,42 @@ mod plan_envelope_tests {
         ]);
 
         assert_eq!(
-            plan_envelope(&envelope, &originals("one\ntwo\nthree\nfour\n")),
+            kind(plan_envelope(
+                &envelope,
+                &originals("one\ntwo\nthree\nfour\n")
+            )),
             Err(PlanError::Overlap)
         );
     }
 
     #[test]
     fn rejects_insertion_after_final_line() {
-        let envelope = make_envelope(vec![
-            Operation::Insert {
-                position: InsertPosition::After,
-                start: 3,
-                end: 3,
-                anchor: vec!["three".to_owned()],
-                new: vec!["inserted".to_owned()],
-            },
-        ]);
+        let envelope = make_envelope(vec![Operation::Insert {
+            position: InsertPosition::After,
+            start: 3,
+            end: 3,
+            anchor: vec!["three".to_owned()],
+            new: vec!["inserted".to_owned()],
+        }]);
 
         assert_eq!(
-            plan_envelope(&envelope, &originals("one\ntwo\nthree\n")),
+            kind(plan_envelope(&envelope, &originals("one\ntwo\nthree\n"))),
             Err(PlanError::EndOfFile)
         );
     }
 
     #[test]
     fn rejects_insertion_before_first_line() {
-        let envelope = make_envelope(vec![
-            Operation::Insert {
-                position: InsertPosition::Before,
-                start: 1,
-                end: 1,
-                anchor: vec!["one".to_owned()],
-                new: vec!["inserted".to_owned()],
-            },
-        ]);
+        let envelope = make_envelope(vec![Operation::Insert {
+            position: InsertPosition::Before,
+            start: 1,
+            end: 1,
+            anchor: vec!["one".to_owned()],
+            new: vec!["inserted".to_owned()],
+        }]);
 
         assert_eq!(
-            plan_envelope(&envelope, &originals("one\\ntwo\\nthree\\n")),
+            kind(plan_envelope(&envelope, &originals("one\ntwo\nthree\n"))),
             Err(PlanError::EndOfFile)
         );
     }
@@ -1693,7 +2534,10 @@ mod plan_envelope_tests {
         ]);
 
         assert_eq!(
-            plan_envelope(&envelope, &originals("one\ntwo\nthree\nfour\n")),
+            kind(plan_envelope(
+                &envelope,
+                &originals("one\ntwo\nthree\nfour\n")
+            )),
             Err(PlanError::Overlap)
         );
     }
@@ -1717,11 +2561,7 @@ mod plan_envelope_tests {
             },
         ]);
 
-        let plan = plan_envelope(
-            &envelope,
-            &originals("one\ntwo\nthree\nfour\n"),
-        )
-        .unwrap();
+        let plan = plan_envelope(&envelope, &originals("one\ntwo\nthree\nfour\n")).unwrap();
 
         assert_eq!(
             plan.files[0].proposed,
@@ -1749,7 +2589,7 @@ mod plan_envelope_tests {
         ]);
 
         assert_eq!(
-            plan_envelope(&envelope, &originals("one\ntwo\nthree\n")),
+            kind(plan_envelope(&envelope, &originals("one\ntwo\nthree\n"))),
             Err(PlanError::Overlap)
         );
     }
@@ -1760,11 +2600,7 @@ mod plan_envelope_tests {
             Operation::Delete {
                 start: 2,
                 end: 4,
-                old: vec![
-                    "two".to_owned(),
-                    "three".to_owned(),
-                    "four".to_owned(),
-                ],
+                old: vec!["two".to_owned(), "three".to_owned(), "four".to_owned()],
             },
             Operation::Insert {
                 position: InsertPosition::After,
@@ -1776,10 +2612,10 @@ mod plan_envelope_tests {
         ]);
 
         assert_eq!(
-            plan_envelope(
+            kind(plan_envelope(
                 &envelope,
                 &originals("one\ntwo\nthree\nfour\nfive\n"),
-            ),
+            )),
             Err(PlanError::Overlap)
         );
     }
@@ -1790,11 +2626,7 @@ mod plan_envelope_tests {
             Operation::Replace {
                 start: 2,
                 end: 4,
-                old: vec![
-                    "two".to_owned(),
-                    "three".to_owned(),
-                    "four".to_owned(),
-                ],
+                old: vec!["two".to_owned(), "three".to_owned(), "four".to_owned()],
                 new: vec!["combined".to_owned()],
             },
             Operation::Insert {
@@ -1807,10 +2639,10 @@ mod plan_envelope_tests {
         ]);
 
         assert_eq!(
-            plan_envelope(
+            kind(plan_envelope(
                 &envelope,
                 &originals("one\ntwo\nthree\nfour\nfive\n"),
-            ),
+            )),
             Err(PlanError::Overlap)
         );
     }
@@ -1832,8 +2664,25 @@ mod plan_envelope_tests {
         ]);
 
         assert_eq!(
-            plan_envelope(&envelope, &originals("one\ntwo\nthree\n")),
+            kind(plan_envelope(&envelope, &originals("one\ntwo\nthree\n"))),
             Err(PlanError::Overlap)
+        );
+    }
+
+    #[test]
+    fn plan_envelope_rejects_git_path() {
+        let envelope = Envelope {
+            token: "TOKEN123".to_owned(),
+            id: "git-test".to_owned(),
+            files: vec![FileSection {
+                path: ".git/config".to_owned(),
+                operations: vec![],
+            }],
+        };
+        let originals = std::collections::HashMap::new();
+        assert_eq!(
+            kind(plan_envelope(&envelope, &originals)),
+            Err(PlanError::InvalidPath)
         );
     }
 
@@ -1847,7 +2696,7 @@ mod plan_envelope_tests {
         }]);
 
         assert_eq!(
-            plan_envelope(&envelope, &std::collections::HashMap::new()),
+            kind(plan_envelope(&envelope, &std::collections::HashMap::new())),
             Err(PlanError::MissingFile)
         );
     }
@@ -1872,7 +2721,7 @@ mod plan_envelope_tests {
         envelope.files.push(duplicate);
 
         assert_eq!(
-            plan_envelope(&envelope, &originals("one\n")),
+            kind(plan_envelope(&envelope, &originals("one\n"))),
             Err(PlanError::DuplicateFile)
         );
     }
@@ -1943,7 +2792,7 @@ mod plan_envelope_tests {
         }]);
 
         assert_eq!(
-            plan_envelope(&envelope, &originals("one\r\ntwo\n")),
+            kind(plan_envelope(&envelope, &originals("one\r\ntwo\n"))),
             Err(PlanError::InvalidFile)
         );
     }
@@ -1980,16 +2829,9 @@ mod plan_envelope_tests {
             },
         ]);
 
-        let plan = plan_envelope(
-            &envelope,
-            &originals("one\ntwo\nthree\nfour\n"),
-        )
-        .unwrap();
+        let plan = plan_envelope(&envelope, &originals("one\ntwo\nthree\nfour\n")).unwrap();
 
-        assert_eq!(
-            plan.files[0].proposed,
-            "one\ntwo\ninserted\nTHREE\nfour\n"
-        );
+        assert_eq!(plan.files[0].proposed, "one\ntwo\ninserted\nTHREE\nfour\n");
     }
 
     #[test]
@@ -2010,11 +2852,7 @@ mod plan_envelope_tests {
             },
         ]);
 
-        let plan = plan_envelope(
-            &envelope,
-            &originals("one\ntwo\nthree\nfour\nfive\n"),
-        )
-        .unwrap();
+        let plan = plan_envelope(&envelope, &originals("one\ntwo\nthree\nfour\nfive\n")).unwrap();
 
         assert_eq!(
             plan.files[0].proposed,
@@ -2022,22 +2860,76 @@ mod plan_envelope_tests {
         );
     }
 
+    #[test]
+    fn precondition_error_message_shows_escaped_tabs() {
+        let envelope = make_envelope(vec![Operation::Replace {
+            start: 1,
+            end: 1,
+            old: vec!["\texpected".to_owned()],
+            new: vec!["new".to_owned()],
+        }]);
+        let original = originals("\tactual\n");
+        let failure = plan_envelope(&envelope, &original).unwrap_err();
+        let message = failure.to_string();
+
+        assert_eq!(failure.kind, PlanError::Precondition);
+        assert!(message.contains("\\texpected"), "{message}");
+        assert!(message.contains("\\tactual"), "{message}");
+    }
 }
-
-
 
 #[cfg(test)]
 mod parse_load_plan_tests {
-    use super::{parse_load_plan, ParseError, PipelineError};
+    use super::{ParseError, PipelineError, parse_load_plan};
     use std::fs;
     use std::path::PathBuf;
 
     #[test]
+    fn parse_load_plan_rejects_git_target_without_modifying_file() {
+        let base: PathBuf =
+            std::env::temp_dir().join(format!("cvb-parse-load-plan-git-{}", std::process::id()));
+        let root = base.join("project");
+        let git_hooks = root.join(".git").join("hooks");
+
+        if base.exists() {
+            fs::remove_dir_all(&base).unwrap();
+        }
+        fs::create_dir_all(&git_hooks).unwrap();
+
+        let hook_file = git_hooks.join("pre-commit");
+        let sentinel = "#!/bin/sh\nexit 0\n";
+        fs::write(&hook_file, sentinel).unwrap();
+
+        let input = concat!(
+            "CVB::testtoken123::BEGIN v=1 id=git-rejection\n",
+            "CVB::testtoken123::FILE path=.git/hooks/pre-commit\n",
+            "CVB::testtoken123::OP replace lines=1-1\n",
+            "CVB::testtoken123::OLD n=1\n",
+            "#!/bin/sh\n",
+            "CVB::testtoken123::NEW n=1\n",
+            "malicious payload\n",
+            "CVB::testtoken123::ENDOP\n",
+            "CVB::testtoken123::END ops=1",
+        );
+
+        match parse_load_plan(&root, input) {
+            Err(PipelineError::Parse(ref failure)) if failure.kind == ParseError::InvalidPath => {}
+            other => panic!("expected invalid-path parse error for .git target, got {other:?}"),
+        }
+
+        assert_eq!(
+            fs::read_to_string(&hook_file).unwrap(),
+            sentinel,
+            "git target rejection must not modify the file"
+        );
+
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
     fn parse_load_plan_builds_plan_without_modifying_file() {
-        let root: PathBuf = std::env::temp_dir().join(format!(
-            "cvb-parse-load-plan-{}",
-            std::process::id()
-        ));
+        let root: PathBuf =
+            std::env::temp_dir().join(format!("cvb-parse-load-plan-{}", std::process::id()));
 
         if root.exists() {
             fs::remove_dir_all(&root).unwrap();
@@ -2093,7 +2985,6 @@ mod parse_load_plan_tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-
     #[test]
     fn parse_load_plan_rejects_malformed_envelope_without_modifying_file() {
         let root: PathBuf = std::env::temp_dir().join(format!(
@@ -2111,7 +3002,7 @@ mod parse_load_plan_tests {
         fs::write(&file, original).unwrap();
 
         match parse_load_plan(&root, "not an envelope") {
-            Err(PipelineError::Parse(ParseError::NoEnvelope)) => {}
+            Err(PipelineError::Parse(ref failure)) if failure.kind == ParseError::NoEnvelope => {}
             other => panic!("expected missing-envelope parse error, got {other:?}"),
         }
 
@@ -2299,7 +3190,8 @@ mod parse_load_plan_tests {
         );
 
         match parse_load_plan(&root, input) {
-            Err(PipelineError::Parse(ParseError::DuplicateFile)) => {}
+            Err(PipelineError::Parse(ref failure)) if failure.kind == ParseError::DuplicateFile => {
+            }
             other => panic!("expected duplicate-file parse error, got {other:?}"),
         }
 
@@ -2341,7 +3233,7 @@ mod parse_load_plan_tests {
         );
 
         match parse_load_plan(&root, input) {
-            Err(PipelineError::Parse(ParseError::InvalidPath)) => {}
+            Err(PipelineError::Parse(ref failure)) if failure.kind == ParseError::InvalidPath => {}
             other => panic!("expected invalid-path parse error, got {other:?}"),
         }
 
@@ -2437,9 +3329,7 @@ mod parse_load_plan_tests {
 
         match parse_load_plan(&root, input) {
             Err(PipelineError::Load(_)) => {}
-            other => panic!(
-                "expected load error for symlinked parent directory, got {other:?}"
-            ),
+            other => panic!("expected load error for symlinked parent directory, got {other:?}"),
         }
 
         assert_eq!(
@@ -2609,10 +3499,9 @@ mod parse_load_plan_tests {
         );
 
         match parse_load_plan(&root, input) {
-            Err(PipelineError::Plan(super::PlanError::InvalidFile)) => {}
-            other => panic!(
-                "expected InvalidFile planning error for empty target, got {other:?}"
-            ),
+            Err(PipelineError::Plan(ref failure))
+                if failure.kind == super::PlanError::InvalidFile => {}
+            other => panic!("expected InvalidFile planning error for empty target, got {other:?}"),
         }
 
         assert_eq!(
@@ -2625,18 +3514,15 @@ mod parse_load_plan_tests {
     }
 }
 
-
 #[cfg(test)]
 mod load_originals_tests {
-    use super::{load_originals, Envelope, FileSection};
+    use super::{Envelope, FileSection, load_originals};
     use std::fs;
     use std::path::PathBuf;
 
     fn test_directory(name: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "cvb-load-originals-{name}-{}",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("cvb-load-originals-{name}-{}", std::process::id()));
 
         if path.exists() {
             fs::remove_dir_all(&path).unwrap();
@@ -2654,6 +3540,15 @@ mod load_originals_tests {
                 operations: vec![],
             }],
         }
+    }
+
+    #[test]
+    fn load_originals_rejects_git_path() {
+        let root = test_directory("git-path");
+        let result = load_originals(&root, &envelope(".git/config"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("unsafe target path"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2708,7 +3603,11 @@ mod load_originals_tests {
         let result = load_originals(&root, &envelope("target.rs"));
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("symlink target is not allowed"));
+        assert!(
+            result
+                .unwrap_err()
+                .contains("symlink target is not allowed")
+        );
         assert_eq!(fs::read_to_string(&outside).unwrap(), "outside contents");
 
         fs::remove_dir_all(&root).unwrap();
@@ -2759,10 +3658,7 @@ mod load_originals_tests {
 
         let result = load_originals(&root, &envelope("example.rs")).unwrap();
 
-        assert_eq!(
-            result.get("example.rs").map(String::as_str),
-            Some(original)
-        );
+        assert_eq!(result.get("example.rs").map(String::as_str), Some(original));
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -2802,5 +3698,38 @@ mod load_originals_tests {
 
         fs::remove_dir_all(root).unwrap();
     }
+}
+#[test]
+fn parse_error_message_shows_line_number() {
+    let input = "\
+CVB::k7Q2xw9R::BEGIN v=1 id=demo-01
+CVB::k7Q2xw9R::FILE path=src/main.rs
+CVB::k7Q2xw9R::BEGIN ";
+    let failure = parse_envelope(input).unwrap_err();
+    let message = failure.to_string();
+    assert_eq!(failure.kind, ParseError::Syntax);
+    assert_eq!(failure.line, 3);
+    assert!(message.contains("line 3"), "{message}");
+}
 
+#[test]
+fn count_error_message_shows_line_and_counts() {
+    let input = "\
+CVB::k7Q2xw9R::BEGIN v=1 id=demo-01
+CVB::k7Q2xw9R::FILE path=src/main.rs
+CVB::k7Q2xw9R::OP replace lines=1-2
+CVB::k7Q2xw9R::OLD n=5
+line 1
+line 2
+CVB::k7Q2xw9R::NEW n=1
+new line
+CVB::k7Q2xw9R::ENDOP
+CVB::k7Q2xw9R::END ops=1";
+    let failure = parse_envelope(input).unwrap_err();
+    let message = failure.to_string();
+    assert_eq!(failure.kind, ParseError::Count);
+    assert_eq!(failure.line, 4);
+    assert!(message.contains("line 4"), "{message}");
+    assert!(message.contains("5"), "{message}");
+    assert!(message.contains("2"), "{message}");
 }
