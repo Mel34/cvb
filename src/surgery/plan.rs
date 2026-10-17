@@ -1,5 +1,12 @@
 use super::*;
 use std::collections::{HashMap, HashSet};
+use sha2::{Digest, Sha256};
+
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
 
 /// Applies one operation to an original file represented as lines.
 /// All operation ranges are one-based and refer to the original lines.
@@ -391,16 +398,37 @@ pub(crate) fn plan_envelope(
             });
         }
 
+        let original_digest = sha256_hex(original.as_bytes());
+        let proposed_digest = sha256_hex(proposed.as_bytes());
+
         planned_files.push(PlannedFile {
             path: section.path.clone(),
             original: original.clone(),
+            original_digest,
             proposed,
+            proposed_digest,
         });
     }
+
+    let mut plan_hasher = Sha256::new();
+    plan_hasher.update(envelope.id.as_bytes());
+    plan_hasher.update(b"\0");
+
+    for file in &planned_files {
+        plan_hasher.update(file.path.as_bytes());
+        plan_hasher.update(b"\0");
+        plan_hasher.update(file.original_digest.as_bytes());
+        plan_hasher.update(b"\0");
+        plan_hasher.update(file.proposed_digest.as_bytes());
+        plan_hasher.update(b"\0");
+    }
+
+    let digest = format!("{:x}", plan_hasher.finalize());
 
     Ok(Plan {
         token: envelope.token.clone(),
         id: envelope.id.clone(),
+        digest,
         files: planned_files,
     })
 }
@@ -428,6 +456,60 @@ mod tests {
         [("example.txt".to_owned(), contents.to_owned())]
             .into_iter()
             .collect()
+    }
+
+    #[test]
+    fn plan_computes_sha256_digests_for_files_and_plan() {
+        let original_content = "one\nold\nthree\n";
+        let envelope = make_test_envelope(vec![Operation::Replace {
+            start: 2,
+            end: 2,
+            old: lines(&["old"]),
+            new: lines(&["new"]),
+        }]);
+
+        let plan =
+            plan_envelope(&envelope, &make_test_originals(original_content)).unwrap();
+
+        assert_eq!(plan.files.len(), 1);
+        assert_eq!(plan.digest.len(), 64);
+
+        let file = &plan.files[0];
+        assert_eq!(file.original_digest.len(), 64);
+        assert_eq!(file.proposed_digest.len(), 64);
+        assert_ne!(file.original_digest, file.proposed_digest);
+
+        assert_eq!(
+            file.original_digest,
+            sha256_hex(original_content.as_bytes())
+        );
+        assert_eq!(
+            file.proposed_digest,
+            sha256_hex("one\nnew\nthree\n".as_bytes())
+        );
+    }
+
+    #[test]
+    fn plan_digest_changes_when_proposed_content_changes() {
+        let make_plan = |replacement: &str| {
+            let envelope = make_test_envelope(vec![Operation::Replace {
+                start: 2,
+                end: 2,
+                old: lines(&["old"]),
+                new: lines(&[replacement]),
+            }]);
+
+            plan_envelope(
+                &envelope,
+                &make_test_originals("one\nold\nthree\n"),
+            )
+            .unwrap()
+        };
+
+        let first = make_plan("first");
+        let second = make_plan("second");
+
+        assert_ne!(first.digest, second.digest);
     }
 
     #[test]

@@ -334,6 +334,7 @@ impl std::error::Error for LoadError {}
 pub(crate) struct Plan {
     pub token: String,
     pub id: String,
+    pub digest: String,
     pub files: Vec<PlannedFile>,
 }
 
@@ -342,7 +343,9 @@ pub(crate) struct Plan {
 pub(crate) struct PlannedFile {
     pub path: String,
     pub original: String,
+    pub original_digest: String,
     pub proposed: String,
+    pub proposed_digest: String,
 }
 
 /// Failures the pure planner can report.
