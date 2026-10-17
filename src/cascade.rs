@@ -4,7 +4,7 @@ use std::path::Path;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
-use crate::pull::{self, is_call_invocation, RustItemKind, SearchUnit, UnitKey};
+use crate::pull::{self, RustItemKind, SearchUnit, UnitKey, is_call_invocation};
 
 pub const MAX_DEPTH: usize = 5;
 pub const MAX_ADDED_UNITS: usize = 25;
@@ -212,16 +212,18 @@ pub fn build_index(dir: Option<&Path>) -> Index {
 
     let tracked = match pull::tracked_files(dir) {
         Ok(files) => files,
-        Err(_) => return Index {
-            free_fns,
-            methods,
-            types,
-            traits,
-            file_uses,
-            file_sources,
-            parse_warnings,
-            total_callers_count: HashMap::new(),
-        },
+        Err(_) => {
+            return Index {
+                free_fns,
+                methods,
+                types,
+                traits,
+                file_uses,
+                file_sources,
+                parse_warnings,
+                total_callers_count: HashMap::new(),
+            };
+        }
     };
 
     let rs_files: Vec<String> = tracked
@@ -324,10 +326,7 @@ pub fn build_index(dir: Option<&Path>) -> Index {
                     };
 
                     if let Some(owner) = &item.owner {
-                        methods
-                            .entry((owner.clone(), name))
-                            .or_default()
-                            .push(def);
+                        methods.entry((owner.clone(), name)).or_default().push(def);
                     } else {
                         free_fns.entry(name).or_default().push(def);
                     }
@@ -398,7 +397,11 @@ pub fn build_index(dir: Option<&Path>) -> Index {
                 end: span.end().line,
             };
             let is_known = self.known_units.contains(&key);
-            let prev = if is_known { self.current_unit.replace(key) } else { self.current_unit.clone() };
+            let prev = if is_known {
+                self.current_unit.replace(key)
+            } else {
+                self.current_unit.clone()
+            };
             visit::visit_item_fn(self, node);
             self.current_unit = prev;
         }
@@ -411,7 +414,11 @@ pub fn build_index(dir: Option<&Path>) -> Index {
                 end: span.end().line,
             };
             let is_known = self.known_units.contains(&key);
-            let prev = if is_known { self.current_unit.replace(key) } else { self.current_unit.clone() };
+            let prev = if is_known {
+                self.current_unit.replace(key)
+            } else {
+                self.current_unit.clone()
+            };
             visit::visit_impl_item_fn(self, node);
             self.current_unit = prev;
         }
@@ -424,7 +431,11 @@ pub fn build_index(dir: Option<&Path>) -> Index {
                 end: span.end().line,
             };
             let is_known = self.known_units.contains(&key);
-            let prev = if is_known { self.current_unit.replace(key) } else { self.current_unit.clone() };
+            let prev = if is_known {
+                self.current_unit.replace(key)
+            } else {
+                self.current_unit.clone()
+            };
             visit::visit_trait_item_fn(self, node);
             self.current_unit = prev;
         }
@@ -636,7 +647,8 @@ impl<'ast> Visit<'ast> for UnitEdgeVisitor {
                 source_var,
             });
         } else {
-            self.edges.push(EdgeKind::MethodCallUnknown { method, line });
+            self.edges
+                .push(EdgeKind::MethodCallUnknown { method, line });
         }
 
         for arg in &node.args {
@@ -965,22 +977,27 @@ pub fn resolve_edge(
                         confidence: 1,
                         is_type: false,
                     }
-                } else if let Some(matched) = index.file_uses.get(&from_unit.path).and_then(|uses| {
-                    uses.get(name).and_then(|imported_path| {
-                        let matched: Vec<_> = defs
-                            .iter()
-                            .filter(|d| {
-                                let stem = Path::new(&d.path).file_stem().and_then(|s| s.to_str()).unwrap_or("");
-                                imported_path.split("::").any(|segment| segment == stem)
-                            })
-                            .collect();
-                        if matched.len() == 1 {
-                            Some(matched[0].clone())
-                        } else {
-                            None
-                        }
+                } else if let Some(matched) =
+                    index.file_uses.get(&from_unit.path).and_then(|uses| {
+                        uses.get(name).and_then(|imported_path| {
+                            let matched: Vec<_> = defs
+                                .iter()
+                                .filter(|d| {
+                                    let stem = Path::new(&d.path)
+                                        .file_stem()
+                                        .and_then(|s| s.to_str())
+                                        .unwrap_or("");
+                                    imported_path.split("::").any(|segment| segment == stem)
+                                })
+                                .collect();
+                            if matched.len() == 1 {
+                                Some(matched[0].clone())
+                            } else {
+                                None
+                            }
+                        })
                     })
-                }) {
+                {
                     Resolution::Resolved {
                         target: matched,
                         reason: "resolved by use import".to_string(),
@@ -1046,10 +1063,7 @@ pub fn resolve_edge(
             line,
             source_var,
         } => {
-            if let Some(defs) = index
-                .methods
-                .get(&(receiver_type.clone(), method.clone()))
-            {
+            if let Some(defs) = index.methods.get(&(receiver_type.clone(), method.clone())) {
                 if defs.len() == 1 {
                     Resolution::Resolved {
                         target: defs[0].clone(),
@@ -1110,9 +1124,7 @@ pub fn resolve_edge(
                     Resolution::Resolved {
                         target: defs[0].clone(),
                         reason: "function used as a value".to_string(),
-                        relationship: format!(
-                            "function referenced in {caller_name} at :{line}"
-                        ),
+                        relationship: format!("function referenced in {caller_name} at :{line}"),
                         confidence: 2,
                         is_type: false,
                     }
@@ -1169,7 +1181,21 @@ pub struct Candidate {
     pub is_leaf: bool,
 }
 
-pub fn rank_key(cand: &Candidate, index: &Index) -> (usize, usize, usize, isize, usize, usize, String, usize, usize, String) {
+pub fn rank_key(
+    cand: &Candidate,
+    index: &Index,
+) -> (
+    usize,
+    usize,
+    usize,
+    isize,
+    usize,
+    usize,
+    String,
+    usize,
+    usize,
+    String,
+) {
     let conf = cand.confidence;
     let edge_kind_rank = if cand.is_type { 2 } else { 1 };
 
@@ -1188,7 +1214,11 @@ pub fn rank_key(cand: &Candidate, index: &Index) -> (usize, usize, usize, isize,
         .get(&cand.target.unit_key())
         .copied()
         .unwrap_or(0);
-    let utility_rank = if callers_count >= UTILITY_THRESHOLD { 2 } else { 1 };
+    let utility_rank = if callers_count >= UTILITY_THRESHOLD {
+        2
+    } else {
+        1
+    };
 
     let size = cand.target.end.saturating_sub(cand.target.start);
 
@@ -1261,7 +1291,8 @@ pub fn run(
         }
     }
 
-    let mut included: HashSet<UnitKey> = matching_seeds.iter().map(|(u, _)| u.key.clone()).collect();
+    let mut included: HashSet<UnitKey> =
+        matching_seeds.iter().map(|(u, _)| u.key.clone()).collect();
     let mut frontier: Vec<UnitKey> = seeds.clone();
 
     let mut admitted_by_depth: BTreeMap<usize, Vec<(Candidate, String)>> = BTreeMap::new();
@@ -1306,11 +1337,8 @@ pub fn run(
                             continue;
                         }
 
-                        let callers_count = index
-                            .total_callers_count
-                            .get(&t_key)
-                            .copied()
-                            .unwrap_or(0);
+                        let callers_count =
+                            index.total_callers_count.get(&t_key).copied().unwrap_or(0);
                         let is_leaf = callers_count >= UTILITY_THRESHOLD;
                         let cand_reason = if is_leaf {
                             format!("utility, called from {callers_count} units")
@@ -1395,7 +1423,8 @@ pub fn run(
 
             if total_added_units >= MAX_ADDED_UNITS {
                 if primary_stop_reason.is_none() {
-                    primary_stop_reason = Some(format!("unit budget ({MAX_ADDED_UNITS}) at depth {depth}"));
+                    primary_stop_reason =
+                        Some(format!("unit budget ({MAX_ADDED_UNITS}) at depth {depth}"));
                 }
                 omitted_items.push(OmittedItem {
                     key: cand.target.unit_key(),
@@ -1422,9 +1451,13 @@ pub fn run(
             );
             let rendered_len = unit_header.chars().count() + body.chars().count();
 
-            if total_added_chars + rendered_len > (MAX_ADDED_CHARS.saturating_sub(REPORT_RESERVE_CHARS)) {
+            if total_added_chars + rendered_len
+                > (MAX_ADDED_CHARS.saturating_sub(REPORT_RESERVE_CHARS))
+            {
                 if primary_stop_reason.is_none() {
-                    primary_stop_reason = Some(format!("character budget ({MAX_ADDED_CHARS}) at depth {depth}"));
+                    primary_stop_reason = Some(format!(
+                        "character budget ({MAX_ADDED_CHARS}) at depth {depth}"
+                    ));
                 }
                 omitted_items.push(OmittedItem {
                     key: cand.target.unit_key(),
@@ -1509,7 +1542,8 @@ pub fn run(
     let scope_note = format!(
         "Not followed, by scope: callers, tests, trait impls. See `cvb pull callers:{first_seed_name}`.\n"
     );
-    let mandatory_footer_reserve = footer_disclaimer.chars().count() + scope_note.chars().count() + 100;
+    let mandatory_footer_reserve =
+        footer_disclaimer.chars().count() + scope_note.chars().count() + 100;
 
     let mut omitted_shown = 0;
     for item in &omitted_items {
@@ -1526,20 +1560,27 @@ pub fn run(
             item.key.start,
             item.key.end
         );
-        if out.chars().count() + line.chars().count() + mandatory_footer_reserve + 80 <= MAX_ADDED_CHARS {
+        if out.chars().count() + line.chars().count() + mandatory_footer_reserve + 80
+            <= MAX_ADDED_CHARS
+        {
             out.push_str(&line);
             omitted_shown += 1;
         } else {
             let hidden = omitted_items.len() - omitted_shown;
-            out.push_str(&format!("  ... and {hidden} more omitted unit(s) not listed (reserve limit reached)\n"));
+            out.push_str(&format!(
+                "  ... and {hidden} more omitted unit(s) not listed (reserve limit reached)\n"
+            ));
             break;
         }
     }
 
-    let total_unresolved = unresolved_callbacks.len() + unresolved_unknown_receivers.len() + ambiguous_items.len();
+    let total_unresolved =
+        unresolved_callbacks.len() + unresolved_unknown_receivers.len() + ambiguous_items.len();
     if total_unresolved > 0 {
         let header = format!("Not followed, unresolved ({total_unresolved}):\n");
-        if out.chars().count() + header.chars().count() + mandatory_footer_reserve <= MAX_ADDED_CHARS {
+        if out.chars().count() + header.chars().count() + mandatory_footer_reserve
+            <= MAX_ADDED_CHARS
+        {
             out.push_str(&header);
             let mut unres_shown = 0;
             let mut hit_reserve = false;
@@ -1548,7 +1589,9 @@ pub fn run(
                 let entry = format!(
                     "  {name:16}  {path}:{line:<5}  call through parameter `{name}` (callback; target not statically known)\n"
                 );
-                if out.chars().count() + entry.chars().count() + mandatory_footer_reserve + 80 <= MAX_ADDED_CHARS {
+                if out.chars().count() + entry.chars().count() + mandatory_footer_reserve + 80
+                    <= MAX_ADDED_CHARS
+                {
                     out.push_str(&entry);
                     unres_shown += 1;
                 } else {
@@ -1561,7 +1604,9 @@ pub fn run(
                     let entry = format!(
                         "  {name:16}  {path}:{line:<5}  method call, receiver type unknown\n"
                     );
-                    if out.chars().count() + entry.chars().count() + mandatory_footer_reserve + 80 <= MAX_ADDED_CHARS {
+                    if out.chars().count() + entry.chars().count() + mandatory_footer_reserve + 80
+                        <= MAX_ADDED_CHARS
+                    {
                         out.push_str(&entry);
                         unres_shown += 1;
                     } else {
@@ -1573,7 +1618,11 @@ pub fn run(
             if !hit_reserve {
                 for (name, path, line, locs) in &ambiguous_items {
                     let loc_str = if locs.len() > 3 {
-                        format!(": {}, ... and {} more", locs[..3].join(", "), locs.len() - 3)
+                        format!(
+                            ": {}, ... and {} more",
+                            locs[..3].join(", "),
+                            locs.len() - 3
+                        )
                     } else if !locs.is_empty() {
                         format!(": {}", locs.join(", "))
                     } else {
@@ -1583,7 +1632,9 @@ pub fn run(
                         "  {name:16}  {path}:{line:<5}  ambiguous ({} candidates{loc_str})\n",
                         locs.len()
                     );
-                    if out.chars().count() + entry.chars().count() + mandatory_footer_reserve + 80 <= MAX_ADDED_CHARS {
+                    if out.chars().count() + entry.chars().count() + mandatory_footer_reserve + 80
+                        <= MAX_ADDED_CHARS
+                    {
                         out.push_str(&entry);
                         unres_shown += 1;
                     } else {
@@ -1615,7 +1666,9 @@ pub fn run(
     out.push_str(&scope_note);
 
     for warning in &index.parse_warnings {
-        if out.chars().count() + warning.chars().count() + footer_disclaimer.chars().count() + 25 <= MAX_ADDED_CHARS {
+        if out.chars().count() + warning.chars().count() + footer_disclaimer.chars().count() + 25
+            <= MAX_ADDED_CHARS
+        {
             out.push_str(&format!("Index incomplete: {warning}\n"));
         }
     }
@@ -1663,7 +1716,11 @@ mod tests {
 
         let matching_seeds = vec![(
             SearchUnit {
-                key: UnitKey { path: "src/lib.rs".to_string(), start: 1, end: 42 },
+                key: UnitKey {
+                    path: "src/lib.rs".to_string(),
+                    start: 1,
+                    end: 42,
+                },
                 label: "Rust function",
                 warning: None,
             },
@@ -1679,7 +1736,10 @@ mod tests {
             "Total cascade addition output must strictly not exceed {MAX_ADDED_CHARS} chars, got {total_chars}"
         );
         assert!(output.contains("== CASCADE report =="));
-        assert!(output.contains("Analysis is syntactic"), "Footer disclaimer must be preserved");
+        assert!(
+            output.contains("Analysis is syntactic"),
+            "Footer disclaimer must be preserved"
+        );
     }
 
     #[test]
@@ -1714,13 +1774,22 @@ pub fn producer() -> Result<Vec<TargetStruct>, String> {
         run_cmd(&["git", "commit", "-m", "init"]);
 
         let index = build_index(Some(&dir));
-        let producer_key = UnitKey { path: "src/lib.rs".to_string(), start: 6, end: 8 };
+        let producer_key = UnitKey {
+            path: "src/lib.rs".to_string(),
+            start: 6,
+            end: 8,
+        };
         let (_, edges) = extract_unit_edges(source, &producer_key, &index);
 
-        let has_target_sig = edges.iter().any(|e| matches!(e, EdgeKind::SignatureType { name } if name == "TargetStruct"));
+        let has_target_sig = edges
+            .iter()
+            .any(|e| matches!(e, EdgeKind::SignatureType { name } if name == "TargetStruct"));
         let _ = std::fs::remove_dir_all(&dir);
 
-        assert!(has_target_sig, "Expected TargetStruct inside Result<Vec<TargetStruct>, String> to be extracted as a signature type");
+        assert!(
+            has_target_sig,
+            "Expected TargetStruct inside Result<Vec<TargetStruct>, String> to be extracted as a signature type"
+        );
     }
 
     #[test]
@@ -1754,7 +1823,11 @@ pub fn multi_callback<F>(cb: F) where F: Fn() {
 
         let matching_seeds = vec![(
             SearchUnit {
-                key: UnitKey { path: "src/lib.rs".to_string(), start: 2, end: 6 },
+                key: UnitKey {
+                    path: "src/lib.rs".to_string(),
+                    start: 2,
+                    end: 6,
+                },
                 label: "Rust function",
                 warning: None,
             },
@@ -1764,13 +1837,21 @@ pub fn multi_callback<F>(cb: F) where F: Fn() {
         let output = run(&matching_seeds, Some(&dir), 1);
         let _ = std::fs::remove_dir_all(&dir);
 
-        assert!(output.contains("Not followed, unresolved (1):"), "Multiple calls to `cb` should be deduplicated to 1 distinct unresolved dependency:\n{output}");
-        assert_eq!(output.matches("call through parameter `cb`").count(), 1, "Only one entry for `cb` should appear in report:\n{output}");
+        assert!(
+            output.contains("Not followed, unresolved (1):"),
+            "Multiple calls to `cb` should be deduplicated to 1 distinct unresolved dependency:\n{output}"
+        );
+        assert_eq!(
+            output.matches("call through parameter `cb`").count(),
+            1,
+            "Only one entry for `cb` should appear in report:\n{output}"
+        );
     }
 
     #[test]
     fn import_resolution_uses_exact_path_components_not_substrings() {
-        let dir = std::env::temp_dir().join(format!("cvb-test-import-exact-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("cvb-test-import-exact-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).unwrap();
 
@@ -1787,10 +1868,18 @@ pub fn multi_callback<F>(cb: F) where F: Fn() {
         run_cmd(&["git", "config", "user.email", "test@cvb.local"]);
 
         // bar.rs has target(), foobar.rs also has target()
-        std::fs::write(dir.join("src/bar.rs"), "pub fn target() -> usize { 1 }
-").unwrap();
-        std::fs::write(dir.join("src/foobar.rs"), "pub fn target() -> usize { 2 }
-").unwrap();
+        std::fs::write(
+            dir.join("src/bar.rs"),
+            "pub fn target() -> usize { 1 }
+",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("src/foobar.rs"),
+            "pub fn target() -> usize { 2 }
+",
+        )
+        .unwrap();
         let main_src = "use crate::bar::target;
 fn caller() {
     target();
@@ -1802,7 +1891,11 @@ fn caller() {
         run_cmd(&["git", "commit", "-m", "init"]);
 
         let index = build_index(Some(&dir));
-        let caller_key = UnitKey { path: "src/main.rs".to_string(), start: 2, end: 4 };
+        let caller_key = UnitKey {
+            path: "src/main.rs".to_string(),
+            start: 2,
+            end: 4,
+        };
         let (_, edges) = extract_unit_edges(main_src, &caller_key, &index);
         let res = resolve_edge(&edges[0], &caller_key, "caller", &index);
 
@@ -1819,7 +1912,8 @@ fn caller() {
 
     #[test]
     fn compound_cfg_test_attributes_are_excluded_from_index() {
-        let dir = std::env::temp_dir().join(format!("cvb-test-cfg-compound-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("cvb-test-cfg-compound-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).unwrap();
 
@@ -1852,9 +1946,18 @@ fn production_fn() {}
         let index = build_index(Some(&dir));
         let _ = std::fs::remove_dir_all(&dir);
 
-        assert!(!index.free_fns.contains_key("compound_test_fn"), "compound_test_fn should be excluded");
-        assert!(!index.free_fns.contains_key("any_test_fn"), "any_test_fn should be excluded");
-        assert!(index.free_fns.contains_key("production_fn"), "production_fn should be included");
+        assert!(
+            !index.free_fns.contains_key("compound_test_fn"),
+            "compound_test_fn should be excluded"
+        );
+        assert!(
+            !index.free_fns.contains_key("any_test_fn"),
+            "any_test_fn should be excluded"
+        );
+        assert!(
+            index.free_fns.contains_key("production_fn"),
+            "production_fn should be included"
+        );
     }
 
     #[test]
@@ -1898,11 +2001,17 @@ impl Beta {
 
         let index = build_index(Some(&dir));
 
-        let alpha_run = &index.methods.get(&("Alpha".to_string(), "run".to_string())).unwrap()[0];
+        let alpha_run = &index
+            .methods
+            .get(&("Alpha".to_string(), "run".to_string()))
+            .unwrap()[0];
         let (_, alpha_edges) = extract_unit_edges(source, &alpha_run.unit_key(), &index);
         let alpha_res = resolve_edge(&alpha_edges[0], &alpha_run.unit_key(), "run", &index);
 
-        let beta_run = &index.methods.get(&("Beta".to_string(), "run".to_string())).unwrap()[0];
+        let beta_run = &index
+            .methods
+            .get(&("Beta".to_string(), "run".to_string()))
+            .unwrap()[0];
         let (_, beta_edges) = extract_unit_edges(source, &beta_run.unit_key(), &index);
         let beta_res = resolve_edge(&beta_edges[0], &beta_run.unit_key(), "run", &index);
 
@@ -1958,20 +2067,33 @@ fn innocent_bystander_c() {}
 
         let index = build_index(Some(&dir));
         let target_def = &index.free_fns.get("target_helper").unwrap()[0];
-        let caller_count = index.total_callers_count.get(&target_def.unit_key()).copied().unwrap_or(0);
+        let caller_count = index
+            .total_callers_count
+            .get(&target_def.unit_key())
+            .copied()
+            .unwrap_or(0);
 
         let _ = std::fs::remove_dir_all(&dir);
 
-        assert_eq!(caller_count, 1, "target_helper should have exactly 1 caller, got {caller_count}");
+        assert_eq!(
+            caller_count, 1,
+            "target_helper should have exactly 1 caller, got {caller_count}"
+        );
     }
 
     #[test]
     fn parse_type_name_unwraps_references() {
         let ty: syn::Type = syn::parse_str("&ClipboardBuffer").unwrap();
-        assert_eq!(extract_type_name_from_type(&ty).as_deref(), Some("ClipboardBuffer"));
+        assert_eq!(
+            extract_type_name_from_type(&ty).as_deref(),
+            Some("ClipboardBuffer")
+        );
 
         let mut_ty: syn::Type = syn::parse_str("&mut Example").unwrap();
-        assert_eq!(extract_type_name_from_type(&mut_ty).as_deref(), Some("Example"));
+        assert_eq!(
+            extract_type_name_from_type(&mut_ty).as_deref(),
+            Some("Example")
+        );
     }
 
     #[test]
@@ -2023,7 +2145,11 @@ fn innocent_bystander_c() {}
         };
 
         let (_, edges) = extract_unit_edges(source, &key, &index);
-        assert!(edges.iter().any(|e| matches!(e, EdgeKind::PathCall { name, .. } if name == "chunk_messages")));
+        assert!(
+            edges
+                .iter()
+                .any(|e| matches!(e, EdgeKind::PathCall { name, .. } if name == "chunk_messages"))
+        );
         assert!(edges.iter().any(|e| matches!(e, EdgeKind::MethodCallTyped { receiver_type, method, .. } if receiver_type == "ClipboardBuffer" && method == "len")));
     }
 
@@ -2054,12 +2180,24 @@ fn innocent_bystander_c() {}
         assert!(neg.unwrap_err().contains("negated selector"));
 
         let conflict_callers = extract_directive(&["cascade:1".into(), "callers:foo".into()]);
-        assert!(conflict_callers.unwrap_err().contains("cannot be combined with callers:"));
+        assert!(
+            conflict_callers
+                .unwrap_err()
+                .contains("cannot be combined with callers:")
+        );
 
         let conflict_lines = extract_directive(&["cascade:1".into(), "lines:1-10".into()]);
-        assert!(conflict_lines.unwrap_err().contains("cannot be combined with lines:"));
+        assert!(
+            conflict_lines
+                .unwrap_err()
+                .contains("cannot be combined with lines:")
+        );
 
         let lone_file = extract_directive(&["cascade:1".into(), "file:foo.rs".into()]);
-        assert!(lone_file.unwrap_err().contains("cannot be used with whole-file capture"));
+        assert!(
+            lone_file
+                .unwrap_err()
+                .contains("cannot be used with whole-file capture")
+        );
     }
 }

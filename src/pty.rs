@@ -469,8 +469,8 @@ mod marker_scanner_tests {
     fn recognizes_skip_marker_before_end() {
         let mut scanner = MarkerScanner::new();
 
-        let events = scanner
-            .process(b"\x1b]777;CVB;START\x07\x1b]777;CVB;SKIP\x07\x1b]777;CVB;END\x07");
+        let events =
+            scanner.process(b"\x1b]777;CVB;START\x07\x1b]777;CVB;SKIP\x07\x1b]777;CVB;END\x07");
 
         assert_eq!(
             events,
@@ -655,7 +655,10 @@ fn run_pty(rcfile: &Path) -> Result<i32, String> {
 
     let winsize = terminal_size()?;
 
-    let skip_file = skip_file_path(std::env::var_os("XDG_CONFIG_HOME"), std::env::var_os("HOME"));
+    let skip_file = skip_file_path(
+        std::env::var_os("XDG_CONFIG_HOME"),
+        std::env::var_os("HOME"),
+    );
     if let Some(path) = &skip_file {
         ensure_skip_file(path);
     }
@@ -792,13 +795,19 @@ fn ensure_skip_file(path: &Path) {
 
     if let Some(parent) = path.parent() {
         if let Err(error) = std::fs::create_dir_all(parent) {
-            eprintln!("CVB: unable to create config directory {}: {error}", parent.display());
+            eprintln!(
+                "CVB: unable to create config directory {}: {error}",
+                parent.display()
+            );
             return;
         }
     }
 
     if let Err(error) = std::fs::write(path, DEFAULT_SKIP_LIST) {
-        eprintln!("CVB: unable to create skip list {}: {error}", path.display());
+        eprintln!(
+            "CVB: unable to create skip list {}: {error}",
+            path.display()
+        );
     }
 }
 

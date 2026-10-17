@@ -1849,14 +1849,26 @@ mod pull_tests {
 
         let (status_plain, stdout_plain, stderr_plain) =
             run_capture(&["+crlf".into(), "+split_inclusive".into()], Some(&dir));
-        let (status_c0, stdout_c0, stderr_c0) =
-            run_capture(&["+crlf".into(), "+split_inclusive".into(), "cascade:0".into()], Some(&dir));
+        let (status_c0, stdout_c0, stderr_c0) = run_capture(
+            &[
+                "+crlf".into(),
+                "+split_inclusive".into(),
+                "cascade:0".into(),
+            ],
+            Some(&dir),
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(status_plain, status_c0, "exit status must match");
-        assert_eq!(stdout_plain, stdout_c0, "stdout must be byte-identical between plain pull and cascade:0");
-        assert_eq!(stderr_plain, stderr_c0, "stderr must be byte-identical between plain pull and cascade:0");
+        assert_eq!(
+            stdout_plain, stdout_c0,
+            "stdout must be byte-identical between plain pull and cascade:0"
+        );
+        assert_eq!(
+            stderr_plain, stderr_c0,
+            "stderr must be byte-identical between plain pull and cascade:0"
+        );
     }
 
     #[test]
@@ -1877,20 +1889,40 @@ mod pull_tests {
         run_cmd(&["git", "config", "user.name", "CVB Test"]);
         run_cmd(&["git", "config", "user.email", "test@cvb.local"]);
 
-        std::fs::write(dir.join("src/lib.rs"), "pub fn caller() {\n    helper_fn();\n}\n").unwrap();
-        std::fs::write(dir.join("src/helper.rs"), "pub fn helper_fn() -> usize {\n    42\n}\n").unwrap();
+        std::fs::write(
+            dir.join("src/lib.rs"),
+            "pub fn caller() {\n    helper_fn();\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("src/helper.rs"),
+            "pub fn helper_fn() -> usize {\n    42\n}\n",
+        )
+        .unwrap();
         run_cmd(&["git", "add", "src/lib.rs", "src/helper.rs"]);
         run_cmd(&["git", "commit", "-m", "init"]);
 
-        let (status, stdout, stderr) =
-            run_capture(&["file:src/lib.rs".into(), "caller".into(), "cascade:1".into()], Some(&dir));
+        let (status, stdout, stderr) = run_capture(
+            &[
+                "file:src/lib.rs".into(),
+                "caller".into(),
+                "cascade:1".into(),
+            ],
+            Some(&dir),
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(status, 0);
         assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
-        assert!(stdout.contains("Rust function: src/lib.rs:1-3"), "missing seed in stdout:\n{stdout}");
-        assert!(stdout.contains("Rust function: src/helper.rs:1-3"), "missing cascaded dependency outside file scope:\n{stdout}");
+        assert!(
+            stdout.contains("Rust function: src/lib.rs:1-3"),
+            "missing seed in stdout:\n{stdout}"
+        );
+        assert!(
+            stdout.contains("Rust function: src/helper.rs:1-3"),
+            "missing cascaded dependency outside file scope:\n{stdout}"
+        );
         assert!(stdout.contains("callee of caller (call at :2)"));
     }
 
