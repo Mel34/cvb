@@ -2,14 +2,17 @@
 
 use std::path::{Component, Path};
 
+pub(crate) mod journal;
 pub(crate) mod load;
 pub(crate) mod parse;
 pub(crate) mod plan;
 pub(crate) mod render;
-
+#[allow(unused_imports)]
+pub(crate) use journal::*;
 pub(crate) use load::*;
 pub(crate) use parse::*;
 pub(crate) use plan::*;
+#[allow(unused_imports)]
 pub(crate) use render::*;
 
 #[derive(Debug, PartialEq, Eq)]
