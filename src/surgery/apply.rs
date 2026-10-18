@@ -1320,6 +1320,104 @@ mod tests {
     }
 
     #[test]
+    fn test_crash_recovery_after_second_temp_write_rolls_back() {
+        let base = std::env::temp_dir().join(format!("cvb-crash-temp2-{}", std::process::id()));
+        let state_dir = base.join("state");
+        let project_dir = base.join("project");
+
+        if base.exists() {
+            let _ = fs::remove_dir_all(&base);
+        }
+        fs::create_dir_all(&project_dir).unwrap();
+
+        let file1 = project_dir.join("a.rs");
+        let file2 = project_dir.join("b.rs");
+        let orig1 = "orig a\n";
+        let orig2 = "orig b\n";
+        fs::write(&file1, orig1).unwrap();
+        fs::write(&file2, orig2).unwrap();
+
+        let state = init_project_state(&state_dir, &project_dir).unwrap();
+        let plan = make_test_plan(
+            "crash-temp2",
+            vec![("a.rs", orig1, "new a\n"), ("b.rs", orig2, "new b\n")],
+        );
+
+        let res = commit_plan_with_hook(&state, &plan, |point| {
+            if point == CommitCrashPoint::AfterTempWrite(1) {
+                return Err(ApplyError::FaultInjected("crash after second temp write".to_string()));
+            }
+            Ok(())
+        });
+        assert!(matches!(res, Err(ApplyError::FaultInjected(_))));
+
+        let fresh_state = init_project_state(&state_dir, &project_dir).unwrap();
+        let outcome = recover_project(&fresh_state).unwrap();
+
+        assert_eq!(outcome, Some(RecoveryOutcome::RolledBack));
+        assert_eq!(fs::read_to_string(&file1).unwrap(), orig1);
+        assert_eq!(fs::read_to_string(&file2).unwrap(), orig2);
+
+        let j = read_journal(&fresh_state.dir.join("crash-temp2.journal")).unwrap();
+        assert_eq!(j.state, JournalState::RolledBack);
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn test_crash_recovery_after_committed_transition_preserves_committed() {
+        let base = std::env::temp_dir().join(format!("cvb-crash-committed-{}", std::process::id()));
+        let state_dir = base.join("state");
+        let project_dir = base.join("project");
+
+        if base.exists() {
+            let _ = fs::remove_dir_all(&base);
+        }
+        fs::create_dir_all(&project_dir).unwrap();
+
+        let file = project_dir.join("main.rs");
+        let orig = "orig\n";
+        let planned = "planned\n";
+        fs::write(&file, orig).unwrap();
+
+        let state = init_project_state(&state_dir, &project_dir).unwrap();
+        let plan = make_test_plan("crash-committed", vec![("main.rs", orig, planned)]);
+
+        let res = commit_plan_with_hook(&state, &plan, |point| {
+            if point == CommitCrashPoint::AfterCommitted {
+                return Err(ApplyError::FaultInjected(
+                    "crash immediately after committed transition".to_string(),
+                ));
+            }
+            Ok(())
+        });
+        assert!(matches!(res, Err(ApplyError::FaultInjected(_))));
+
+        // General project recovery should find no unfinished journals
+        let fresh_state = init_project_state(&state_dir, &project_dir).unwrap();
+        let outcome = recover_project(&fresh_state).unwrap();
+        assert_eq!(outcome, None);
+
+        // Direct recovery on the committed journal is a no-op
+        let mut journal = read_journal(&fresh_state.dir.join("crash-committed.journal")).unwrap();
+        assert_eq!(journal.state, JournalState::Committed);
+        let direct_outcome = recover_journal(&fresh_state, &mut journal).unwrap();
+        assert_eq!(
+            direct_outcome,
+            RecoveryOutcome::NothingToDo(JournalState::Committed)
+        );
+
+        // Planned target bytes are preserved
+        assert_eq!(fs::read_to_string(&file).unwrap(), planned);
+
+        // Replay protection remains active
+        let replay_res = apply_plan(&fresh_state, &plan);
+        assert!(matches!(replay_res, Err(ApplyError::Replay { .. })));
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
     fn test_crash_recovery_conflict_leaves_unknown_content_untouched() {
         let base = std::env::temp_dir().join(format!("cvb-crash-conflict-{}", std::process::id()));
         let state_dir = base.join("state");
@@ -1550,6 +1648,70 @@ mod tests {
             modified,
             "modified content before temp write must never be overwritten"
         );
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn test_concurrency_true_simultaneous_runs_race_lock_or_replay() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let base =
+            std::env::temp_dir().join(format!("cvb-concurrency-race-{}", std::process::id()));
+        let state_dir = base.join("state");
+        let project_dir = base.join("project");
+
+        if base.exists() {
+            let _ = fs::remove_dir_all(&base);
+        }
+        fs::create_dir_all(&project_dir).unwrap();
+
+        let file = project_dir.join("main.rs");
+        let orig = "fn main() {}\n";
+        let prop = "fn main() { println!(\"applied\"); }\n";
+        fs::write(&file, orig).unwrap();
+
+        let state = Arc::new(init_project_state(&state_dir, &project_dir).unwrap());
+        let plan = Arc::new(make_test_plan("race-tx-01", vec![("main.rs", orig, prop)]));
+
+        let barrier = Arc::new(Barrier::new(2));
+
+        let state1 = Arc::clone(&state);
+        let plan1 = Arc::clone(&plan);
+        let barrier1 = Arc::clone(&barrier);
+        let h1 = thread::spawn(move || {
+            barrier1.wait();
+            apply_plan(&state1, &plan1)
+        });
+
+        let state2 = Arc::clone(&state);
+        let plan2 = Arc::clone(&plan);
+        let barrier2 = Arc::clone(&barrier);
+        let h2 = thread::spawn(move || {
+            barrier2.wait();
+            apply_plan(&state2, &plan2)
+        });
+
+        let res1 = h1.join().expect("thread 1 panicked");
+        let res2 = h2.join().expect("thread 2 panicked");
+
+        let outcomes = [res1, res2];
+        let successes = outcomes.iter().filter(|r| r.is_ok()).count();
+        let failures: Vec<_> = outcomes.into_iter().filter_map(|r| r.err()).collect();
+
+        assert_eq!(successes, 1, "exactly one concurrent apply must succeed");
+        assert_eq!(failures.len(), 1, "competing apply must fail");
+
+        match &failures[0] {
+            ApplyError::Lock(LockError::Locked) => {}
+            ApplyError::Replay { id } => {
+                assert_eq!(id, "race-tx-01");
+            }
+            other => panic!("expected ApplyError::Lock(Locked) or Replay, got: {other:?}"),
+        }
+
+        assert_eq!(fs::read_to_string(&file).unwrap(), prop);
 
         let _ = fs::remove_dir_all(base);
     }
