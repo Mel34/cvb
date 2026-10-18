@@ -10,6 +10,7 @@ pub(crate) mod load;
 pub(crate) mod parse;
 pub(crate) mod plan;
 pub(crate) mod render;
+pub(crate) mod token;
 #[allow(unused_imports)]
 pub(crate) use apply::*;
 #[allow(unused_imports)]
@@ -23,6 +24,8 @@ pub(crate) use parse::*;
 pub(crate) use plan::*;
 #[allow(unused_imports)]
 pub(crate) use render::*;
+#[allow(unused_imports)]
+pub(crate) use token::*;
 
 pub(crate) fn check_input_size(raw_len: usize) -> Result<(), String> {
     if raw_len > MAX_INPUT_BYTES {
