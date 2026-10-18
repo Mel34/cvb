@@ -74,7 +74,7 @@ A capture session ends with:
 
             std::process::exit(pull::run(&args));
         }
-        cli::Command::Surgery => {
+        cli::Command::Surgery(_args) => {
             println!("Paste CSL block");
         }
         cli::Command::Target(args) => {
