@@ -1263,4 +1263,34 @@ CVB::k7Q2xw9R::END ops=0";
         assert!(message.contains("\\texpected"), "{message}");
         assert!(message.contains("\\tactual"), "{message}");
     }
+
+    #[test]
+    fn precondition_error_message_includes_e_precond_code_and_unicode_column() {
+        let envelope = make_envelope(vec![Operation::Replace {
+            start: 1,
+            end: 1,
+            // 'é' is 2 UTF-8 bytes (col 1, bytes 0..2)
+            // ' ' is 1 byte (col 2, byte 2)
+            // mismatch at col 3 (byte offset 3): 'a' vs 'b'
+            old: vec!["é a".to_owned()],
+            new: vec!["new".to_owned()],
+        }]);
+        let original = originals("é b\n");
+        let failure = plan_envelope(&envelope, &original).unwrap_err();
+        let message = failure.to_string();
+
+        assert_eq!(failure.kind, PlanError::Precondition);
+        assert!(
+            message.starts_with("CVB: E-PRECOND:"),
+            "expected message to start with protocol code, got: {message}"
+        );
+        assert!(
+            message.contains("column 3 (byte offset 3)"),
+            "expected col 3 byte 3, got: {message}"
+        );
+        assert!(
+            !message.contains("PlanFailure"),
+            "message should not contain debug structure: {message}"
+        );
+    }
 }

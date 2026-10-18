@@ -368,6 +368,46 @@ def test_confirmed_apply():
         )
 
 
+def test_precondition_failure_reports_clean_e_precond():
+    with tempfile.TemporaryDirectory(prefix="cvb-surgery-precond-") as tmp:
+        root, target = make_project(tmp)
+        # target contains ORIGINAL with `println!("hello");` on line 2.
+        # Send an envelope expecting `println!("mismatched");` to trigger E-PRECOND.
+        envelope = b"""CVB::testtoken123::BEGIN v=1 id=test-precond
+CVB::testtoken123::FILE path=example.rs
+CVB::testtoken123::OP replace lines=2-2
+CVB::testtoken123::OLD n=1
+    println!("mismatched");
+CVB::testtoken123::NEW n=1
+    println!("goodbye");
+CVB::testtoken123::ENDOP
+CVB::testtoken123::END ops=1
+"""
+        result = subprocess.run(
+            [
+                str(BINARY), "surgery", "--stdin",
+                "--root", str(root),
+            ],
+            input=envelope,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+            timeout=10,
+        )
+
+        require(result.returncode == 2, f"expected exit 2, got {result.returncode}")
+        stderr = result.stderr.decode(errors="replace")
+        require(
+            "Plan(PlanFailure" not in stderr,
+            f"debug structure found in stderr: {stderr}",
+        )
+        require(
+            "CVB: E-PRECOND:" in stderr,
+            f"expected 'CVB: E-PRECOND:' in stderr, got: {stderr}",
+        )
+        require_unchanged(target)
+
+
 def main():
     build = subprocess.run(
         ["cargo", "build", "--quiet", "--bin", "cvb"],
@@ -389,6 +429,7 @@ def main():
         ("missing TTY", test_missing_tty),
         ("declined confirmation", test_decline),
         ("confirmed apply", test_confirmed_apply),
+        ("precondition clean error", test_precondition_failure_reports_clean_e_precond),
     ]
     failures = []
 

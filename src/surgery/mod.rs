@@ -255,7 +255,7 @@ impl std::fmt::Display for PlanFailure {
             }) => {
                 write!(
                     f,
-                    "CVB: {}: operation {}: precondition mismatch at line {}, column {} (byte offset {}):\n  expected: \"{}\"\n     found: \"{}\"",
+                    "CVB: E-PRECOND: {}: operation {}: precondition mismatch at line {}, column {} (byte offset {}):\n  expected: \"{}\"\n     found: \"{}\"",
                     self.path,
                     self.op_index,
                     line,
@@ -513,6 +513,18 @@ pub(crate) enum PipelineError {
     Plan(PlanFailure),
 }
 
+impl std::fmt::Display for PipelineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PipelineError::Parse(err) => write!(f, "{err}"),
+            PipelineError::Load(err) => write!(f, "{err}"),
+            PipelineError::Plan(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl std::error::Error for PipelineError {}
+
 /// Runs the surgery CLI pipeline.
 ///
 pub(crate) fn spec_text(token: &str) -> String {
@@ -689,7 +701,7 @@ pub(crate) fn run(
     let (_envelope, plan) = match parse_load_plan(&root, input) {
         Ok(result) => result,
         Err(error) => {
-            eprintln!("CVB: surgery planning failed: {error:?}");
+            eprintln!("{error}");
             std::process::exit(2);
         }
     };
