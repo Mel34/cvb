@@ -21,6 +21,41 @@ pub(crate) use plan::*;
 #[allow(unused_imports)]
 pub(crate) use render::*;
 
+pub(crate) fn check_input_size(raw_len: usize) -> Result<(), String> {
+    if raw_len > MAX_INPUT_BYTES {
+        let mut msg = format!(
+            "E-LIMIT: input size ({raw_len} bytes) exceeds the 3 MiB cap ({MAX_INPUT_BYTES} bytes)."
+        );
+        if raw_len >= CLIPBOARD_TRUNCATION_BYTES.saturating_sub(100_000) {
+            msg.push_str(
+                " The received size is near 4 MB; the clipboard may have truncated it. Split the change into several envelopes."
+            );
+        } else {
+            msg.push_str(" Split the change into several envelopes.");
+        }
+        return Err(msg);
+    }
+    Ok(())
+}
+
+pub(crate) fn read_input(stdin: bool) -> Result<Vec<u8>, (String, i32)> {
+    let bytes = if stdin {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        std::io::stdin()
+            .take(MAX_INPUT_BYTES as u64 + 1)
+            .read_to_end(&mut buf)
+            .map_err(|e| (format!("CVB: failed to read stdin: {e}"), 2))?;
+        buf
+    } else {
+        crate::clipboard::read_from_clipboard()
+            .map_err(|e| (e, 2))?
+    };
+
+    check_input_size(bytes.len()).map_err(|e| (e, 2))?;
+    Ok(bytes)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Envelope {
     pub token: String,
@@ -511,6 +546,22 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::PathBuf;
+
+    #[test]
+    fn check_input_size_accepts_within_cap() {
+        assert!(check_input_size(MAX_INPUT_BYTES).is_ok());
+        assert!(check_input_size(100).is_ok());
+    }
+
+    #[test]
+    fn check_input_size_rejects_over_cap_with_e_limit_and_truncation_warning() {
+        let err = check_input_size(MAX_INPUT_BYTES + 1).unwrap_err();
+        assert!(err.starts_with("E-LIMIT:"), "{err}");
+        assert!(err.contains("exceeds the 3 MiB cap"), "{err}");
+
+        let err_trunc = check_input_size(3_950_000).unwrap_err();
+        assert!(err_trunc.contains("clipboard may have truncated"), "{err_trunc}");
+    }
 
     #[test]
     fn parse_load_plan_rejects_git_target_without_modifying_file() {

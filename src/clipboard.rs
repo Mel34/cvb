@@ -469,7 +469,33 @@ impl ClipboardBuffer {
 
 #[cfg(test)]
 mod tests {
-    use super::ClipboardBuffer;
+    use super::{read_from_clipboard_with, ClipboardBuffer};
+
+    #[test]
+    fn read_from_clipboard_success() {
+        let bytes = read_from_clipboard_with(|| {
+            Ok(std::process::Output {
+                status: std::os::unix::process::ExitStatusExt::from_raw(0),
+                stdout: b"clipboard content\n".to_vec(),
+                stderr: Vec::new(),
+            })
+        })
+        .unwrap();
+        assert_eq!(bytes, b"clipboard content\n");
+    }
+
+    #[test]
+    fn read_from_clipboard_propagates_failure() {
+        let err = read_from_clipboard_with(|| {
+            Ok(std::process::Output {
+                status: std::os::unix::process::ExitStatusExt::from_raw(1 << 8),
+                stdout: Vec::new(),
+                stderr: b"Nothing copied".to_vec(),
+            })
+        })
+        .unwrap_err();
+        assert!(err.contains("Nothing copied"));
+    }
 
     fn temporary_limit_path(label: &str) -> std::path::PathBuf {
         let nonce = std::time::SystemTime::now()
@@ -1123,6 +1149,35 @@ mod tests {
         assert_eq!(copy_attempts, 1);
         assert_eq!(key_reads, 0);
     }
+}
+
+pub(crate) fn read_from_clipboard() -> Result<Vec<u8>, String> {
+    read_from_clipboard_with(|| {
+        std::process::Command::new("wl-paste")
+            .arg("--no-newline")
+            .arg("--type")
+            .arg("text/plain")
+            .output()
+            .map_err(|error| format!("CVB: unable to start wl-paste: {error}"))
+    })
+}
+
+pub(crate) fn read_from_clipboard_with<F>(mut run_cmd: F) -> Result<Vec<u8>, String>
+where
+    F: FnMut() -> Result<std::process::Output, String>,
+{
+    let output = run_cmd()?;
+    if !output.status.success() {
+        let code = output.status.code().map_or("signal".to_string(), |c| c.to_string());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = if stderr.trim().is_empty() {
+            format!("wl-paste exited with status {code}")
+        } else {
+            format!("wl-paste exited with status {code}: {}", stderr.trim())
+        };
+        return Err(format!("CVB: unable to read clipboard: {detail}"));
+    }
+    Ok(output.stdout)
 }
 
 pub(crate) fn copy_to_clipboard(buffer: &ClipboardBuffer) -> Result<(), String> {
