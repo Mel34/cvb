@@ -45,14 +45,14 @@ impl SoundPlayer {
             return None;
         }
 
-        if let Some(theme) = configured_theme() {
-            if !set_theme(context, &theme) {
-                unsafe {
-                    ca_context_destroy(context);
-                }
-
-                return None;
+        if let Some(theme) = configured_theme()
+            && !set_theme(context, &theme)
+        {
+            unsafe {
+                ca_context_destroy(context);
             }
+
+            return None;
         }
 
         Some(Self { context })

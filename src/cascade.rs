@@ -4,7 +4,7 @@ use std::path::Path;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
-use crate::pull::{self, RustItemKind, SearchUnit, UnitKey, is_call_invocation};
+use crate::pull::{self, MatchingSeed, RustItemKind, UnitKey, is_call_invocation};
 
 pub const MAX_DEPTH: usize = 5;
 pub const MAX_ADDED_UNITS: usize = 25;
@@ -104,13 +104,11 @@ fn extract_type_name_from_type(ty: &syn::Type) -> Option<String> {
         syn::Type::Path(tp) => {
             let last_seg = tp.path.segments.last()?;
             let ident_str = last_seg.ident.to_string();
-            if matches!(ident_str.as_str(), "Box" | "Arc" | "Rc") {
-                if let syn::PathArguments::AngleBracketed(ab) = &last_seg.arguments {
-                    if let Some(syn::GenericArgument::Type(inner)) = ab.args.first() {
+            if matches!(ident_str.as_str(), "Box" | "Arc" | "Rc")
+                && let syn::PathArguments::AngleBracketed(ab) = &last_seg.arguments
+                    && let Some(syn::GenericArgument::Type(inner)) = ab.args.first() {
                         return extract_type_name_from_type(inner);
                     }
-                }
-            }
             Some(ident_str)
         }
         syn::Type::Reference(tr) => extract_type_name_from_type(&tr.elem),
@@ -153,13 +151,12 @@ fn collect_type_names(ty: &syn::Type, out: &mut Vec<String>) {
 fn extract_fn_params(sig: &syn::Signature) -> Vec<(String, String)> {
     let mut params = Vec::new();
     for input in &sig.inputs {
-        if let syn::FnArg::Typed(pat_type) = input {
-            if let syn::Pat::Ident(pat_ident) = pat_type.pat.as_ref() {
+        if let syn::FnArg::Typed(pat_type) = input
+            && let syn::Pat::Ident(pat_ident) = pat_type.pat.as_ref() {
                 let name = pat_ident.ident.to_string();
                 let ty_name = extract_type_name_from_type(&pat_type.ty).unwrap_or_default();
                 params.push((name, ty_name));
             }
-        }
     }
     params
 }
@@ -441,20 +438,16 @@ pub fn build_index(dir: Option<&Path>) -> Index {
         }
 
         fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
-            if let syn::Expr::Path(p) = node.func.as_ref() {
-                if let Some(ident) = p.path.segments.last().map(|s| s.ident.to_string()) {
-                    if let Some(defs) = self.free_fns.get(&ident) {
-                        if defs.len() == 1 {
-                            if let Some(cur) = &self.current_unit {
+            if let syn::Expr::Path(p) = node.func.as_ref()
+                && let Some(ident) = p.path.segments.last().map(|s| s.ident.to_string())
+                    && let Some(defs) = self.free_fns.get(&ident)
+                        && defs.len() == 1
+                            && let Some(cur) = &self.current_unit {
                                 self.tally
                                     .entry(defs[0].unit_key())
                                     .or_default()
                                     .insert(cur.clone());
                             }
-                        }
-                    }
-                }
-            }
             visit::visit_expr_call(self, node);
         }
     }
@@ -532,25 +525,20 @@ struct UnitEdgeVisitor {
 impl<'ast> Visit<'ast> for UnitEdgeVisitor {
     fn visit_local(&mut self, node: &'ast syn::Local) {
         if let syn::Pat::Type(pat_type) = &node.pat {
-            if let syn::Pat::Ident(pat_ident) = pat_type.pat.as_ref() {
-                if let Some(t) = extract_type_name_from_type(&pat_type.ty) {
+            if let syn::Pat::Ident(pat_ident) = pat_type.pat.as_ref()
+                && let Some(t) = extract_type_name_from_type(&pat_type.ty) {
                     self.local_vars.insert(pat_ident.ident.to_string(), t);
                 }
-            }
-        } else if let Some(init) = &node.init {
-            if let syn::Expr::Call(call) = init.expr.as_ref() {
-                if let syn::Expr::Path(p) = call.func.as_ref() {
-                    if p.path.segments.len() >= 2 {
+        } else if let Some(init) = &node.init
+            && let syn::Expr::Call(call) = init.expr.as_ref()
+                && let syn::Expr::Path(p) = call.func.as_ref()
+                    && p.path.segments.len() >= 2 {
                         let seg0 = p.path.segments[0].ident.to_string();
-                        if seg0.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
-                            if let syn::Pat::Ident(pat_ident) = &node.pat {
+                        if seg0.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                            && let syn::Pat::Ident(pat_ident) = &node.pat {
                                 self.local_vars.insert(pat_ident.ident.to_string(), seg0);
                             }
-                        }
                     }
-                }
-            }
-        }
         visit::visit_local(self, node);
     }
 
@@ -592,16 +580,14 @@ impl<'ast> Visit<'ast> for UnitEdgeVisitor {
         }
 
         for arg in &node.args {
-            if let syn::Expr::Path(p) = arg {
-                if p.path.segments.len() == 1 {
+            if let syn::Expr::Path(p) = arg
+                && p.path.segments.len() == 1 {
                     let name = p.path.segments[0].ident.to_string();
-                    if !self.fn_params.contains_key(&name) && !self.local_vars.contains_key(&name) {
-                        if name.chars().next().is_some_and(|c| c.is_ascii_lowercase()) {
+                    if !self.fn_params.contains_key(&name) && !self.local_vars.contains_key(&name)
+                        && name.chars().next().is_some_and(|c| c.is_ascii_lowercase()) {
                             self.edges.push(EdgeKind::FnAsValue { name, line });
                         }
-                    }
                 }
-            }
         }
 
         visit::visit_expr_call(self, node);
@@ -614,11 +600,9 @@ impl<'ast> Visit<'ast> for UnitEdgeVisitor {
         let receiver_known = match node.receiver.as_ref() {
             syn::Expr::Path(p) => {
                 if p.path.is_ident("self") {
-                    if let Some(owner) = &self.enclosing_owner {
-                        Some((owner.clone(), "self".to_string()))
-                    } else {
-                        None
-                    }
+                    self.enclosing_owner
+                        .as_ref()
+                        .map(|owner| (owner.clone(), "self".to_string()))
                 } else if let Some(ident) = p.path.get_ident() {
                     let var_name = ident.to_string();
                     if let Some(ty) = self.local_vars.get(&var_name) {
@@ -652,16 +636,14 @@ impl<'ast> Visit<'ast> for UnitEdgeVisitor {
         }
 
         for arg in &node.args {
-            if let syn::Expr::Path(p) = arg {
-                if p.path.segments.len() == 1 {
+            if let syn::Expr::Path(p) = arg
+                && p.path.segments.len() == 1 {
                     let name = p.path.segments[0].ident.to_string();
-                    if !self.fn_params.contains_key(&name) && !self.local_vars.contains_key(&name) {
-                        if name.chars().next().is_some_and(|c| c.is_ascii_lowercase()) {
+                    if !self.fn_params.contains_key(&name) && !self.local_vars.contains_key(&name)
+                        && name.chars().next().is_some_and(|c| c.is_ascii_lowercase()) {
                             self.edges.push(EdgeKind::FnAsValue { name, line });
                         }
-                    }
                 }
-            }
         }
 
         visit::visit_expr_method_call(self, node);
@@ -1256,8 +1238,9 @@ pub fn render_unit_lines(source: &str, start: usize, end: usize) -> String {
     out
 }
 
+#[cfg(test)]
 pub fn run(
-    matching_seeds: &[(SearchUnit, Vec<(String, Vec<usize>)>)],
+    matching_seeds: &[MatchingSeed],
     dir: Option<&Path>,
     max_depth: usize,
 ) -> String {
@@ -1265,7 +1248,7 @@ pub fn run(
 }
 
 pub fn run_with_reserved_chars(
-    matching_seeds: &[(SearchUnit, Vec<(String, Vec<usize>)>)],
+    matching_seeds: &[MatchingSeed],
     dir: Option<&Path>,
     max_depth: usize,
     reserved_chars: usize,
@@ -1413,7 +1396,7 @@ pub fn run_with_reserved_chars(
         }
 
         let mut sorted_cands: Vec<Candidate> = level_cands.into_values().collect();
-        sorted_cands.sort_by(|a, b| rank_key(a, &index).cmp(&rank_key(b, &index)));
+        sorted_cands.sort_by_key(|a| rank_key(a, &index));
 
         let mut next_frontier = Vec::new();
         let mut admitted_this_depth = Vec::new();
@@ -1690,6 +1673,7 @@ pub fn run_with_reserved_chars(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pull::SearchUnit;
 
     #[test]
     fn total_cascade_output_strictly_bounded_by_24000_chars() {

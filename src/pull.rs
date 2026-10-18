@@ -10,6 +10,8 @@ use crate::cascade;
 const SURGERY_REMINDER: &str =
     "Edit with: cvb surgery --spec (one envelope per paste, use the printed token).";
 
+type FileScope = (Option<String>, Vec<(usize, usize)>, Vec<String>);
+
 fn append_surgery_reminder(stdout: &mut String) {
     stdout.push_str(SURGERY_REMINDER);
     stdout.push('\n');
@@ -140,9 +142,7 @@ fn read_line_range(path: &str, start: usize, end: usize) -> Result<String, Strin
     Ok(output)
 }
 
-fn extract_file_scope(
-    args: &[String],
-) -> Result<(Option<String>, Vec<(usize, usize)>, Vec<String>), String> {
+fn extract_file_scope(args: &[String]) -> Result<FileScope, String> {
     let mut scope = None;
     let mut line_ranges = Vec::new();
     let mut query_args = Vec::new();
@@ -363,8 +363,7 @@ fn run_search(
 }
 
 fn matching_content(record: &str) -> Option<&str> {
-    let mut separators = record.match_indices(':');
-    while let Some((index, _)) = separators.next() {
+    for (index, _) in record.match_indices(':') {
         let rest = &record[index + 1..];
         let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
 
@@ -409,13 +408,12 @@ fn parse_search_records(raw: &[u8]) -> Vec<(String, usize, String)> {
 
             i = next_i;
 
-            if let Ok(line_str) = std::str::from_utf8(line_bytes) {
-                if let Ok(line_num) = line_str.parse::<usize>() {
+            if let Ok(line_str) = std::str::from_utf8(line_bytes)
+                && let Ok(line_num) = line_str.parse::<usize>() {
                     let path_str = String::from_utf8_lossy(path_bytes).into_owned();
                     let content_str = String::from_utf8_lossy(content_bytes).into_owned();
                     results.push((path_str, line_num, content_str));
                 }
-            }
         }
 
         return results;
@@ -426,11 +424,10 @@ fn parse_search_records(raw: &[u8]) -> Vec<(String, usize, String)> {
     for line in text.lines() {
         if let Some(content) = matching_content(line) {
             let mut parts = line.splitn(3, ':');
-            if let (Some(path), Some(line_str)) = (parts.next(), parts.next()) {
-                if let Ok(line_num) = line_str.parse::<usize>() {
+            if let (Some(path), Some(line_str)) = (parts.next(), parts.next())
+                && let Ok(line_num) = line_str.parse::<usize>() {
                     results.push((path.to_string(), line_num, content.to_string()));
                 }
-            }
         }
     }
     results
@@ -636,6 +633,8 @@ pub struct SearchUnit {
     pub label: &'static str,
     pub warning: Option<String>,
 }
+
+pub type MatchingSeed = (SearchUnit, Vec<(String, Vec<usize>)>);
 
 fn resolve_unit(path: &str, line: usize, source: &str) -> SearchUnit {
     let is_rust = path.ends_with(".rs");
@@ -1018,7 +1017,7 @@ pub fn run_capture(args: &[String], dir: Option<&Path>) -> (i32, String, String)
 
     ordered_unit_keys.sort();
 
-    let mut matching_units: Vec<(SearchUnit, Vec<(String, Vec<usize>)>)> = Vec::new();
+    let mut matching_units: Vec<MatchingSeed> = Vec::new();
     let mut eliminated_by_exclusion: HashMap<String, usize> = HashMap::new();
 
     for key in ordered_unit_keys {
@@ -1129,8 +1128,8 @@ pub fn run_capture(args: &[String], dir: Option<&Path>) -> (i32, String, String)
 
     stdout.push_str(&format!("{}\n", query.format_echo()));
 
-    if let Some(depth) = cascade_depth {
-        if depth > 0 {
+    if let Some(depth) = cascade_depth
+        && depth > 0 {
             let scope_desc = if let Some(s) = scope.as_deref() {
                 format!("initial search in {s}, dependencies repo-wide")
             } else {
@@ -1142,15 +1141,13 @@ pub fn run_capture(args: &[String], dir: Option<&Path>) -> (i32, String, String)
                 cascade::MAX_ADDED_CHARS
             ));
         }
-    }
 
     for exc in &query.excluded {
-        if let Some(&count) = eliminated_by_exclusion.get(exc) {
-            if count > 0 {
+        if let Some(&count) = eliminated_by_exclusion.get(exc)
+            && count > 0 {
                 let unit_str = if count == 1 { "unit" } else { "units" };
                 stdout.push_str(&format!("-{exc}: excluded {count} {unit_str}\n"));
             }
-        }
     }
 
     for (unit, term_hits) in &matching_units {
@@ -1188,8 +1185,8 @@ pub fn run_capture(args: &[String], dir: Option<&Path>) -> (i32, String, String)
         }
     }
 
-    if let Some(depth) = cascade_depth {
-        if depth > 0 {
+    if let Some(depth) = cascade_depth
+        && depth > 0 {
             let cascade_bundle = cascade::run_with_reserved_chars(
                 &matching_units,
                 dir,
@@ -1198,7 +1195,6 @@ pub fn run_capture(args: &[String], dir: Option<&Path>) -> (i32, String, String)
             );
             stdout.push_str(&cascade_bundle);
         }
-    }
 
     append_surgery_reminder(&mut stdout);
     (0, stdout, stderr)
@@ -1524,18 +1520,16 @@ pub fn is_call_invocation(trees: &[proc_macro2::TokenTree], i: usize) -> bool {
     use proc_macro2::{Delimiter, TokenTree};
 
     if let Some(next) = trees.get(i + 1) {
-        if let TokenTree::Group(group) = next {
-            if group.delimiter() == Delimiter::Parenthesis {
+        if let TokenTree::Group(group) = next
+            && group.delimiter() == Delimiter::Parenthesis {
                 return true;
             }
-        }
 
-        if let TokenTree::Punct(p1) = next {
-            if p1.as_char() == ':' {
-                if let (Some(TokenTree::Punct(p2)), Some(TokenTree::Punct(p3))) =
+        if let TokenTree::Punct(p1) = next
+            && p1.as_char() == ':'
+                && let (Some(TokenTree::Punct(p2)), Some(TokenTree::Punct(p3))) =
                     (trees.get(i + 2), trees.get(i + 3))
-                {
-                    if p2.as_char() == ':' && p3.as_char() == '<' {
+                    && p2.as_char() == ':' && p3.as_char() == '<' {
                         let mut depth = 0;
                         let mut j = i + 3;
                         while j < trees.len() {
@@ -1546,11 +1540,9 @@ pub fn is_call_invocation(trees: &[proc_macro2::TokenTree], i: usize) -> bool {
                                     depth -= 1;
                                     if depth == 0 {
                                         if let Some(TokenTree::Group(call_group)) = trees.get(j + 1)
-                                        {
-                                            if call_group.delimiter() == Delimiter::Parenthesis {
+                                            && call_group.delimiter() == Delimiter::Parenthesis {
                                                 return true;
                                             }
-                                        }
                                         break;
                                     }
                                 }
@@ -1558,9 +1550,6 @@ pub fn is_call_invocation(trees: &[proc_macro2::TokenTree], i: usize) -> bool {
                             j += 1;
                         }
                     }
-                }
-            }
-        }
     }
     false
 }
@@ -1628,8 +1617,8 @@ pub fn rust_callers(source: &str, target: &str) -> Option<Vec<RustCallerMatch>> 
         }
 
         fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
-            if let syn::Expr::Path(path) = node.func.as_ref() {
-                if path
+            if let syn::Expr::Path(path) = node.func.as_ref()
+                && path
                     .path
                     .segments
                     .last()
@@ -1641,7 +1630,6 @@ pub fn rust_callers(source: &str, target: &str) -> Option<Vec<RustCallerMatch>> 
                         kind: RustCallKind::Function,
                     });
                 }
-            }
 
             visit::visit_expr_call(self, node);
         }
@@ -1706,11 +1694,10 @@ pub fn markdown_section_range(source: &str, match_line: usize) -> Option<(usize,
     for (index, line) in lines.iter().enumerate() {
         let indent = line.bytes().take_while(|byte| *byte == b' ').count();
         if indent > 3 {
-            if fence.is_none() {
-                if let Some(level) = markdown_heading_level(line) {
+            if fence.is_none()
+                && let Some(level) = markdown_heading_level(line) {
                     headings.push((index + 1, level));
                 }
-            }
             continue;
         }
 

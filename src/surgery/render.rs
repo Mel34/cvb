@@ -12,15 +12,9 @@ pub(crate) const MARKER_BIDI: &str = "[bidi]";
 pub(crate) const MARKER_CONTROL: &str = "[control]";
 pub(crate) const NO_NEWLINE_MARKER: &str = "\\ No newline at end of file";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct RenderOptions {
     pub color: bool,
-}
-
-impl Default for RenderOptions {
-    fn default() -> Self {
-        Self { color: false }
-    }
 }
 
 pub(crate) fn is_zero_width(c: char) -> bool {
@@ -95,13 +89,13 @@ fn compute_line_markers(content: &str) -> Vec<&'static str> {
 }
 
 fn detect_file_ending(bytes: &[u8]) -> &'static str {
-    if let Ok(s) = std::str::from_utf8(bytes) {
-        if let Ok(nl) = detect_newline(s) {
-            return match nl {
-                Newline::Lf => "LF",
-                Newline::Crlf => "CRLF",
-            };
-        }
+    if let Ok(s) = std::str::from_utf8(bytes)
+        && let Ok(nl) = detect_newline(s)
+    {
+        return match nl {
+            Newline::Lf => "LF",
+            Newline::Crlf => "CRLF",
+        };
     }
     if bytes.contains(&b'\r') {
         "CRLF"

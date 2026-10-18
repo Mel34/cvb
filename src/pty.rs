@@ -694,18 +694,18 @@ fn run_pty(rcfile: &Path) -> Result<i32, String> {
 
             unsafe {
                 libc::setenv(
-                    b"PAGER\0".as_ptr() as *const libc::c_char,
-                    b"cat\0".as_ptr() as *const libc::c_char,
+                    c"PAGER".as_ptr(),
+                    c"cat".as_ptr(),
                     1,
                 );
                 libc::setenv(
-                    b"GIT_PAGER\0".as_ptr() as *const libc::c_char,
-                    b"cat\0".as_ptr() as *const libc::c_char,
+                    c"GIT_PAGER".as_ptr(),
+                    c"cat".as_ptr(),
                     1,
                 );
                 libc::setenv(
-                    b"SYSTEMD_PAGER\0".as_ptr() as *const libc::c_char,
-                    b"cat\0".as_ptr() as *const libc::c_char,
+                    c"SYSTEMD_PAGER".as_ptr(),
+                    c"cat".as_ptr(),
                     1,
                 );
             }
@@ -793,14 +793,14 @@ fn ensure_skip_file(path: &Path) {
         return;
     }
 
-    if let Some(parent) = path.parent() {
-        if let Err(error) = std::fs::create_dir_all(parent) {
-            eprintln!(
-                "CVB: unable to create config directory {}: {error}",
-                parent.display()
-            );
-            return;
-        }
+    if let Some(parent) = path.parent()
+        && let Err(error) = std::fs::create_dir_all(parent)
+    {
+        eprintln!(
+            "CVB: unable to create config directory {}: {error}",
+            parent.display()
+        );
+        return;
     }
 
     if let Err(error) = std::fs::write(path, DEFAULT_SKIP_LIST) {
@@ -939,12 +939,12 @@ fn proxy(
             .revents()
             .unwrap_or(nix::poll::PollFlags::empty());
 
-        if keybind_events.contains(nix::poll::PollFlags::POLLIN) {
-            if keybind_watcher.changed()? {
-                match keybind::load() {
-                    Ok(bindings) => keyboard.set_bindings(bindings),
-                    Err(error) => eprintln!("{error}"),
-                }
+        if keybind_events.contains(nix::poll::PollFlags::POLLIN)
+            && keybind_watcher.changed()?
+        {
+            match keybind::load() {
+                Ok(bindings) => keyboard.set_bindings(bindings),
+                Err(error) => eprintln!("{error}"),
             }
         }
 
@@ -959,13 +959,11 @@ fn proxy(
                 .set_size(winsize.ws_row, winsize.ws_col);
         }
 
-        if keyboard_events.contains(nix::poll::PollFlags::POLLIN) {
-            if keyboard.poll()? {
-                capture_screen(&mut screen_terminal)?;
+        if keyboard_events.contains(nix::poll::PollFlags::POLLIN) && keyboard.poll()? {
+            capture_screen(&mut screen_terminal)?;
 
-                if let Some(sound) = sound {
-                    sound.play("screen-capture");
-                }
+            if let Some(sound) = sound {
+                sound.play("screen-capture");
             }
         }
 

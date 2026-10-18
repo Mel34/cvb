@@ -69,19 +69,19 @@ pub(crate) struct ProjectState {
 /// Resolves the user surgery state directory:
 /// $XDG_STATE_HOME/cvb/surgery/ falling back to $HOME/.local/state/cvb/surgery/
 pub(crate) fn resolve_state_dir() -> Result<PathBuf, StateError> {
-    if let Some(xdg) = std::env::var_os("XDG_STATE_HOME") {
-        if !xdg.is_empty() {
-            return Ok(PathBuf::from(xdg).join("cvb").join("surgery"));
-        }
+    if let Some(xdg) = std::env::var_os("XDG_STATE_HOME")
+        && !xdg.is_empty()
+    {
+        return Ok(PathBuf::from(xdg).join("cvb").join("surgery"));
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        if !home.is_empty() {
-            return Ok(PathBuf::from(home)
-                .join(".local")
-                .join("state")
-                .join("cvb")
-                .join("surgery"));
-        }
+    if let Some(home) = std::env::var_os("HOME")
+        && !home.is_empty()
+    {
+        return Ok(PathBuf::from(home)
+            .join(".local")
+            .join("state")
+            .join("cvb")
+            .join("surgery"));
     }
     Err(StateError::NoHomeDir)
 }
@@ -751,7 +751,7 @@ mod tests {
 
     #[test]
     fn test_journal_rejects_tampered_path_traversal() {
-        let mut journal = Journal {
+        let journal = Journal {
             state: JournalState::Prepared,
             id: "tx-tamper-traversal".to_string(),
             canonical_root: PathBuf::from("/canonical/project"),

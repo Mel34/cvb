@@ -881,7 +881,7 @@ mod tests {
         let directory = test_directory("unsupported-path");
         let unsupported = directory.join("unsupported");
 
-        let output = build_paths_output(&[unsupported.clone()]);
+        let output = build_paths_output(std::slice::from_ref(&unsupported));
 
         assert_eq!(
             output.unwrap_err(),

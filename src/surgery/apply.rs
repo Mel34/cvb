@@ -14,11 +14,11 @@ use crate::surgery::Plan;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CommitCrashPoint {
-    AfterJournalPrepared,
-    AfterTempWrite(usize),
-    AfterRename(usize),
-    AfterReadBack,
-    AfterCommitted,
+    JournalPrepared,
+    TempWrite(usize),
+    Rename(usize),
+    ReadBack,
+    Committed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -298,7 +298,7 @@ where
         path: None,
         message: e.to_string(),
     })?;
-    hook(CommitCrashPoint::AfterJournalPrepared)?;
+    hook(CommitCrashPoint::JournalPrepared)?;
 
     let mut temp_paths = Vec::with_capacity(plan.files.len());
 
@@ -347,7 +347,7 @@ where
             })?;
             drop(temp_file);
             temp_paths.push(temp_path);
-            hook(CommitCrashPoint::AfterTempWrite(i))?;
+            hook(CommitCrashPoint::TempWrite(i))?;
         }
 
         // Step 3: Per-rename digest recheck and rename
@@ -374,7 +374,7 @@ where
                 path: Some(file.path.clone()),
                 message: e.to_string(),
             })?;
-            hook(CommitCrashPoint::AfterRename(i))?;
+            hook(CommitCrashPoint::Rename(i))?;
         }
 
         // Step 4: Fsync directories and re-read verification
@@ -404,7 +404,7 @@ where
                 });
             }
         }
-        hook(CommitCrashPoint::AfterReadBack)?;
+        hook(CommitCrashPoint::ReadBack)?;
 
         Ok(())
     })();
@@ -499,7 +499,7 @@ where
             path: None,
             message: e.to_string(),
         })?;
-    hook(CommitCrashPoint::AfterCommitted)?;
+    hook(CommitCrashPoint::Committed)?;
 
     Ok(journal)
 }
@@ -1102,7 +1102,7 @@ mod tests {
 
         let target_clone = file.clone();
         let res = commit_plan_with_hook(&state, &plan, move |point| {
-            if matches!(point, CommitCrashPoint::AfterTempWrite(0)) {
+            if matches!(point, CommitCrashPoint::TempWrite(0)) {
                 fs::write(&target_clone, "interfering writer content\n").unwrap();
             }
             Ok(())
@@ -1166,7 +1166,7 @@ mod tests {
         let plan = make_test_plan("crash-prep", vec![("main.rs", orig, "new\n")]);
 
         let _ = commit_plan_with_hook(&state, &plan, |point| {
-            if point == CommitCrashPoint::AfterJournalPrepared {
+            if point == CommitCrashPoint::JournalPrepared {
                 return Err(ApplyError::FaultInjected("crash after prepared".to_string()));
             }
             Ok(())
@@ -1203,7 +1203,7 @@ mod tests {
         let plan = make_test_plan("crash-temp", vec![("main.rs", orig, "new\n")]);
 
         let _ = commit_plan_with_hook(&state, &plan, |point| {
-            if point == CommitCrashPoint::AfterTempWrite(0) {
+            if point == CommitCrashPoint::TempWrite(0) {
                 return Err(ApplyError::FaultInjected("crash after temp write".to_string()));
             }
             Ok(())
@@ -1243,7 +1243,7 @@ mod tests {
         );
 
         let _ = commit_plan_with_hook(&state, &plan, |point| {
-            if point == CommitCrashPoint::AfterRename(0) {
+            if point == CommitCrashPoint::Rename(0) {
                 return Err(ApplyError::FaultInjected("crash after first rename".to_string()));
             }
             Ok(())
@@ -1291,7 +1291,7 @@ mod tests {
         );
 
         let _ = commit_plan_with_hook(&state, &plan, |point| {
-            if point == CommitCrashPoint::AfterRename(1) {
+            if point == CommitCrashPoint::Rename(1) {
                 return Err(ApplyError::FaultInjected("crash after all renames".to_string()));
             }
             Ok(())
@@ -1328,7 +1328,7 @@ mod tests {
         let plan = make_test_plan("crash-readback", vec![("main.rs", "orig\n", "new\n")]);
 
         let _ = commit_plan_with_hook(&state, &plan, |point| {
-            if point == CommitCrashPoint::AfterReadBack {
+            if point == CommitCrashPoint::ReadBack {
                 return Err(ApplyError::FaultInjected("crash after read back".to_string()));
             }
             Ok(())
@@ -1371,7 +1371,7 @@ mod tests {
         );
 
         let res = commit_plan_with_hook(&state, &plan, |point| {
-            if point == CommitCrashPoint::AfterTempWrite(1) {
+            if point == CommitCrashPoint::TempWrite(1) {
                 return Err(ApplyError::FaultInjected("crash after second temp write".to_string()));
             }
             Ok(())
@@ -1411,7 +1411,7 @@ mod tests {
         let plan = make_test_plan("crash-committed", vec![("main.rs", orig, planned)]);
 
         let res = commit_plan_with_hook(&state, &plan, |point| {
-            if point == CommitCrashPoint::AfterCommitted {
+            if point == CommitCrashPoint::Committed {
                 return Err(ApplyError::FaultInjected(
                     "crash immediately after committed transition".to_string(),
                 ));
@@ -1474,7 +1474,7 @@ mod tests {
 
         // Crash after both temp files are written
         let res = commit_plan_with_hook(&state, &plan, |point| {
-            if point == CommitCrashPoint::AfterTempWrite(1) {
+            if point == CommitCrashPoint::TempWrite(1) {
                 return Err(ApplyError::FaultInjected("crash after temp writes".to_string()));
             }
             Ok(())
@@ -1544,7 +1544,7 @@ mod tests {
         );
 
         let _ = commit_plan_with_hook(&state, &plan, |point| {
-            if point == CommitCrashPoint::AfterRename(0) {
+            if point == CommitCrashPoint::Rename(0) {
                 return Err(ApplyError::FaultInjected("crash after first rename".to_string()));
             }
             Ok(())
@@ -1634,7 +1634,7 @@ mod tests {
         );
 
         let _ = commit_plan_with_hook(&state, &plan, |point| {
-            if point == CommitCrashPoint::AfterRename(0) {
+            if point == CommitCrashPoint::Rename(0) {
                 return Err(ApplyError::FaultInjected("crash after first rename".to_string()));
             }
             Ok(())
@@ -1743,7 +1743,7 @@ mod tests {
 
         let f2_clone = file2.clone();
         let res = apply_plan_with_hook(&state, &plan, move |point| {
-            if point == CommitCrashPoint::AfterRename(0) {
+            if point == CommitCrashPoint::Rename(0) {
                 fs::write(&f2_clone, "interfering modified content\n").unwrap();
             }
             Ok(())
@@ -1905,7 +1905,7 @@ mod tests {
         let file_clone = file.clone();
         let foreign = "foreign edit right before rename\n";
         let res = apply_plan_with_hook(&state, &plan, move |point| {
-            if point == CommitCrashPoint::AfterTempWrite(0) {
+            if point == CommitCrashPoint::TempWrite(0) {
                 fs::write(&file_clone, foreign).unwrap();
             }
             Ok(())
@@ -1952,7 +1952,7 @@ mod tests {
         let file_clone = file.clone();
         let foreign = "foreign edit right after rename\n";
         let res = apply_plan_with_hook(&state, &plan, move |point| {
-            if point == CommitCrashPoint::AfterRename(0) {
+            if point == CommitCrashPoint::Rename(0) {
                 fs::write(&file_clone, foreign).unwrap();
             }
             Ok(())
