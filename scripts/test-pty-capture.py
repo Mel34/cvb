@@ -120,6 +120,39 @@ def run_command(name, command, clipboard_dir, expected, forbidden=()):
     return payload
 
 
+def drain_terminal(quiet=0.15):
+    """Consume terminal output until the PTY has been quiet for `quiet` seconds."""
+    while True:
+        ready, _, _ = select.select([master], [], [], quiet)
+        if not ready:
+            return
+        try:
+            data = os.read(master, 65536)
+        except OSError:
+            return
+        if not data:
+            return
+        buffer.extend(data)
+
+
+def run_skipped(name, command, clipboard_dir, settle=0.5):
+    """Run a command that must leave the clipboard untouched.
+
+    Waiting for the END marker proves the command line has finished, so a
+    typed-ahead line can never be echoed inside this command's capture
+    window. The settle delay then gives any wrongly dispatched capture time
+    to land before the capture count is compared.
+    """
+    drain_terminal()
+    buffer.clear()
+    before = len(clipboard_files(clipboard_dir))
+    os.write(master, command.encode("utf-8") + b"\n")
+    read_until(END)
+    time.sleep(settle)
+    after = len(clipboard_files(clipboard_dir))
+    check(name, after == before, f"{after - before} new capture(s)")
+
+
 def main():
     global master, child_pid
 
@@ -786,15 +819,20 @@ fi""",
                 (b"PTY_SKIP_PREVIOUS",),
             )
             skip_before = len(clipboard_files(clipboard_dir))
-            os.write(master, b"cd /\n")
-            # A skipped command adds no capture, so the next capture is the
-            # one at the same index; it must belong to the next command.
-            run_command(
+            run_skipped(
                 "listed silent command does not touch the clipboard",
-                "printf 'PTY_SKIP_NEXT\\n'",
+                "cd /",
+                clipboard_dir,
+            )
+            # The sentinel's command text is `PTY_SKIP_%s`, so the expected
+            # `PTY_SKIP_NEXT` can only come from real command output, never
+            # from an echoed command line.
+            run_command(
+                "skip sentinel is the next capture",
+                "printf 'PTY_SKIP_%s\\n' NEXT",
                 clipboard_dir,
                 (b"PTY_SKIP_NEXT",),
-                (b"[NO_VISIBLE_OUTPUT]",),
+                (b"[NO_VISIBLE_OUTPUT]", b"%s"),
             )
             check(
                 "listed silent command adds no capture",
