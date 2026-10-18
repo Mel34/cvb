@@ -665,7 +665,7 @@ pub(crate) fn recover_journal(
                     });
                 }
                 FileClassification::Planned => {
-                    let _ = restore_file_to_original(project_state, entry);
+                    restore_file_to_original(project_state, entry)?;
                 }
                 FileClassification::Original => {}
             }
@@ -1604,6 +1604,68 @@ mod tests {
             outcome,
             RecoveryOutcome::NothingToDo(JournalState::Committed)
         );
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn test_crash_recovery_conflict_propagates_restore_failure() {
+        let base = std::env::temp_dir().join(format!(
+            "cvb-crash-conflict-restore-fail-{}",
+            std::process::id()
+        ));
+        let state_dir = base.join("state");
+        let project_dir = base.join("project");
+
+        if base.exists() {
+            let _ = fs::remove_dir_all(&base);
+        }
+        fs::create_dir_all(&project_dir).unwrap();
+
+        let file1 = project_dir.join("a.rs");
+        let file2 = project_dir.join("b.rs");
+        fs::write(&file1, "orig a\n").unwrap();
+        fs::write(&file2, "orig b\n").unwrap();
+
+        let state = init_project_state(&state_dir, &project_dir).unwrap();
+        let plan = make_test_plan(
+            "crash-conflict-restore-fail",
+            vec![("a.rs", "orig a\n", "new a\n"), ("b.rs", "orig b\n", "new b\n")],
+        );
+
+        let _ = commit_plan_with_hook(&state, &plan, |point| {
+            if point == CommitCrashPoint::AfterRename(0) {
+                return Err(ApplyError::FaultInjected("crash after first rename".to_string()));
+            }
+            Ok(())
+        });
+
+        let alien_content = "unknown foreign edits by user/editor\n";
+        fs::write(&file2, alien_content).unwrap();
+
+        // Force restoration of a.rs to fail when opening its temporary file.
+        let restore_temp = project_dir.join(format!(
+            ".restore.a.rs.{}.tmp",
+            std::process::id()
+        ));
+        fs::create_dir(&restore_temp).unwrap();
+
+        let fresh_state = init_project_state(&state_dir, &project_dir).unwrap();
+        let recovery = recover_project(&fresh_state);
+
+        assert!(
+            matches!(recovery, Err(ApplyError::Io { .. })),
+            "expected restore I/O failure to propagate, got: {recovery:?}"
+        );
+
+        assert_eq!(fs::read_to_string(&file1).unwrap(), "new a\n");
+        assert_eq!(fs::read_to_string(&file2).unwrap(), alien_content);
+
+        let journal = read_journal(
+            &fresh_state.dir.join("crash-conflict-restore-fail.journal")
+        )
+        .unwrap();
+        assert_eq!(journal.state, JournalState::Prepared);
 
         let _ = fs::remove_dir_all(base);
     }
