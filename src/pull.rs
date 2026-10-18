@@ -893,14 +893,21 @@ pub fn run_capture(args: &[String], dir: Option<&Path>) -> (i32, String, String)
                 );
                 return (2, stdout, stderr);
             }
-            if end > lines.len() {
+            if start > lines.len() {
                 stderr.push_str(&format!(
-                    "CVB pull: line range {start}-{end} exceeds {path}, which has {} lines.\n",
+                    "CVB pull: line range {start}-{end} starts beyond {path}, which has {} lines.\n",
                     lines.len()
                 ));
                 return (2, stdout, stderr);
             }
-            for number in start..=end {
+            let actual_end = end.min(lines.len());
+            if actual_end < end {
+                stdout.push_str(&format!(
+                    "CVB pull: warning: requested line range {start}-{end} extends past EOF; truncated to {start}-{actual_end} ({path} has {} lines).\n",
+                    lines.len()
+                ));
+            }
+            for number in start..=actual_end {
                 stdout.push_str(&format!("{path}:{number}: {}\n", lines[number - 1]));
             }
         }
@@ -2725,6 +2732,52 @@ fn other() {
         assert!(
             !s2_has_exc,
             "section 2 lacks -protocol and must be accepted"
+        );
+    }
+
+    #[test]
+    fn run_capture_truncates_line_range_at_eof() {
+        let dir = std::env::temp_dir()
+            .join(format!("cvb-pull-lines-eof-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+
+        let run_cmd = |args: &[&str]| {
+            Command::new(args[0])
+                .args(&args[1..])
+                .current_dir(&dir)
+                .output()
+                .unwrap();
+        };
+
+        run_cmd(&["git", "init"]);
+        run_cmd(&["git", "config", "user.name", "CVB Test"]);
+        run_cmd(&["git", "config", "user.email", "test@cvb.local"]);
+
+        std::fs::write(dir.join("src/lib.rs"), "alpha\nbeta\ngamma\n").unwrap();
+        run_cmd(&["git", "add", "src/lib.rs"]);
+        run_cmd(&["git", "commit", "-m", "init"]);
+
+        let (status, stdout, stderr) = run_capture(
+            &["file:src/lib.rs".into(), "lines:2-5".into()],
+            Some(&dir),
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(status, 0, "range extending past EOF should succeed");
+        assert!(stderr.is_empty(), "unexpected stderr: {stderr}");
+        assert!(
+            stdout.contains("warning:") && stdout.contains("2-5"),
+            "expected a warning preserving the requested range:\n{stdout}"
+        );
+        assert!(
+            stdout.contains("src/lib.rs:2: beta\nsrc/lib.rs:3: gamma\n"),
+            "expected all available requested lines:\n{stdout}"
+        );
+        assert!(
+            !stdout.contains("src/lib.rs:4:") && !stdout.contains("src/lib.rs:5:"),
+            "must not emit nonexistent lines:\\n{stdout}"
         );
     }
 
