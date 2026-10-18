@@ -278,37 +278,59 @@ impl std::fmt::Display for PlanFailure {
             Some(PlanDetail::EndOfFile { suggestion }) => {
                 write!(
                     f,
-                    "CVB: {}: operation {}: {suggestion}",
+                    "CVB: E-EOF: {}: operation {}: {suggestion}",
                     self.path, self.op_index
                 )
             }
             Some(PlanDetail::Overlap { other_op_index }) => {
                 write!(
                     f,
-                    "CVB: {}: operation {} overlaps with operation {}",
+                    "CVB: E-OVERLAP: {}: operation {} overlaps with operation {}",
                     self.path, self.op_index, other_op_index
                 )
             }
             Some(PlanDetail::Range { file_lines }) => {
                 write!(
                     f,
-                    "CVB: {}: operation {}: line range out of bounds (file has {file_lines} lines)",
+                    "CVB: E-RANGE: {}: operation {}: line range out of bounds (file has {file_lines} lines)",
                     self.path, self.op_index
                 )
             }
             Some(PlanDetail::Other(msg)) => {
-                write!(
-                    f,
-                    "CVB: {}: operation {}: {:?}: {msg}",
-                    self.path, self.op_index, self.kind
-                )
+                if self.op_index > 0 {
+                    write!(
+                        f,
+                        "CVB: {}: {}: operation {}: {msg}",
+                        self.kind.protocol_code(),
+                        self.path,
+                        self.op_index
+                    )
+                } else {
+                    write!(
+                        f,
+                        "CVB: {}: {}: {msg}",
+                        self.kind.protocol_code(),
+                        self.path
+                    )
+                }
             }
             None => {
-                write!(
-                    f,
-                    "CVB: {}: operation {}: {:?}",
-                    self.path, self.op_index, self.kind
-                )
+                if self.op_index > 0 {
+                    write!(
+                        f,
+                        "CVB: {}: {}: operation {}",
+                        self.kind.protocol_code(),
+                        self.path,
+                        self.op_index
+                    )
+                } else {
+                    write!(
+                        f,
+                        "CVB: {}: {}",
+                        self.kind.protocol_code(),
+                        self.path
+                    )
+                }
             }
         }
     }
@@ -412,6 +434,21 @@ pub(crate) enum PlanError {
     Overlap,
     EndOfFile,
     NoOp,
+}
+
+impl PlanError {
+    pub(crate) fn protocol_code(&self) -> &'static str {
+        match self {
+            PlanError::Precondition => "E-PRECOND",
+            PlanError::EndOfFile => "E-EOF",
+            PlanError::Overlap => "E-OVERLAP",
+            PlanError::Range => "E-RANGE",
+            PlanError::NoOp => "E-NOOP",
+            PlanError::InvalidFile | PlanError::MissingFile => "E-FILE",
+            PlanError::InvalidPath => "E-PATH",
+            PlanError::DuplicateFile => "E-DUPFILE",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

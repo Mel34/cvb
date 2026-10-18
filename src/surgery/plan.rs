@@ -1293,4 +1293,114 @@ CVB::k7Q2xw9R::END ops=0";
             "message should not contain debug structure: {message}"
         );
     }
+
+    #[test]
+    fn end_of_file_error_message_includes_e_eof_code() {
+        let envelope = make_envelope(vec![Operation::Insert {
+            position: InsertPosition::Before,
+            start: 1,
+            end: 1,
+            anchor: vec!["first".to_owned()],
+            new: vec!["inserted".to_owned()],
+        }]);
+        let original = originals("first\nsecond\n");
+        let failure = plan_envelope(&envelope, &original).unwrap_err();
+        let message = failure.to_string();
+
+        assert_eq!(failure.kind, PlanError::EndOfFile);
+        assert!(
+            message.starts_with("CVB: E-EOF:"),
+            "expected message to start with 'CVB: E-EOF:', got: {message}"
+        );
+    }
+
+    #[test]
+    fn overlap_error_message_includes_e_overlap_code() {
+        let envelope = make_envelope(vec![
+            Operation::Replace {
+                start: 1,
+                end: 2,
+                old: vec!["one".to_owned(), "two".to_owned()],
+                new: vec!["combo".to_owned()],
+            },
+            Operation::Delete {
+                start: 2,
+                end: 2,
+                old: vec!["two".to_owned()],
+            },
+        ]);
+        let original = originals("one\ntwo\nthree\n");
+        let failure = plan_envelope(&envelope, &original).unwrap_err();
+        let message = failure.to_string();
+
+        assert_eq!(failure.kind, PlanError::Overlap);
+        assert!(
+            message.starts_with("CVB: E-OVERLAP:"),
+            "expected message to start with 'CVB: E-OVERLAP:', got: {message}"
+        );
+    }
+
+    #[test]
+    fn range_error_message_includes_e_range_code() {
+        let envelope = make_envelope(vec![Operation::Delete {
+            start: 1,
+            end: 10,
+            old: vec!["x".to_owned()],
+        }]);
+        let original = originals("one\ntwo\nthree\n");
+        let failure = plan_envelope(&envelope, &original).unwrap_err();
+        let message = failure.to_string();
+
+        assert_eq!(failure.kind, PlanError::Range);
+        assert!(
+            message.starts_with("CVB: E-RANGE:"),
+            "expected message to start with 'CVB: E-RANGE:', got: {message}"
+        );
+    }
+
+    #[test]
+    fn noop_error_message_includes_e_noop_code() {
+        let envelope = make_envelope(vec![Operation::Replace {
+            start: 1,
+            end: 1,
+            old: vec!["same".to_owned()],
+            new: vec!["same".to_owned()],
+        }]);
+        let original = originals("same\n");
+        let failure = plan_envelope(&envelope, &original).unwrap_err();
+        let message = failure.to_string();
+
+        assert_eq!(failure.kind, PlanError::NoOp);
+        assert!(
+            message.starts_with("CVB: E-NOOP:"),
+            "expected message to start with 'CVB: E-NOOP:', got: {message}"
+        );
+        assert!(
+            !message.contains("NoOp"),
+            "message should not contain debug variant: {message}"
+        );
+    }
+
+    #[test]
+    fn file_error_message_includes_e_file_code() {
+        let envelope = make_envelope(vec![Operation::Replace {
+            start: 1,
+            end: 1,
+            old: vec!["one".to_owned()],
+            new: vec![],
+        }]);
+        let original = originals("one\n");
+        let failure = plan_envelope(&envelope, &original).unwrap_err();
+        let message = failure.to_string();
+
+        assert_eq!(failure.kind, PlanError::InvalidFile);
+        assert!(
+            message.starts_with("CVB: E-FILE:"),
+            "expected message to start with 'CVB: E-FILE:', got: {message}"
+        );
+        assert!(
+            !message.contains("InvalidFile"),
+            "message should not contain debug variant: {message}"
+        );
+    }
 }
