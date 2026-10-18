@@ -79,6 +79,7 @@ def test_spec():
 def test_dry_run():
     with tempfile.TemporaryDirectory(prefix="cvb-surgery-dry-run-") as tmp:
         root, target = make_project(tmp)
+        state_home = pathlib.Path(tmp) / "state-home"
         result = subprocess.run(
             [
                 str(BINARY), "surgery", "--dry-run", "--stdin",
@@ -87,6 +88,7 @@ def test_dry_run():
             input=ENVELOPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env={**os.environ, "XDG_STATE_HOME": str(state_home)},
             start_new_session=True,
             timeout=10,
         )
@@ -97,10 +99,24 @@ def test_dry_run():
             "dry-run output did not contain the proposed change",
         )
         require(
-            PROMPT not in result.stdout,
+            PROMPT not in result.stdout and PROMPT not in result.stderr,
             "dry-run unexpectedly asked for interactive confirmation",
         )
         require_unchanged(target)
+        require(
+            not (state_home / "cvb" / "surgery").exists(),
+            "surgery state was created during dry-run",
+        )
+        require(
+            sorted(path.name for path in pathlib.Path(tmp).iterdir()) == ["project"],
+            f"dry-run created unexpected workspace artifacts: "
+            f"{sorted(path.name for path in pathlib.Path(tmp).iterdir())!r}",
+        )
+        require(
+            sorted(path.name for path in root.iterdir()) == ["example.rs"],
+            f"dry-run created unexpected project artifacts: "
+            f"{sorted(path.name for path in root.iterdir())!r}",
+        )
 
 
 def test_missing_tty():
