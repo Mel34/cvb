@@ -580,6 +580,29 @@ fn restore_file_to_original(
     Ok(())
 }
 
+/// Safely removes temporary commit files belonging to this journal transaction.
+/// Only checks each target's parent directory and only removes files
+/// whose names match `.surgery.<journal.id>.<index>.*.tmp`.
+fn cleanup_journal_temp_files(project_state: &ProjectState, journal: &Journal) {
+    for (i, entry) in journal.files.iter().enumerate() {
+        let target_path = project_state.canonical_root.join(&entry.path);
+        let Some(target_dir) = target_path.parent() else {
+            continue;
+        };
+        let Ok(read_dir) = fs::read_dir(target_dir) else {
+            continue;
+        };
+        let prefix = format!(".surgery.{}.{}.", journal.id, i);
+        for dir_entry in read_dir.flatten() {
+            let file_name = dir_entry.file_name();
+            let name = file_name.to_string_lossy();
+            if name.starts_with(&prefix) && name.ends_with(".tmp") {
+                let _ = fs::remove_file(dir_entry.path());
+            }
+        }
+    }
+}
+
 /// Executes recovery on a journal per protocol 6.3.
 pub(crate) fn recover_journal(
     project_state: &ProjectState,
@@ -595,6 +618,7 @@ pub(crate) fn recover_journal(
     }
 
     if journal.state == JournalState::Committed || journal.state == JournalState::RolledBack {
+        cleanup_journal_temp_files(project_state, journal);
         return Ok(RecoveryOutcome::NothingToDo(journal.state));
     }
 
@@ -660,6 +684,7 @@ pub(crate) fn recover_journal(
                 message: e.to_string(),
             },
         )?;
+        cleanup_journal_temp_files(project_state, journal);
         return Ok(RecoveryOutcome::RolledForward);
     }
 
@@ -674,6 +699,7 @@ pub(crate) fn recover_journal(
                 message: e.to_string(),
             },
         )?;
+        cleanup_journal_temp_files(project_state, journal);
         return Ok(RecoveryOutcome::RolledBack);
     }
 
@@ -689,6 +715,7 @@ pub(crate) fn recover_journal(
             message: e.to_string(),
         },
     )?;
+    cleanup_journal_temp_files(project_state, journal);
 
     Ok(RecoveryOutcome::RolledBack)
 }
@@ -1413,6 +1440,81 @@ mod tests {
         // Replay protection remains active
         let replay_res = apply_plan(&fresh_state, &plan);
         assert!(matches!(replay_res, Err(ApplyError::Replay { .. })));
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn test_crash_recovery_cleans_up_stale_temp_files() {
+        let base = std::env::temp_dir().join(format!("cvb-stale-temp-{}", std::process::id()));
+        let state_dir = base.join("state");
+        let project_dir = base.join("project");
+
+        if base.exists() {
+            let _ = fs::remove_dir_all(&base);
+        }
+        fs::create_dir_all(&project_dir).unwrap();
+
+        let file1 = project_dir.join("a.rs");
+        let file2 = project_dir.join("b.rs");
+        let orig1 = "orig a\n";
+        let orig2 = "orig b\n";
+        fs::write(&file1, orig1).unwrap();
+        fs::write(&file2, orig2).unwrap();
+
+        // Place an unrelated temp file belonging to a different transaction
+        let other_temp = project_dir.join(".surgery.other-tx.0.99999.tmp");
+        fs::write(&other_temp, "unrelated temp content\n").unwrap();
+
+        let state = init_project_state(&state_dir, &project_dir).unwrap();
+        let plan = make_test_plan(
+            "stale-temp-tx",
+            vec![("a.rs", orig1, "new a\n"), ("b.rs", orig2, "new b\n")],
+        );
+
+        // Crash after both temp files are written
+        let res = commit_plan_with_hook(&state, &plan, |point| {
+            if point == CommitCrashPoint::AfterTempWrite(1) {
+                return Err(ApplyError::FaultInjected("crash after temp writes".to_string()));
+            }
+            Ok(())
+        });
+        assert!(matches!(res, Err(ApplyError::FaultInjected(_))));
+
+        // Confirm the transaction's temp files exist prior to recovery
+        let temp_files_before: Vec<_> = fs::read_dir(&project_dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|name| name.starts_with(".surgery.stale-temp-tx."))
+            .collect();
+        assert!(
+            !temp_files_before.is_empty(),
+            "expected temp files to exist before recovery"
+        );
+
+        // Run recovery on a fresh state
+        let fresh_state = init_project_state(&state_dir, &project_dir).unwrap();
+        let outcome = recover_project(&fresh_state).unwrap();
+        assert_eq!(outcome, Some(RecoveryOutcome::RolledBack));
+
+        // The transaction's temp files must be removed
+        let temp_files_after: Vec<_> = fs::read_dir(&project_dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|name| name.starts_with(".surgery.stale-temp-tx."))
+            .collect();
+        assert!(
+            temp_files_after.is_empty(),
+            "expected transaction temp files to be cleaned up after recovery, found: {temp_files_after:?}"
+        );
+
+        // The unrelated transaction's temp file must be preserved
+        assert!(
+            other_temp.exists(),
+            "unrelated temp file was unexpectedly deleted"
+        );
 
         let _ = fs::remove_dir_all(base);
     }
