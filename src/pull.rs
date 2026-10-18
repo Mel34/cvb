@@ -7,6 +7,14 @@ use std::process::{Command, Output};
 
 use crate::cascade;
 
+const SURGERY_REMINDER: &str =
+    "Edit with: cvb surgery --spec (one envelope per paste, use the printed token).";
+
+fn append_surgery_reminder(stdout: &mut String) {
+    stdout.push_str(SURGERY_REMINDER);
+    stdout.push('\n');
+}
+
 pub fn tracked_files(dir: Option<&Path>) -> Result<Vec<OsString>, String> {
     let mut cmd = Command::new("git");
     cmd.args(["ls-files", "-z"]);
@@ -911,6 +919,7 @@ pub fn run_capture(args: &[String], dir: Option<&Path>) -> (i32, String, String)
                 stdout.push_str(&format!("{path}:{number}: {}\n", lines[number - 1]));
             }
         }
+        append_surgery_reminder(&mut stdout);
         return (0, stdout, stderr);
     }
 
@@ -1181,11 +1190,17 @@ pub fn run_capture(args: &[String], dir: Option<&Path>) -> (i32, String, String)
 
     if let Some(depth) = cascade_depth {
         if depth > 0 {
-            let cascade_bundle = cascade::run(&matching_units, dir, depth);
+            let cascade_bundle = cascade::run_with_reserved_chars(
+                &matching_units,
+                dir,
+                depth,
+                SURGERY_REMINDER.chars().count() + 1,
+            );
             stdout.push_str(&cascade_bundle);
         }
     }
 
+    append_surgery_reminder(&mut stdout);
     (0, stdout, stderr)
 }
 
@@ -2779,6 +2794,75 @@ fn other() {
             !stdout.contains("src/lib.rs:4:") && !stdout.contains("src/lib.rs:5:"),
             "must not emit nonexistent lines:\\n{stdout}"
         );
+    }
+
+    #[test]
+    fn surgery_reminder_only_appears_once_on_successful_content_captures() {
+        const REMINDER: &str =
+            "Edit with: cvb surgery --spec (one envelope per paste, use the printed token).";
+
+        let dir = std::env::temp_dir()
+            .join(format!("cvb-pull-surgery-reminder-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+
+        let run_cmd = |args: &[&str]| {
+            Command::new(args[0])
+                .args(&args[1..])
+                .current_dir(&dir)
+                .output()
+                .unwrap()
+        };
+
+        run_cmd(&["git", "init"]);
+        run_cmd(&["git", "config", "user.name", "CVB Test"]);
+        run_cmd(&["git", "config", "user.email", "test@cvb.local"]);
+
+        std::fs::write(
+            dir.join("src/lib.rs"),
+            "pub fn alpha() {}\npub fn caller() { alpha(); }\n",
+        )
+        .unwrap();
+        run_cmd(&["git", "add", "src/lib.rs"]);
+        run_cmd(&["git", "commit", "-m", "init"]);
+
+        let (line_status, line_stdout, line_stderr) = run_capture(
+            &["file:src/lib.rs".into(), "lines:1-2".into()],
+            Some(&dir),
+        );
+        assert_eq!(line_status, 0, "{line_stderr}");
+        assert_eq!(
+            line_stdout.matches(REMINDER).count(),
+            1,
+            "successful line capture must contain exactly one reminder:\n{line_stdout}"
+        );
+
+        let (search_status, search_stdout, search_stderr) =
+            run_capture(&["alpha".into()], Some(&dir));
+        assert_eq!(search_status, 0, "{search_stderr}");
+        assert_eq!(
+            search_stdout.matches(REMINDER).count(),
+            1,
+            "successful search capture must contain exactly one reminder:\n{search_stdout}"
+        );
+
+        let (miss_status, miss_stdout, miss_stderr) =
+            run_capture(&["definitely_missing_cvb_term".into()], Some(&dir));
+        assert_eq!(miss_status, 1, "{miss_stderr}");
+        assert!(
+            !miss_stdout.contains(REMINDER),
+            "no-match output must not contain the reminder:\n{miss_stdout}"
+        );
+
+        let (callers_status, callers_stdout, callers_stderr) =
+            run_capture(&["callers:alpha".into()], Some(&dir));
+        assert_eq!(callers_status, 0, "{callers_stderr}");
+        assert!(
+            !callers_stdout.contains(REMINDER),
+            "callers output must not contain the reminder:\n{callers_stdout}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
