@@ -421,4 +421,28 @@ mod tests {
 
         fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn load_error_display_includes_protocol_codes() {
+        assert!(
+            LoadError::UnsafePath("test".into()).to_string().starts_with("CVB: E-PATH:"),
+            "expected E-PATH"
+        );
+        assert!(
+            LoadError::DuplicatePath("test".into()).to_string().starts_with("CVB: E-DUPFILE:"),
+            "expected E-DUPFILE"
+        );
+        assert!(
+            LoadError::Inspect { path: "test".into(), message: "not found".into() }
+                .to_string()
+                .starts_with("CVB: E-FILE:"),
+            "expected E-FILE"
+        );
+        assert!(
+            LoadError::FileTooLarge { path: "test".into(), size: 200, limit: 100 }
+                .to_string()
+                .starts_with("CVB: E-LIMIT:"),
+            "expected E-LIMIT"
+        );
+    }
 }

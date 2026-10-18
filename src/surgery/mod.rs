@@ -378,6 +378,15 @@ pub(crate) enum LoadError {
 }
 
 impl LoadError {
+    pub(crate) fn protocol_code(&self) -> &'static str {
+        match self {
+            LoadError::UnsafePath(_) => "E-PATH",
+            LoadError::DuplicatePath(_) => "E-DUPFILE",
+            LoadError::FileTooLarge { .. } | LoadError::AggregateTooLarge { .. } => "E-LIMIT",
+            _ => "E-FILE",
+        }
+    }
+
     pub(crate) fn contains(&self, needle: &str) -> bool {
         self.to_string().contains(needle)
     }
@@ -385,39 +394,40 @@ impl LoadError {
 
 impl std::fmt::Display for LoadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let code = self.protocol_code();
         match self {
-            LoadError::UnsafePath(path) => write!(f, "CVB: unsafe target path '{path}'"),
-            LoadError::DuplicatePath(path) => write!(f, "CVB: duplicate target path '{path}'"),
+            LoadError::UnsafePath(path) => write!(f, "CVB: {code}: unsafe target path '{path}'"),
+            LoadError::DuplicatePath(path) => write!(f, "CVB: {code}: duplicate target path '{path}'"),
             LoadError::Inspect { path, message } => {
-                write!(f, "CVB: unable to inspect '{path}': {message}")
+                write!(f, "CVB: {code}: unable to inspect '{path}': {message}")
             }
             LoadError::SymlinkTarget(path) => {
-                write!(f, "CVB: symlink target is not allowed: '{path}'")
+                write!(f, "CVB: {code}: symlink target is not allowed: '{path}'")
             }
             LoadError::NotRegularFile(path) => {
-                write!(f, "CVB: target is not a regular file: '{path}'")
+                write!(f, "CVB: {code}: target is not a regular file: '{path}'")
             }
             LoadError::FileTooLarge { path, size, limit } => {
                 write!(
                     f,
-                    "CVB: target file '{path}' is too large ({size} bytes, limit is {limit} bytes)"
+                    "CVB: {code}: target file '{path}' is too large ({size} bytes, limit is {limit} bytes)"
                 )
             }
             LoadError::AggregateTooLarge { size, limit } => {
                 write!(
                     f,
-                    "CVB: aggregate target file size ({size} bytes) exceeds limit ({limit} bytes)"
+                    "CVB: {code}: aggregate target file size ({size} bytes) exceeds limit ({limit} bytes)"
                 )
             }
             LoadError::Read { path, message } => {
-                write!(f, "CVB: unable to read '{path}': {message}")
+                write!(f, "CVB: {code}: unable to read '{path}': {message}")
             }
-            LoadError::InvalidUtf8(path) => write!(f, "CVB: invalid UTF-8 in '{path}'"),
-            LoadError::NulByte(path) => write!(f, "CVB: NUL byte is not allowed: '{path}'"),
-            LoadError::Bom(path) => write!(f, "CVB: UTF-8 BOM is not allowed: '{path}'"),
-            LoadError::LoneCr(path) => write!(f, "CVB: lone CR is not allowed: '{path}'"),
+            LoadError::InvalidUtf8(path) => write!(f, "CVB: {code}: invalid UTF-8 in '{path}'"),
+            LoadError::NulByte(path) => write!(f, "CVB: {code}: NUL byte is not allowed: '{path}'"),
+            LoadError::Bom(path) => write!(f, "CVB: {code}: UTF-8 BOM is not allowed: '{path}'"),
+            LoadError::LoneCr(path) => write!(f, "CVB: {code}: lone CR is not allowed: '{path}'"),
             LoadError::MixedLineEndings(path) => {
-                write!(f, "CVB: mixed LF/CRLF line endings: '{path}'")
+                write!(f, "CVB: {code}: mixed LF/CRLF line endings: '{path}'")
             }
         }
     }
