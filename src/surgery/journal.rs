@@ -453,6 +453,22 @@ pub(crate) fn write_journal_atomic(
     journal: &Journal,
 ) -> Result<PathBuf, JournalError> {
     #[cfg(unix)]
+    let sync_directory = |path: &Path| fs::File::open(path)?.sync_all();
+    #[cfg(not(unix))]
+    let sync_directory = |_path: &Path| Ok(());
+
+    write_journal_atomic_with_dir_sync(project_dir, journal, sync_directory)
+}
+
+fn write_journal_atomic_with_dir_sync<F>(
+    project_dir: &Path,
+    journal: &Journal,
+    sync_directory: F,
+) -> Result<PathBuf, JournalError>
+where
+    F: FnOnce(&Path) -> std::io::Result<()>,
+{
+    #[cfg(unix)]
     use std::os::unix::fs::OpenOptionsExt;
 
     let target_path = project_dir.join(format!("{}.journal", journal.id));
@@ -477,9 +493,7 @@ pub(crate) fn write_journal_atomic(
 
     fs::rename(&temp_path, &target_path).map_err(|e| JournalError::Io(e.to_string()))?;
 
-    if let Ok(dir) = fs::File::open(project_dir) {
-        let _ = dir.sync_all();
-    }
+    sync_directory(project_dir).map_err(|e| JournalError::Io(e.to_string()))?;
 
     Ok(target_path)
 }
@@ -707,6 +721,46 @@ mod tests {
 
         assert_eq!(decoded, journal);
     }
+    #[test]
+    fn test_journal_directory_sync_failure_propagates_after_rename() {
+        let base = std::env::temp_dir().join(format!(
+            "cvb-journal-sync-fail-{}",
+            std::process::id()
+        ));
+        if base.exists() {
+            let _ = fs::remove_dir_all(&base);
+        }
+        fs::create_dir_all(&base).unwrap();
+
+        let mut journal = Journal {
+            state: JournalState::Prepared,
+            id: "tx-sync-fail".to_string(),
+            canonical_root: PathBuf::from("/canonical/project"),
+            dev: 1,
+            ino: 2,
+            files: vec![],
+        };
+
+        let j_path = write_journal_atomic(&base, &journal).unwrap();
+        journal.state = JournalState::Committed;
+        let result = write_journal_atomic_with_dir_sync(&base, &journal, |_path| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "injected directory sync failure",
+            ))
+        });
+
+        assert!(matches!(
+            result,
+            Err(JournalError::Io(ref message)) if message.contains("injected directory sync failure")
+        ));
+        assert_eq!(
+            read_journal(&j_path).unwrap().state,
+            JournalState::Committed
+        );
+        let _ = fs::remove_dir_all(base);
+    }
+
 
     #[test]
     fn test_journal_atomic_state_transitions() {
