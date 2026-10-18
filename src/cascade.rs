@@ -1261,6 +1261,16 @@ pub fn run(
     dir: Option<&Path>,
     max_depth: usize,
 ) -> String {
+    run_with_reserved_chars(matching_seeds, dir, max_depth, 0)
+}
+
+pub fn run_with_reserved_chars(
+    matching_seeds: &[(SearchUnit, Vec<(String, Vec<usize>)>)],
+    dir: Option<&Path>,
+    max_depth: usize,
+    reserved_chars: usize,
+) -> String {
+    let output_limit = MAX_ADDED_CHARS.saturating_sub(reserved_chars);
     let index = build_index(dir);
 
     let mut seeds = Vec::new();
@@ -1452,11 +1462,11 @@ pub fn run(
             let rendered_len = unit_header.chars().count() + body.chars().count();
 
             if total_added_chars + rendered_len
-                > (MAX_ADDED_CHARS.saturating_sub(REPORT_RESERVE_CHARS))
+                > (output_limit.saturating_sub(REPORT_RESERVE_CHARS))
             {
                 if primary_stop_reason.is_none() {
                     primary_stop_reason = Some(format!(
-                        "character budget ({MAX_ADDED_CHARS}) at depth {depth}"
+                        "character budget ({output_limit}) at depth {depth}"
                     ));
                 }
                 omitted_items.push(OmittedItem {
@@ -1523,7 +1533,7 @@ pub fn run(
     };
 
     out.push_str(&format!(
-        "Stopped: {stop_reason}. Budget: {total_added_units} of {MAX_ADDED_UNITS} added units, {total_added_chars} of {MAX_ADDED_CHARS} chars. {omitted_str}\n"
+        "Stopped: {stop_reason}. Budget: {total_added_units} of {MAX_ADDED_UNITS} added units, {total_added_chars} of {output_limit} chars. {omitted_str}\n"
     ));
 
     let first_seed_name = seeds
@@ -1561,7 +1571,7 @@ pub fn run(
             item.key.end
         );
         if out.chars().count() + line.chars().count() + mandatory_footer_reserve + 80
-            <= MAX_ADDED_CHARS
+            <= output_limit
         {
             out.push_str(&line);
             omitted_shown += 1;
@@ -1578,8 +1588,7 @@ pub fn run(
         unresolved_callbacks.len() + unresolved_unknown_receivers.len() + ambiguous_items.len();
     if total_unresolved > 0 {
         let header = format!("Not followed, unresolved ({total_unresolved}):\n");
-        if out.chars().count() + header.chars().count() + mandatory_footer_reserve
-            <= MAX_ADDED_CHARS
+        if out.chars().count() + header.chars().count() + mandatory_footer_reserve <= output_limit
         {
             out.push_str(&header);
             let mut unres_shown = 0;
@@ -1590,7 +1599,7 @@ pub fn run(
                     "  {name:16}  {path}:{line:<5}  call through parameter `{name}` (callback; target not statically known)\n"
                 );
                 if out.chars().count() + entry.chars().count() + mandatory_footer_reserve + 80
-                    <= MAX_ADDED_CHARS
+                    <= output_limit
                 {
                     out.push_str(&entry);
                     unres_shown += 1;
@@ -1605,7 +1614,7 @@ pub fn run(
                         "  {name:16}  {path}:{line:<5}  method call, receiver type unknown\n"
                     );
                     if out.chars().count() + entry.chars().count() + mandatory_footer_reserve + 80
-                        <= MAX_ADDED_CHARS
+                        <= output_limit
                     {
                         out.push_str(&entry);
                         unres_shown += 1;
@@ -1633,7 +1642,7 @@ pub fn run(
                         locs.len()
                     );
                     if out.chars().count() + entry.chars().count() + mandatory_footer_reserve + 80
-                        <= MAX_ADDED_CHARS
+                        <= output_limit
                     {
                         out.push_str(&entry);
                         unres_shown += 1;
@@ -1667,7 +1676,7 @@ pub fn run(
 
     for warning in &index.parse_warnings {
         if out.chars().count() + warning.chars().count() + footer_disclaimer.chars().count() + 25
-            <= MAX_ADDED_CHARS
+            <= output_limit
         {
             out.push_str(&format!("Index incomplete: {warning}\n"));
         }
@@ -1728,6 +1737,9 @@ mod tests {
         )];
 
         let output = run(&matching_seeds, Some(&dir), 1);
+        let reserved_chars = 137;
+        let reserved_output =
+            run_with_reserved_chars(&matching_seeds, Some(&dir), 1, reserved_chars);
         let _ = std::fs::remove_dir_all(&dir);
 
         let total_chars = output.chars().count();
@@ -1739,6 +1751,17 @@ mod tests {
         assert!(
             output.contains("Analysis is syntactic"),
             "Footer disclaimer must be preserved"
+        );
+
+        let reserved_total_chars = reserved_output.chars().count();
+        assert!(
+            reserved_total_chars <= MAX_ADDED_CHARS - reserved_chars,
+            "Reserved cascade output must leave {reserved_chars} chars available, got {reserved_total_chars}"
+        );
+        assert!(reserved_output.contains("== CASCADE report =="));
+        assert!(
+            reserved_output.contains("Analysis is syntactic"),
+            "Reserved output must preserve the footer disclaimer"
         );
     }
 
