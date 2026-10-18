@@ -57,6 +57,10 @@ where
             "--stdin" => result.stdin = true,
             "--spec" => result.spec = true,
             "--root" => {
+                if result.root.is_some() {
+                    return Err("duplicate argument: --root".to_string());
+                }
+
                 let value = args
                     .next()
                     .filter(|value| !value.is_empty() && !value.starts_with("--"))
@@ -65,6 +69,10 @@ where
                 result.root = Some(std::path::PathBuf::from(value));
             }
             _ if argument.starts_with("--root=") => {
+                if result.root.is_some() {
+                    return Err("duplicate argument: --root".to_string());
+                }
+
                 let value = &argument["--root=".len()..];
 
                 if value.is_empty() {
@@ -161,5 +169,30 @@ mod tests {
             parse(&["--unknown"]).unwrap_err(),
             "unknown surgery argument: --unknown"
         );
+    }
+
+    #[test]
+    fn parse_surgery_rejects_duplicate_root_separated() {
+        let result = parse(&["--root", "/project-a", "--root", "/project-b"]);
+        let err = result.expect_err("should reject duplicate separated --root");
+        assert!(err.contains("duplicate argument: --root"));
+    }
+
+    #[test]
+    fn parse_surgery_rejects_duplicate_root_equals() {
+        let result = parse(&["--root=/project-a", "--root=/project-b"]);
+        let err = result.expect_err("should reject duplicate equals --root");
+        assert!(err.contains("duplicate argument: --root"));
+    }
+
+    #[test]
+    fn parse_surgery_rejects_duplicate_root_mixed() {
+        let result = parse(&["--root", "/project-a", "--root=/project-b"]);
+        let err = result.expect_err("should reject mixed duplicate --root");
+        assert!(err.contains("duplicate argument: --root"));
+
+        let result_rev = parse(&["--root=/project-a", "--root", "/project-b"]);
+        let err_rev = result_rev.expect_err("should reject mixed duplicate --root");
+        assert!(err_rev.contains("duplicate argument: --root"));
     }
 }
