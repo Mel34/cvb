@@ -497,6 +497,69 @@ mod tests {
         assert!(err.contains("Nothing copied"));
     }
 
+    #[test]
+    fn read_from_clipboard_bounds_oversized_stdout() {
+        let cap = super::CLIPBOARD_READ_CAP;
+        let bytes = read_from_clipboard_with(|| {
+            Ok(std::process::Output {
+                status: std::os::unix::process::ExitStatusExt::from_raw(0),
+                stdout: vec![b'x'; cap + 100],
+                stderr: Vec::new(),
+            })
+        })
+        .unwrap();
+
+        assert_eq!(bytes.len(), cap + 1);
+        assert!(bytes.iter().all(|&byte| byte == b'x'));
+    }
+
+    #[test]
+    fn drain_child_pipes_drains_large_stderr_without_deadlock() {
+        let child = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("head -c 1048576 /dev/zero >&2; printf 'clipboard-ok'")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let output = super::drain_child_pipes(child, "test-child").unwrap();
+        assert_eq!(output, b"clipboard-ok");
+    }
+
+    #[test]
+    fn drain_child_pipes_stops_oversized_stdout() {
+        let child = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("exec yes x")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let output = super::drain_child_pipes(child, "test-child").unwrap();
+
+        assert_eq!(output.len(), super::CLIPBOARD_READ_CAP + 1);
+        assert!(output.iter().all(|&byte| byte == b'x' || byte == b'\n'));
+    }
+
+    #[test]
+    fn drain_child_pipes_reports_nonzero_exit_and_stderr() {
+        let child = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("printf 'clipboard unavailable' >&2; exit 7")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let error = super::drain_child_pipes(child, "test-child").unwrap_err();
+
+        assert!(error.contains("unable to read clipboard"), "{error}");
+        assert!(error.contains("status 7"), "{error}");
+        assert!(error.contains("clipboard unavailable"), "{error}");
+    }
+
     fn temporary_limit_path(label: &str) -> std::path::PathBuf {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1151,15 +1214,213 @@ mod tests {
     }
 }
 
+pub(crate) const CLIPBOARD_READ_CAP: usize = 5 * 1024 * 1024;
+pub(crate) const CLIPBOARD_STDERR_CAP: usize = 4 * 1024;
+
 pub(crate) fn read_from_clipboard() -> Result<Vec<u8>, String> {
-    read_from_clipboard_with(|| {
-        std::process::Command::new("wl-paste")
-            .arg("--no-newline")
-            .arg("--type")
-            .arg("text/plain")
-            .output()
-            .map_err(|error| format!("CVB: unable to start wl-paste: {error}"))
-    })
+    let child = std::process::Command::new("wl-paste")
+        .arg("--no-newline")
+        .arg("--type")
+        .arg("text/plain")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("CVB: unable to start wl-paste: {error}"))?;
+
+    drain_child_pipes(child, "wl-paste")
+}
+
+fn set_pipe_nonblocking(fd: std::os::fd::RawFd) -> Result<(), String> {
+    // SAFETY: fcntl operates on the valid file descriptor owned by a live child pipe.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags == -1 {
+        return Err(format!(
+            "CVB: unable to inspect clipboard pipe flags: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    // SAFETY: F_SETFL updates the flags on the same live file descriptor.
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+        return Err(format!(
+            "CVB: unable to set clipboard pipe nonblocking: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    Ok(())
+}
+
+fn drain_child_pipes(
+    mut child: std::process::Child,
+    process_name: &str,
+) -> Result<Vec<u8>, String> {
+    use std::io::ErrorKind;
+    use std::os::fd::AsRawFd;
+
+    let mut stdout_pipe = match child.stdout.take() {
+        Some(pipe) => pipe,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("CVB: {process_name} stdout pipe was not created"));
+        }
+    };
+    let mut stderr_pipe = match child.stderr.take() {
+        Some(pipe) => pipe,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("CVB: {process_name} stderr pipe was not created"));
+        }
+    };
+
+    let result = (|| -> Result<(Vec<u8>, Vec<u8>, bool), String> {
+        set_pipe_nonblocking(stdout_pipe.as_raw_fd())?;
+        set_pipe_nonblocking(stderr_pipe.as_raw_fd())?;
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut stdout_eof = false;
+        let mut stderr_eof = false;
+        let mut scratch = [0_u8; 8192];
+
+        while !stdout_eof || !stderr_eof {
+            let mut fds = [
+                libc::pollfd {
+                    fd: if stdout_eof {
+                        -1
+                    } else {
+                        stdout_pipe.as_raw_fd()
+                    },
+                    events: libc::POLLIN | libc::POLLHUP | libc::POLLERR,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: if stderr_eof {
+                        -1
+                    } else {
+                        stderr_pipe.as_raw_fd()
+                    },
+                    events: libc::POLLIN | libc::POLLHUP | libc::POLLERR,
+                    revents: 0,
+                },
+            ];
+
+            // SAFETY: fds points to two initialized pollfd entries for live pipes.
+            let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, -1) };
+            if ready == -1 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(format!("CVB: polling {process_name} pipes failed: {error}"));
+            }
+
+            if fds.iter().any(|fd| fd.revents & libc::POLLNVAL != 0) {
+                return Err(format!(
+                    "CVB: invalid pipe descriptor while reading {process_name}"
+                ));
+            }
+
+            if !stdout_eof && fds[0].revents != 0 {
+                loop {
+                    match stdout_pipe.read(&mut scratch) {
+                        Ok(0) => {
+                            stdout_eof = true;
+                            break;
+                        }
+                        Ok(n) => {
+                            let remaining = (CLIPBOARD_READ_CAP + 1).saturating_sub(stdout.len());
+                            stdout.extend_from_slice(&scratch[..n.min(remaining)]);
+                            if stdout.len() > CLIPBOARD_READ_CAP {
+                                return Ok((stdout, stderr, true));
+                            }
+                        }
+                        Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                        Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+                        Err(error) => {
+                            return Err(format!(
+                                "CVB: reading {process_name} stdout failed: {error}"
+                            ));
+                        }
+                    }
+                }
+            }
+
+            if !stderr_eof && fds[1].revents != 0 {
+                loop {
+                    match stderr_pipe.read(&mut scratch) {
+                        Ok(0) => {
+                            stderr_eof = true;
+                            break;
+                        }
+                        Ok(n) => {
+                            let remaining = (CLIPBOARD_STDERR_CAP + 1).saturating_sub(stderr.len());
+                            stderr.extend_from_slice(&scratch[..n.min(remaining)]);
+                            // Keep draining stderr even after its diagnostic buffer is full.
+                        }
+                        Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                        Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+                        Err(error) => {
+                            return Err(format!(
+                                "CVB: reading {process_name} stderr failed: {error}"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok((stdout, stderr, false))
+    })();
+
+    let (stdout, stderr, oversized) = match result {
+        Ok(result) => result,
+        Err(error) => {
+            drop(stdout_pipe);
+            drop(stderr_pipe);
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    };
+
+    drop(stdout_pipe);
+    drop(stderr_pipe);
+
+    if oversized {
+        // Stop the producer, then always attempt to reap it. If kill fails
+        // because the process already exited, wait() still resolves its status.
+        let _ = child.kill();
+        child
+            .wait()
+            .map_err(|error| format!("CVB: unable to reap oversized {process_name}: {error}"))?;
+
+        return Ok(stdout);
+    }
+
+    let status = child
+        .wait()
+        .map_err(|error| format!("CVB: unable to wait for {process_name}: {error}"))?;
+
+    if !status.success() {
+        let code = status
+            .code()
+            .map_or("signal".to_string(), |c| c.to_string());
+        let stderr = String::from_utf8_lossy(&stderr);
+        let detail = if stderr.trim().is_empty() {
+            format!("{process_name} exited with status {code}")
+        } else {
+            format!(
+                "{process_name} exited with status {code}: {}",
+                stderr.trim()
+            )
+        };
+        return Err(format!("CVB: unable to read clipboard: {detail}"));
+    }
+
+    Ok(stdout)
 }
 
 pub(crate) fn read_from_clipboard_with<F>(mut run_cmd: F) -> Result<Vec<u8>, String>
@@ -1167,8 +1428,18 @@ where
     F: FnMut() -> Result<std::process::Output, String>,
 {
     let output = run_cmd()?;
+
+    // Keep the test seam bounded too. The extra byte signals the caller that
+    // the clipboard exceeded the capture cap.
+    if output.stdout.len() > CLIPBOARD_READ_CAP {
+        return Ok(output.stdout[..=CLIPBOARD_READ_CAP].to_vec());
+    }
+
     if !output.status.success() {
-        let code = output.status.code().map_or("signal".to_string(), |c| c.to_string());
+        let code = output
+            .status
+            .code()
+            .map_or("signal".to_string(), |c| c.to_string());
         let stderr = String::from_utf8_lossy(&output.stderr);
         let detail = if stderr.trim().is_empty() {
             format!("wl-paste exited with status {code}")
@@ -1177,6 +1448,7 @@ where
         };
         return Err(format!("CVB: unable to read clipboard: {detail}"));
     }
+
     Ok(output.stdout)
 }
 
