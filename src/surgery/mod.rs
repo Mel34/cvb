@@ -510,6 +510,113 @@ pub(crate) enum PipelineError {
     Plan(PlanFailure),
 }
 
+/// Runs the surgery CLI pipeline.
+///
+/// Planning and diff rendering happen before confirmation. Persistent project
+/// state is initialized only after the user confirms the proposed changes.
+pub(crate) fn run(
+    dry_run: bool,
+    stdin: bool,
+    root: Option<std::path::PathBuf>,
+    spec: bool,
+) -> ! {
+    if spec {
+        println!(
+            "CVB Surgery Envelope (CSL), version 1\n\
+             Use `cvb surgery --stdin` to read an envelope from standard input,\n\
+             or `cvb surgery` to read it from the clipboard.\n\
+             Use `--root PATH` to select the project root and `--dry-run`\n\
+             to render the proposed diff without applying changes."
+        );
+        std::process::exit(0);
+    }
+
+    let root = match root {
+        Some(root) => root,
+        None => match std::env::current_dir() {
+            Ok(root) => root,
+            Err(error) => {
+                eprintln!("CVB: unable to determine project root: {error}");
+                std::process::exit(2);
+            }
+        },
+    };
+
+    let input = match read_input(stdin) {
+        Ok(input) => input,
+        Err((message, code)) => {
+            eprintln!("{message}");
+            std::process::exit(code);
+        }
+    };
+
+    let input = match std::str::from_utf8(&input) {
+        Ok(input) => input,
+        Err(error) => {
+            eprintln!("CVB: surgery input is not valid UTF-8: {error}");
+            std::process::exit(2);
+        }
+    };
+
+    let (_envelope, plan) = match parse_load_plan(&root, input) {
+        Ok(result) => result,
+        Err(error) => {
+            eprintln!("CVB: surgery planning failed: {error:?}");
+            std::process::exit(2);
+        }
+    };
+
+    let diff = render_plan_diff(&plan, RenderOptions { color: false });
+    print!("{diff}");
+
+    use std::io::Write as _;
+    if let Err(error) = std::io::stdout().flush() {
+        eprintln!("CVB: unable to flush surgery diff: {error}");
+        std::process::exit(2);
+    }
+
+    let confirmation = match prompt_confirmation(dry_run) {
+        Ok(result) => result,
+        Err((message, code)) => {
+            eprintln!("{message}");
+            std::process::exit(code);
+        }
+    };
+
+    if dry_run {
+        std::process::exit(0);
+    }
+
+    if confirmation == ConfirmResult::Declined {
+        std::process::exit(SurgeryExitStatus::UserDeclined.code());
+    }
+
+    let state_base = match resolve_state_dir() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(SurgeryExitStatus::RejectedBeforeCommit.code());
+        }
+    };
+
+    let state = match init_project_state(&state_base, &root) {
+        Ok(state) => state,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(SurgeryExitStatus::RejectedBeforeCommit.code());
+        }
+    };
+
+    match apply_plan(&state, &plan) {
+        Ok(_) => std::process::exit(SurgeryExitStatus::Applied.code()),
+        Err(error) => {
+            let status = error.exit_status().code();
+            eprintln!("{error}");
+            std::process::exit(status);
+        }
+    }
+}
+
 /// Parses an envelope, reads its target files, and builds an in-memory plan.
 /// This function never writes to disk.
 pub(crate) fn parse_load_plan(root: &Path, input: &str) -> Result<(Envelope, Plan), PipelineError> {

@@ -45,6 +45,10 @@ run_step "CLI bridge" "$tmpdir/cli-bridge.log" scripts/test-cli-bridge.py
 cli_bridge_summary=$(tail -n 1 "$tmpdir/cli-bridge.log")
 printf 'CLI bridge: %s\n' "$cli_bridge_summary"
 
+run_step "Surgery CLI" "$tmpdir/surgery-cli.log" scripts/test-surgery-cli.py
+surgery_cli_summary=$(tail -n 1 "$tmpdir/surgery-cli.log")
+printf '%s\n' "$surgery_cli_summary"
+
 run_step "PTY capture" "$tmpdir/pty-capture.log" scripts/test-pty-capture.py
 pty_capture_summary=$(grep -E '^(SKIP: interactive PTY unavailable|[0-9]+ passed, [0-9]+ failed)' "$tmpdir/pty-capture.log" | tail -n 1 || true)
 if [[ -z "$pty_capture_summary" ]]; then

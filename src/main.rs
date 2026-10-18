@@ -74,8 +74,8 @@ A capture session ends with:
 
             std::process::exit(pull::run(&args));
         }
-        cli::Command::Surgery(_args) => {
-            println!("Paste CSL block");
+        cli::Command::Surgery(args) => {
+            surgery::run(args.dry_run, args.stdin, args.root, args.spec);
         }
         cli::Command::Target(args) => {
             if std::env::var_os("CVB_INTERNAL_TARGET").is_some() {
