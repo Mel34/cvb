@@ -3,6 +3,7 @@
 use std::path::{Component, Path};
 
 pub(crate) mod apply;
+pub(crate) mod confirm;
 pub(crate) mod journal;
 pub(crate) mod lock;
 pub(crate) mod load;
@@ -11,6 +12,8 @@ pub(crate) mod plan;
 pub(crate) mod render;
 #[allow(unused_imports)]
 pub(crate) use apply::*;
+#[allow(unused_imports)]
+pub(crate) use confirm::*;
 #[allow(unused_imports)]
 pub(crate) use journal::*;
 #[allow(unused_imports)]
