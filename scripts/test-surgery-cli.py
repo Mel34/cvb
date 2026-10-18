@@ -5,6 +5,7 @@ import errno
 import os
 import pathlib
 import pty
+import re
 import select
 import subprocess
 import tempfile
@@ -66,13 +67,46 @@ def test_spec():
 
     require(result.returncode == 0, f"expected exit 0, got {result.returncode}")
     require(
-        b"CVB Surgery Envelope (CSL), version 1" in result.stdout,
+        b"CVB Surgery Language (CSL), protocol version 1" in result.stdout,
         f"specification header missing: {result.stdout!r}",
     )
     require(
         b"--dry-run" in result.stdout and b"--stdin" in result.stdout,
         f"specification usage options missing: {result.stdout!r}",
     )
+
+    token_match = re.search(
+        rb"^CVB::([A-Za-z0-9]{16})::BEGIN v=1 id=example-replace$",
+        result.stdout,
+        re.MULTILINE,
+    )
+    require(token_match is not None, "example-replace BEGIN or fresh token missing")
+    token = token_match.group(1)
+
+    for example in (b"example-replace", b"example-delete", b"example-insert"):
+        marker = b"CVB::" + token + b"::BEGIN v=1 id=" + example
+        require(marker in result.stdout, f"example missing or token inconsistent: {example!r}")
+
+    for fragment in (
+        b"8.1",
+        b"8.2",
+        b"8.3",
+        b"3 MiB",
+        b"8 MiB",
+        b"32 MiB",
+        b"Maximum operations per envelope: 500.",
+        b"E-LIMIT",
+        b"E-LOCK",
+        b"E-NOTTY",
+        b"E-REPLAY",
+        b"E-RECOVER",
+        b"E-STALE",
+        b"E-IO",
+    ):
+        require(fragment in result.stdout, f"specification content missing: {fragment!r}")
+
+    require(b"{TOKEN}" not in result.stdout, "unresolved token placeholder in specification")
+    require(b"  CVB::" not in result.stdout, "protocol control lines are unexpectedly indented")
     require(not result.stderr, f"unexpected stderr: {result.stderr!r}")
 
 
