@@ -120,6 +120,26 @@ pub(crate) enum ParseError {
     InvalidPath,
 }
 
+impl ParseError {
+    pub(crate) fn protocol_code(&self) -> &'static str {
+        match self {
+            ParseError::Syntax => "E-SYNTAX",
+            ParseError::Range => "E-RANGE",
+            ParseError::Count => "E-COUNT",
+            ParseError::Version => "E-VERSION",
+            ParseError::Truncated => "E-TRUNC",
+            ParseError::NoEnvelope => "E-NOENV",
+            ParseError::Collision => "E-COLLISION",
+            ParseError::Stray => "E-STRAY",
+            ParseError::MultipleEnvelopes => "E-MULTI",
+            ParseError::Limit => "E-LIMIT",
+            ParseError::InvalidBytes => "E-BYTES",
+            ParseError::DuplicateFile => "E-DUPFILE",
+            ParseError::InvalidPath => "E-PATH",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ParseFailure {
     pub kind: ParseError,
@@ -141,14 +161,16 @@ impl PartialEq<ParseFailure> for ParseError {
 
 impl std::fmt::Display for ParseFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let Some(detail) = &self.detail {
-            write!(
-                f,
-                "CVB: line {}: parse error ({:?}): {}",
-                self.line, self.kind, detail
-            )
+        let code = self.kind.protocol_code();
+        let line_prefix = if self.line > 0 {
+            format!("line {}: ", self.line)
         } else {
-            write!(f, "CVB: line {}: parse error ({:?})", self.line, self.kind)
+            String::new()
+        };
+        if let Some(detail) = &self.detail {
+            write!(f, "CVB: {code}: {line_prefix}{detail}")
+        } else {
+            write!(f, "CVB: {code}: {line_prefix}parse error")
         }
     }
 }

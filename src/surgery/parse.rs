@@ -1471,4 +1471,97 @@ CVB::k7Q2xw9R::END ops=1";
         assert!(message.contains("5"), "{message}");
         assert!(message.contains("2"), "{message}");
     }
+
+    #[test]
+    fn parse_error_display_includes_protocol_code_syntax() {
+        let input = "\
+CVB::k7Q2xw9R::BEGIN v=1 id=demo-01
+CVB::k7Q2xw9R::FILE path=src/main.rs
+CVB::k7Q2xw9R::BEGIN ";
+        let failure = parse_envelope(input).unwrap_err();
+        let message = failure.to_string();
+        assert_eq!(failure.kind, ParseError::Syntax);
+        assert!(
+            message.starts_with("CVB: E-SYNTAX:"),
+            "expected message to start with 'CVB: E-SYNTAX:', got: {message}"
+        );
+        assert!(
+            !message.contains("Syntax"),
+            "message should not contain raw debug variant: {message}"
+        );
+    }
+
+    #[test]
+    fn parse_error_display_includes_protocol_code_count() {
+        let input = "\
+CVB::k7Q2xw9R::BEGIN v=1 id=demo-01
+CVB::k7Q2xw9R::FILE path=src/main.rs
+CVB::k7Q2xw9R::OP replace lines=1-2
+CVB::k7Q2xw9R::OLD n=5
+line 1
+line 2
+CVB::k7Q2xw9R::NEW n=1
+new line
+CVB::k7Q2xw9R::ENDOP
+CVB::k7Q2xw9R::END ops=1";
+        let failure = parse_envelope(input).unwrap_err();
+        let message = failure.to_string();
+        assert_eq!(failure.kind, ParseError::Count);
+        assert!(
+            message.starts_with("CVB: E-COUNT:"),
+            "expected message to start with 'CVB: E-COUNT:', got: {message}"
+        );
+        assert!(
+            !message.contains("Count"),
+            "message should not contain raw debug variant: {message}"
+        );
+    }
+
+    #[test]
+    fn parse_error_display_includes_protocol_code_limit() {
+        let input = "x".repeat(MAX_INPUT_BYTES + 1);
+        let failure = parse_envelope(&input).unwrap_err();
+        let message = failure.to_string();
+        assert_eq!(failure.kind, ParseError::Limit);
+        assert!(
+            message.starts_with("CVB: E-LIMIT:"),
+            "expected message to start with 'CVB: E-LIMIT:', got: {message}"
+        );
+        assert!(
+            !message.contains("Limit"),
+            "message should not contain raw debug variant: {message}"
+        );
+    }
+
+    #[test]
+    fn parse_error_display_includes_protocol_code_truncated() {
+        let input = "CVB::k7Q2xw9R::BEGIN v=1 id=demo-01\nCVB::k7Q2xw9R::FILE path=src/main.rs";
+        let failure = parse_envelope(input).unwrap_err();
+        let message = failure.to_string();
+        assert_eq!(failure.kind, ParseError::Truncated);
+        assert!(
+            message.starts_with("CVB: E-TRUNC:"),
+            "expected message to start with 'CVB: E-TRUNC:', got: {message}"
+        );
+        assert!(
+            !message.contains("Truncated"),
+            "message should not contain raw debug variant: {message}"
+        );
+    }
+
+    #[test]
+    fn parse_error_display_includes_protocol_code_no_envelope() {
+        let input = "not a valid envelope";
+        let failure = parse_envelope(input).unwrap_err();
+        let message = failure.to_string();
+        assert_eq!(failure.kind, ParseError::NoEnvelope);
+        assert!(
+            message.starts_with("CVB: E-NOENV:"),
+            "expected message to start with 'CVB: E-NOENV:', got: {message}"
+        );
+        assert!(
+            !message.contains("NoEnvelope"),
+            "message should not contain raw debug variant: {message}"
+        );
+    }
 }
