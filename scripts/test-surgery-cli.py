@@ -122,7 +122,7 @@ def test_dry_run():
             input=ENVELOPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env={**os.environ, "XDG_STATE_HOME": str(state_home)},
+            env={**os.environ, "XDG_STATE_HOME": str(state_home), "CVB_TOKEN": "testtoken123"},
             start_new_session=True,
             timeout=10,
         )
@@ -153,6 +153,33 @@ def test_dry_run():
         )
 
 
+def test_missing_session_token():
+    with tempfile.TemporaryDirectory(prefix="cvb-surgery-no-session-") as tmp:
+        root, target = make_project(tmp)
+        env = os.environ.copy()
+        env.pop("CVB_TOKEN", None)
+
+        result = subprocess.run(
+            [
+                str(BINARY), "surgery", "--stdin",
+                "--root", str(root),
+            ],
+            input=ENVELOPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            start_new_session=True,
+            timeout=10,
+        )
+
+        require(result.returncode == 2, f"expected exit 2, got {result.returncode}")
+        require(
+            b"E-NOSESSION" in result.stderr,
+            f"expected E-NOSESSION before input parsing, got: {result.stderr!r}",
+        )
+        require_unchanged(target)
+
+
 def test_missing_tty():
     with tempfile.TemporaryDirectory(prefix="cvb-surgery-no-tty-") as tmp:
         root, target = make_project(tmp)
@@ -164,6 +191,7 @@ def test_missing_tty():
             input=ENVELOPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env={**os.environ, "CVB_TOKEN": "testtoken123"},
             start_new_session=True,
             timeout=10,
         )
@@ -189,6 +217,7 @@ def test_decline():
                 os.close(read_fd)
                 os.close(write_fd)
                 os.environ["XDG_STATE_HOME"] = str(state_home)
+                os.environ["CVB_TOKEN"] = "testtoken123"
                 os.execv(
                     str(BINARY),
                     [
@@ -283,6 +312,7 @@ def test_confirmed_apply():
                 os.close(read_fd)
                 os.close(write_fd)
                 os.environ["XDG_STATE_HOME"] = str(state_home)
+                os.environ["CVB_TOKEN"] = "testtoken123"
                 os.execv(
                     str(BINARY),
                     [
@@ -391,6 +421,7 @@ CVB::testtoken123::END ops=1
             input=envelope,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env={**os.environ, "CVB_TOKEN": "testtoken123"},
             start_new_session=True,
             timeout=10,
         )
@@ -426,6 +457,7 @@ def main():
     tests = [
         ("spec output", test_spec),
         ("dry-run", test_dry_run),
+        ("missing session token", test_missing_session_token),
         ("missing TTY", test_missing_tty),
         ("declined confirmation", test_decline),
         ("confirmed apply", test_confirmed_apply),

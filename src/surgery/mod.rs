@@ -744,6 +744,14 @@ pub(crate) fn run(
         std::process::exit(0);
     }
 
+    let _session_token = match std::env::var("CVB_TOKEN") {
+        Ok(token) if !token.trim().is_empty() => token,
+        _ => {
+            eprintln!("CVB: E-NOSESSION: no active surgery session (CVB_TOKEN not set).");
+            std::process::exit(2);
+        }
+    };
+
     let root = match root {
         Some(root) => root,
         None => match std::env::current_dir() {
