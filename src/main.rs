@@ -33,6 +33,20 @@ fn main() {
     match cli::parse() {
         cli::Command::Start => match shell::create_rcfile() {
             Ok(rcfile) => {
+                let token = match std::env::var("CVB_TOKEN") {
+                    Ok(token) if !token.trim().is_empty() => token,
+                    _ => match surgery::token::generate_token() {
+                        Ok(token) => token,
+                        Err(error) => {
+                            eprintln!("CVB: unable to initialize session token: {error}");
+                            let _ = std::fs::remove_file(&rcfile);
+                            std::process::exit(2);
+                        }
+                    },
+                };
+                // SAFETY: this runs before the PTY child is created.
+                unsafe { std::env::set_var("CVB_TOKEN", token) };
+
                 context::initialize();
 
                 let result = pty::run(&rcfile);
