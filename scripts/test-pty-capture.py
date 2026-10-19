@@ -238,6 +238,59 @@ number = len(files) + 1
             read_until(END)
             check("interactive CVB session starts", True)
 
+            launch_captures = clipboard_files(clipboard_dir)
+            launch_text = (
+                launch_captures[0].read_text(encoding="utf-8", errors="replace")
+                if launch_captures
+                else ""
+            )
+            final_line = (
+                launch_text.strip().splitlines()[-1]
+                if launch_text.strip()
+                else ""
+            )
+            token_prefix = "CVB SESSION TOKEN: "
+            launch_token = (
+                final_line[len(token_prefix):].strip()
+                if final_line.startswith(token_prefix)
+                else ""
+            )
+            check(
+                "launch clipboard contains surgery spec with token and ends with session token line",
+                bool(
+                    launch_token
+                    and len(launch_token) == 16
+                    and launch_token.isalnum()
+                    and f"CVB::{launch_token}::BEGIN" in launch_text
+                ),
+                f"final_line={final_line!r}",
+            )
+
+            token_capture_one = run_command(
+                "first command sees launch session token",
+                "printf 'CVB_TOKEN=%s\\n' \"${CVB_TOKEN:-MISSING}\"",
+                clipboard_dir,
+                (f"\nCVB_TOKEN={launch_token}\n".encode(),),
+                (b"CVB_TOKEN=MISSING",),
+            )
+            token_capture_two = run_command(
+                "second command reuses launch session token",
+                "printf 'CVB_TOKEN=%s\\n' \"${CVB_TOKEN:-MISSING}\"",
+                clipboard_dir,
+                (f"\nCVB_TOKEN={launch_token}\n".encode(),),
+                (b"CVB_TOKEN=MISSING",),
+            )
+            expected_token_line = f"\nCVB_TOKEN={launch_token}\n".encode()
+            check(
+                "session token remains stable across commands",
+                len(launch_token) == 16
+                and launch_token.isalnum()
+                and expected_token_line in token_capture_one
+                and expected_token_line in token_capture_two,
+                f"token={launch_token!r}; first={token_capture_one!r}; "
+                f"second={token_capture_two!r}",
+            )
+
             run_command(
                 "captures ordinary command output",
                 "printf 'PTY_SINGLE_OK\\n'",
