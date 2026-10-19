@@ -28,6 +28,8 @@ enum Outcome {
     /// The manual was larger than the copy limit, so the chunk pager already
     /// walked the user through pasting each part.
     SentInParts,
+    /// The user quit the chunk pager before completing the sequence.
+    Cancelled,
 }
 
 /// Prepares the initialization context for a new session.
@@ -52,10 +54,10 @@ pub(crate) fn initialize() {
         Path::new(&bash_source),
         &token,
         clipboard::needs_chunking,
-        clipboard::process,
+        clipboard::process_with_outcome,
     ) {
         Ok(Outcome::Ready) => eprintln!("{READY_MESSAGE}"),
-        Ok(Outcome::SentInParts) => {}
+        Ok(Outcome::SentInParts | Outcome::Cancelled) => {}
         Err(error) => eprintln!("{error}\n{NOT_PREPARED_MESSAGE}"),
     }
 }
@@ -63,25 +65,27 @@ pub(crate) fn initialize() {
 fn prepare_with(
     bash_source: &Path,
     will_chunk: impl FnOnce(&ClipboardBuffer) -> bool,
-    process: impl FnOnce(&ClipboardBuffer) -> Result<(), String>,
+    process: impl FnOnce(
+        &ClipboardBuffer,
+    ) -> Result<clipboard::ChunkSequenceOutcome, String>,
 ) -> Result<Outcome, String> {
     let buffer = load_manual(bash_source)?;
     let chunked = will_chunk(&buffer);
 
-    process(&buffer)?;
-
-    Ok(if chunked {
-        Outcome::SentInParts
-    } else {
-        Outcome::Ready
-    })
+    match process(&buffer)? {
+        clipboard::ChunkSequenceOutcome::Completed if chunked => Ok(Outcome::SentInParts),
+        clipboard::ChunkSequenceOutcome::Completed => Ok(Outcome::Ready),
+        clipboard::ChunkSequenceOutcome::Cancelled => Ok(Outcome::Cancelled),
+    }
 }
 
 fn prepare_context_with(
     bash_source: &Path,
     token: &str,
     will_chunk: impl FnOnce(&ClipboardBuffer) -> bool,
-    process: impl FnOnce(&ClipboardBuffer) -> Result<(), String>,
+    process: impl FnOnce(
+        &ClipboardBuffer,
+    ) -> Result<clipboard::ChunkSequenceOutcome, String>,
 ) -> Result<Outcome, String> {
     let manual = load_manual(bash_source)?;
     let manual = std::str::from_utf8(manual.as_bytes())
@@ -90,13 +94,11 @@ fn prepare_context_with(
     let buffer = ClipboardBuffer::new(context.into_bytes());
     let chunked = will_chunk(&buffer);
 
-    process(&buffer)?;
-
-    Ok(if chunked {
-        Outcome::SentInParts
-    } else {
-        Outcome::Ready
-    })
+    match process(&buffer)? {
+        clipboard::ChunkSequenceOutcome::Completed if chunked => Ok(Outcome::SentInParts),
+        clipboard::ChunkSequenceOutcome::Completed => Ok(Outcome::Ready),
+        clipboard::ChunkSequenceOutcome::Cancelled => Ok(Outcome::Cancelled),
+    }
 }
 
 fn build_context(manual: &str, token: &str) -> Result<String, String> {
@@ -261,7 +263,7 @@ mod tests {
             |_| false,
             |_| {
                 copied.set(true);
-                Ok(())
+                Ok(clipboard::ChunkSequenceOutcome::Completed)
             },
         )
         .unwrap_err();
@@ -281,7 +283,7 @@ mod tests {
             |_| false,
             |_| {
                 copied.set(true);
-                Ok(())
+                Ok(clipboard::ChunkSequenceOutcome::Completed)
             },
         )
         .unwrap_err();
@@ -301,7 +303,7 @@ mod tests {
             |_| false,
             |buffer| {
                 seen.borrow_mut().extend_from_slice(buffer.as_bytes());
-                Ok(())
+                Ok(clipboard::ChunkSequenceOutcome::Completed)
             },
         )
         .unwrap();
@@ -362,7 +364,7 @@ mod tests {
                 |_| false,
                 |buffer| {
                     seen.borrow_mut().extend_from_slice(buffer.as_bytes());
-                    Ok(())
+                    Ok(clipboard::ChunkSequenceOutcome::Completed)
                 },
             )
             .unwrap();
@@ -390,11 +392,25 @@ mod tests {
     }
 
     #[test]
+    fn context_preparation_preserves_pager_cancellation() {
+        let dir = TempDir::new("cancelled");
+        let bash = installed_layout(dir.path(), "manual");
+        let outcome = prepare_context_with(
+            &bash,
+            "ContextToken1234",
+            |_| true,
+            |_| Ok(clipboard::ChunkSequenceOutcome::Cancelled),
+        );
+
+        assert_eq!(outcome, Ok(Outcome::Cancelled));
+    }
+
+    #[test]
     fn oversized_manual_reports_that_it_was_sent_in_parts() {
         let dir = TempDir::new("parts");
         let bash = installed_layout(dir.path(), "manual");
 
-        let outcome = prepare_with(&bash, |_| true, |_| Ok(())).unwrap();
+        let outcome = prepare_with(&bash, |_| true, |_| Ok(clipboard::ChunkSequenceOutcome::Completed)).unwrap();
 
         assert_eq!(outcome, Outcome::SentInParts);
     }

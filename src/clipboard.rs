@@ -175,6 +175,62 @@ pub(crate) fn process(buffer: &ClipboardBuffer) -> Result<(), String> {
     )
 }
 
+pub(crate) fn process_with_outcome(
+    buffer: &ClipboardBuffer,
+) -> Result<ChunkSequenceOutcome, String> {
+    process_with_outcome_using(
+        buffer,
+        configured_copy_limit(),
+        copy_to_clipboard,
+        |chunks| {
+            use std::os::fd::AsFd;
+
+            let stdin = std::io::stdin();
+            let _terminal = ChunkKeyTerminal::enter_on(stdin.as_fd());
+
+            copy_chunk_sequence_with_outcome(chunks, copy_to_clipboard, || {
+                let first = read_stdin_byte()?;
+                Ok(decode_chunk_key(first, || {
+                    read_stdin_byte_within(ESCAPE_SEQUENCE_TIMEOUT_MS)
+                }))
+            })
+        },
+    )
+}
+
+fn process_with_outcome_using<C, S>(
+    buffer: &ClipboardBuffer,
+    limit: usize,
+    mut copy: C,
+    mut copy_sequence: S,
+) -> Result<ChunkSequenceOutcome, String>
+where
+    C: FnMut(&ClipboardBuffer) -> Result<(), String>,
+    S: FnMut(&[String]) -> Result<ChunkSequenceOutcome, String>,
+{
+    let text = match std::str::from_utf8(buffer.as_bytes()) {
+        Ok(text) => text,
+        Err(_) if buffer.len() < limit => {
+            copy(buffer)?;
+            return Ok(ChunkSequenceOutcome::Completed);
+        }
+        Err(_) => {
+            return Err(
+                "CVB: oversized capture is not valid UTF-8; cannot split it safely".to_string(),
+            );
+        }
+    };
+
+    let chunks = chunk_messages(text, limit)?;
+
+    if chunks.len() == 1 {
+        copy(buffer)?;
+        return Ok(ChunkSequenceOutcome::Completed);
+    }
+
+    copy_sequence(&chunks)
+}
+
 /// Whether `process` will hand this buffer to the interactive chunk pager
 /// rather than copy it in one piece.
 pub(crate) fn needs_chunking(buffer: &ClipboardBuffer) -> bool {
@@ -221,8 +277,15 @@ enum ChunkKey {
     Space,
     Left,
     Right,
+    Quit,
     Cancel,
     Other,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChunkSequenceOutcome {
+    Completed,
+    Cancelled,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -242,7 +305,8 @@ fn navigate(index: usize, total: usize, key: ChunkKey) -> ChunkMove {
         ChunkKey::Right if has_next => ChunkMove::To(index + 1),
         ChunkKey::Right => ChunkMove::Ignore,
         ChunkKey::Left => ChunkMove::To(index.saturating_sub(1)),
-        ChunkKey::Cancel => ChunkMove::Cancel,
+        ChunkKey::Quit if index + 1 == total => ChunkMove::Done,
+        ChunkKey::Quit | ChunkKey::Cancel => ChunkMove::Cancel,
         ChunkKey::Other => ChunkMove::Ignore,
     }
 }
@@ -253,7 +317,8 @@ fn navigate(index: usize, total: usize, key: ChunkKey) -> ChunkMove {
 fn decode_chunk_key(first: u8, mut next: impl FnMut() -> Option<u8>) -> ChunkKey {
     match first {
         b' ' => ChunkKey::Space,
-        b'q' | b'Q' | 0x03 => ChunkKey::Cancel,
+        b'q' | b'Q' => ChunkKey::Quit,
+        0x03 => ChunkKey::Cancel,
         0x1b => match next() {
             Some(b'[') => decode_csi(&mut next),
             Some(b'O') => match next() {
@@ -422,9 +487,21 @@ fn clear_chunk_status() -> Result<(), String> {
 
 fn copy_chunk_sequence_with<C, R>(
     chunks: &[String],
+    copy: C,
+    read_key: R,
+) -> Result<(), String>
+where
+    C: FnMut(&ClipboardBuffer) -> Result<(), String>,
+    R: FnMut() -> Result<ChunkKey, String>,
+{
+    copy_chunk_sequence_with_outcome(chunks, copy, read_key).map(|_| ())
+}
+
+fn copy_chunk_sequence_with_outcome<C, R>(
+    chunks: &[String],
     mut copy: C,
     mut read_key: R,
-) -> Result<(), String>
+) -> Result<ChunkSequenceOutcome, String>
 where
     C: FnMut(&ClipboardBuffer) -> Result<(), String>,
     R: FnMut() -> Result<ChunkKey, String>,
@@ -433,7 +510,7 @@ where
     let mut index = 0;
 
     if total == 0 {
-        return Ok(());
+        return Ok(ChunkSequenceOutcome::Completed);
     }
 
     loop {
@@ -453,7 +530,14 @@ where
 
         match movement {
             ChunkMove::To(target) => index = target,
-            ChunkMove::Done | ChunkMove::Cancel => return clear_chunk_status(),
+            ChunkMove::Done => {
+                clear_chunk_status()?;
+                return Ok(ChunkSequenceOutcome::Completed);
+            }
+            ChunkMove::Cancel => {
+                clear_chunk_status()?;
+                return Ok(ChunkSequenceOutcome::Cancelled);
+            }
             ChunkMove::Ignore => unreachable!("ignored keys are consumed above"),
         }
     }
@@ -1061,7 +1145,7 @@ mod tests {
 
     #[test]
     fn chunk_sequence_cancellation_stops_after_current_part() {
-        for raw_key in [b'q', b'Q', 0x03] {
+        for raw_key in [0x03] {
             let cancel_key = super::decode_chunk_key(raw_key, || None);
             assert_eq!(cancel_key, super::ChunkKey::Cancel);
             let chunks = vec![
@@ -1147,6 +1231,13 @@ mod tests {
     }
 
     #[test]
+    fn decoder_distinguishes_quit_from_interrupt() {
+        assert_eq!(key_from(b"q"), super::ChunkKey::Quit);
+        assert_eq!(key_from(b"Q"), super::ChunkKey::Quit);
+        assert_eq!(key_from(&[0x03]), super::ChunkKey::Cancel);
+    }
+
+    #[test]
     fn decoder_recognizes_arrow_keys_in_both_cursor_modes() {
         assert_eq!(key_from(b"\x1b[C"), super::ChunkKey::Right);
         assert_eq!(key_from(b"\x1b[D"), super::ChunkKey::Left);
@@ -1172,6 +1263,94 @@ mod tests {
         let key = super::decode_chunk_key(bytes[0], || rest.next());
         assert_eq!(key, super::ChunkKey::Other);
         assert_eq!(rest.collect::<Vec<_>>(), b" q");
+    }
+
+    #[test]
+    fn pager_quit_before_final_chunk_is_cancelled() {
+        let chunks = vec![
+            "first".to_string(),
+            "second".to_string(),
+            "third".to_string(),
+        ];
+        let mut copied = Vec::new();
+
+        let outcome = super::copy_chunk_sequence_with_outcome(
+            &chunks,
+            |buffer| {
+                copied.push(buffer.as_bytes().to_vec());
+                Ok(())
+            },
+            || Ok(super::ChunkKey::Quit),
+        )
+        .unwrap();
+
+        assert_eq!(outcome, super::ChunkSequenceOutcome::Cancelled);
+        assert_eq!(copied, vec![b"first".to_vec()]);
+    }
+
+    #[test]
+    fn pager_quit_on_final_chunk_is_completed() {
+        let chunks = vec![
+            "first".to_string(),
+            "second".to_string(),
+            "third".to_string(),
+        ];
+        let mut copied = Vec::new();
+        let mut keys = [
+            super::ChunkKey::Space,
+            super::ChunkKey::Space,
+            super::ChunkKey::Quit,
+        ]
+        .into_iter();
+
+        let outcome = super::copy_chunk_sequence_with_outcome(
+            &chunks,
+            |buffer| {
+                copied.push(buffer.as_bytes().to_vec());
+                Ok(())
+            },
+            || Ok(keys.next().expect("expected scripted key")),
+        )
+        .unwrap();
+
+        assert_eq!(outcome, super::ChunkSequenceOutcome::Completed);
+        assert_eq!(
+            copied,
+            chunks
+                .iter()
+                .map(|chunk| chunk.as_bytes().to_vec())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn pager_space_on_final_chunk_is_completed() {
+        let chunks = vec!["first".to_string(), "second".to_string()];
+        let mut keys = [super::ChunkKey::Space, super::ChunkKey::Space].into_iter();
+
+        let outcome = super::copy_chunk_sequence_with_outcome(
+            &chunks,
+            |_| Ok(()),
+            || Ok(keys.next().expect("expected scripted key")),
+        )
+        .unwrap();
+
+        assert_eq!(outcome, super::ChunkSequenceOutcome::Completed);
+    }
+
+    #[test]
+    fn pager_interrupt_on_final_chunk_is_cancelled() {
+        let chunks = vec!["first".to_string(), "second".to_string()];
+        let mut keys = [super::ChunkKey::Space, super::ChunkKey::Cancel].into_iter();
+
+        let outcome = super::copy_chunk_sequence_with_outcome(
+            &chunks,
+            |_| Ok(()),
+            || Ok(keys.next().expect("expected scripted key")),
+        )
+        .unwrap();
+
+        assert_eq!(outcome, super::ChunkSequenceOutcome::Cancelled);
     }
 
     #[test]
@@ -1301,6 +1480,46 @@ mod tests {
 
         let after = termios::tcgetattr(slave.as_fd()).unwrap();
         assert_eq!(after.local_flags, before.local_flags);
+    }
+
+    #[test]
+    fn process_with_outcome_reports_direct_copy_as_completed() {
+        let buffer = ClipboardBuffer::new(b"hello".to_vec());
+        let mut copied = Vec::new();
+
+        let outcome = super::process_with_outcome_using(
+            &buffer,
+            100,
+            |buffer| {
+                copied.push(buffer.as_bytes().to_vec());
+                Ok(())
+            },
+            |_| panic!("small input must not invoke the chunk sequence"),
+        )
+        .unwrap();
+
+        assert_eq!(outcome, super::ChunkSequenceOutcome::Completed);
+        assert_eq!(copied, vec![b"hello".to_vec()]);
+    }
+
+    #[test]
+    fn process_with_outcome_preserves_chunk_cancellation() {
+        let buffer = ClipboardBuffer::new("x".repeat(1_000).into_bytes());
+        let mut sequence_calls = 0;
+
+        let outcome = super::process_with_outcome_using(
+            &buffer,
+            300,
+            |_| panic!("oversized input must use the chunk sequence"),
+            |_| {
+                sequence_calls += 1;
+                Ok(super::ChunkSequenceOutcome::Cancelled)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome, super::ChunkSequenceOutcome::Cancelled);
+        assert_eq!(sequence_calls, 1);
     }
 
     #[test]
