@@ -50,6 +50,7 @@ fn precondition_detail(
     let mut mismatch_line = start;
     let mut exp = String::new();
     let mut fnd = String::new();
+    let mut found_mismatch = false;
 
     for (k, (orig_l, decl_l)) in
         original_slice.iter().zip(declared_slice.iter()).enumerate()
@@ -58,11 +59,24 @@ fn precondition_detail(
             mismatch_line = start + k;
             exp = decl_l.clone();
             fnd = orig_l.clone();
+            found_mismatch = true;
             break;
         }
     }
 
-    let only_ws = exp.trim_end() == fnd.trim_end();
+    if !found_mismatch {
+        if declared_slice.len() < original_slice.len() {
+            let k = declared_slice.len();
+            mismatch_line = start + k;
+            fnd = original_slice[k].clone();
+        } else if declared_slice.len() > original_slice.len() {
+            let k = original_slice.len();
+            mismatch_line = start + k;
+            exp = declared_slice[k].clone();
+        }
+    }
+
+    let only_ws = !exp.is_empty() && !fnd.is_empty() && exp.trim_end() == fnd.trim_end();
     let (column, byte_offset, prefix_ended) =
         find_differing_position(&exp, &fnd);
 
@@ -1402,5 +1416,41 @@ CVB::k7Q2xw9R::END ops=0";
             !message.contains("InvalidFile"),
             "message should not contain debug variant: {message}"
         );
+    }
+
+    #[test]
+    fn precondition_error_message_notes_when_declared_old_is_shorter_than_range() {
+        let envelope = make_envelope(vec![Operation::Replace {
+            start: 1,
+            end: 2,
+            old: vec!["line 1".to_owned()],
+            new: vec!["new 1".to_owned(), "new 2".to_owned()],
+        }]);
+        let original = originals("line 1\nline 2\n");
+        let failure = plan_envelope(&envelope, &original).unwrap_err();
+        let message = failure.to_string();
+
+        assert_eq!(failure.kind, PlanError::Precondition);
+        assert!(message.starts_with("CVB: E-PRECOND:"), "{message}");
+        assert!(message.contains("line 2"), "{message}");
+        assert!(message.contains("note: expected ends here"), "{message}");
+    }
+
+    #[test]
+    fn precondition_error_message_notes_when_declared_old_is_longer_than_range() {
+        let envelope = make_envelope(vec![Operation::Replace {
+            start: 1,
+            end: 1,
+            old: vec!["line 1".to_owned(), "extra declared line".to_owned()],
+            new: vec!["new 1".to_owned()],
+        }]);
+        let original = originals("line 1\nline 2\n");
+        let failure = plan_envelope(&envelope, &original).unwrap_err();
+        let message = failure.to_string();
+
+        assert_eq!(failure.kind, PlanError::Precondition);
+        assert!(message.starts_with("CVB: E-PRECOND:"), "{message}");
+        assert!(message.contains("line 2"), "{message}");
+        assert!(message.contains("note: found ends here"), "{message}");
     }
 }
