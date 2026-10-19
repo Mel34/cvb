@@ -174,21 +174,37 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn expect_header_after_block(&mut self, name: &str) -> Result<usize, ParseFailure> {
-        let line_num = self.index + 1;
-        let line = self.next_line()?;
-        self.check_structural_line_after_block(line, line_num)?;
-        let header_prefix = format!("{}{name} n=", self.prefix);
-        let count_text = line.strip_prefix(&header_prefix).ok_or(ParseFailure {
+    fn parse_header_count(
+        line: &str,
+        prefix: &str,
+        name: &str,
+        line_num: usize,
+    ) -> Result<Option<usize>, ParseFailure> {
+        let exact = format!("{prefix}{name}");
+        if line == exact {
+            return Ok(None);
+        }
+        let counted_prefix = format!("{prefix}{name} n=");
+        if let Some(count_text) = line.strip_prefix(&counted_prefix) {
+            let count = parse_count(count_text).map_err(|kind| ParseFailure {
+                kind,
+                line: line_num,
+                detail: None,
+            })?;
+            return Ok(Some(count));
+        }
+        Err(ParseFailure {
             kind: ParseError::Syntax,
             line: line_num,
             detail: None,
-        })?;
-        parse_count(count_text).map_err(|kind| ParseFailure {
-            kind,
-            line: line_num,
-            detail: None,
         })
+    }
+
+    fn expect_header_after_block(&mut self, name: &str) -> Result<Option<usize>, ParseFailure> {
+        let line_num = self.index + 1;
+        let line = self.next_line()?;
+        self.check_structural_line_after_block(line, line_num)?;
+        Self::parse_header_count(line, &self.prefix, name, line_num)
     }
 
     fn check_structural_line_elsewhere(
@@ -213,21 +229,11 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn expect_header(&mut self, name: &str) -> Result<usize, ParseFailure> {
+    fn expect_header(&mut self, name: &str) -> Result<Option<usize>, ParseFailure> {
         let line_num = self.index + 1;
         let line = self.next_line()?;
         self.check_structural_line_elsewhere(line, line_num)?;
-        let header_prefix = format!("{}{name} n=", self.prefix);
-        let count_text = line.strip_prefix(&header_prefix).ok_or(ParseFailure {
-            kind: ParseError::Syntax,
-            line: line_num,
-            detail: None,
-        })?;
-        parse_count(count_text).map_err(|k| ParseFailure {
-            kind: k,
-            line: line_num,
-            detail: None,
-        })
+        Self::parse_header_count(line, &self.prefix, name, line_num)
     }
 
     fn consume_endop_after_block(&mut self) -> Result<(), ParseFailure> {
@@ -250,46 +256,93 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    fn read_payload(&mut self, count: usize) -> Result<Vec<String>, ParseFailure> {
-        if count > self.lines.len().saturating_sub(self.index) {
-            return Err(ParseFailure {
-                kind: ParseError::Truncated,
-                line: self.lines.len(),
-                detail: None,
-            });
-        }
+    fn read_block(
+        &mut self,
+        count: Option<usize>,
+        header_line: usize,
+    ) -> Result<Vec<String>, ParseFailure> {
+        match count {
+            Some(count) => {
+                if count > self.lines.len().saturating_sub(self.index) {
+                    return Err(ParseFailure {
+                        kind: ParseError::Truncated,
+                        line: self.lines.len(),
+                        detail: None,
+                    });
+                }
 
-        let mut payload = Vec::with_capacity(count);
+                let mut payload = Vec::with_capacity(count);
 
-        for _ in 0..count {
-            let line_num = self.index + 1;
-            let line = self.lines.get(self.index).ok_or(ParseFailure {
-                kind: ParseError::Truncated,
-                line: self.lines.len(),
-                detail: None,
-            })?;
+                for _ in 0..count {
+                    let line_num = self.index + 1;
+                    let line = self.lines.get(self.index).ok_or(ParseFailure {
+                        kind: ParseError::Truncated,
+                        line: self.lines.len(),
+                        detail: None,
+                    })?;
 
-            if line.starts_with(&self.prefix) {
-                return Err(ParseFailure {
-                    kind: ParseError::Collision,
-                    line: line_num,
-                    detail: None,
-                });
+                    if line.starts_with(&self.prefix) {
+                        return Err(ParseFailure {
+                            kind: ParseError::Collision,
+                            line: line_num,
+                            detail: None,
+                        });
+                    }
+
+                    if line.contains('\0') || line.contains('\r') {
+                        return Err(ParseFailure {
+                            kind: ParseError::InvalidBytes,
+                            line: line_num,
+                            detail: None,
+                        });
+                    }
+
+                    payload.push((*line).to_owned());
+                    self.index += 1;
+                }
+
+                Ok(payload)
             }
+            None => {
+                let mut payload = Vec::new();
 
-            if line.contains('\0') || line.contains('\r') {
-                return Err(ParseFailure {
-                    kind: ParseError::InvalidBytes,
-                    line: line_num,
-                    detail: None,
-                });
+                loop {
+                    let line_num = self.index + 1;
+                    let Some(line) = self.peek() else {
+                        return Err(ParseFailure {
+                            kind: ParseError::Truncated,
+                            line: self.lines.len(),
+                            detail: None,
+                        });
+                    };
+
+                    if line.starts_with(&self.prefix) {
+                        break;
+                    }
+
+                    if line.contains('\0') || line.contains('\r') {
+                        return Err(ParseFailure {
+                            kind: ParseError::InvalidBytes,
+                            line: line_num,
+                            detail: None,
+                        });
+                    }
+
+                    payload.push((*line).to_owned());
+                    self.index += 1;
+                }
+
+                if payload.is_empty() {
+                    return Err(ParseFailure {
+                        kind: ParseError::Count,
+                        line: header_line,
+                        detail: Some("block is empty; expected at least 1 line".into()),
+                    });
+                }
+
+                Ok(payload)
             }
-
-            payload.push((*line).to_owned());
-            self.index += 1;
         }
-
-        Ok(payload)
     }
 
     fn parse_operation(&mut self) -> Result<Operation, ParseFailure> {
@@ -342,21 +395,23 @@ impl<'a> Parser<'a> {
         let old_line = self.index + 1;
         let old_count = self.expect_header("OLD")?;
         let expected_old = end - start + 1;
-        if old_count != expected_old {
-            return Err(ParseFailure {
-                kind: ParseError::Count,
-                line: old_line,
-                detail: Some(format!(
-                    "declared count {old_count}, expected {expected_old}"
-                )),
-            });
+        if let Some(count) = old_count {
+            if count != expected_old {
+                return Err(ParseFailure {
+                    kind: ParseError::Count,
+                    line: old_line,
+                    detail: Some(format!(
+                        "declared count {count}, expected {expected_old}"
+                    )),
+                });
+            }
         }
 
-        let old = self.read_payload(old_count)?;
+        let old = self.read_block(old_count, old_line)?;
 
         let new_line = self.index + 1;
         let new_count = self.expect_header_after_block("NEW")?;
-        if new_count == 0 {
+        if new_count == Some(0) {
             return Err(ParseFailure {
                 kind: ParseError::Count,
                 line: new_line,
@@ -364,7 +419,7 @@ impl<'a> Parser<'a> {
             });
         }
 
-        let new = self.read_payload(new_count)?;
+        let new = self.read_block(new_count, new_line)?;
         self.consume_endop_after_block()?;
 
         Ok(Operation::Replace {
@@ -391,17 +446,19 @@ impl<'a> Parser<'a> {
         })?;
 
         let old_line = self.index + 1;
-        let count = self.expect_header("OLD")?;
+        let old_count = self.expect_header("OLD")?;
         let expected_count = end - start + 1;
-        if count != expected_count {
-            return Err(ParseFailure {
-                kind: ParseError::Count,
-                line: old_line,
-                detail: Some(format!("declared count {count}, expected {expected_count}")),
-            });
+        if let Some(count) = old_count {
+            if count != expected_count {
+                return Err(ParseFailure {
+                    kind: ParseError::Count,
+                    line: old_line,
+                    detail: Some(format!("declared count {count}, expected {expected_count}")),
+                });
+            }
         }
 
-        let old = self.read_payload(count)?;
+        let old = self.read_block(old_count, old_line)?;
         self.consume_endop_after_block()?;
 
         Ok(Operation::Delete { start, end, old })
@@ -432,21 +489,23 @@ impl<'a> Parser<'a> {
         })?;
 
         let anchor_line = self.index + 1;
-        let count = self.expect_header("ANCHOR")?;
+        let anchor_count = self.expect_header("ANCHOR")?;
         let expected_count = end - start + 1;
-        if count != expected_count {
-            return Err(ParseFailure {
-                kind: ParseError::Count,
-                line: anchor_line,
-                detail: Some(format!("declared count {count}, expected {expected_count}")),
-            });
+        if let Some(count) = anchor_count {
+            if count != expected_count {
+                return Err(ParseFailure {
+                    kind: ParseError::Count,
+                    line: anchor_line,
+                    detail: Some(format!("declared count {count}, expected {expected_count}")),
+                });
+            }
         }
 
-        let anchor = self.read_payload(count)?;
+        let anchor = self.read_block(anchor_count, anchor_line)?;
 
         let new_line = self.index + 1;
         let new_count = self.expect_header_after_block("NEW")?;
-        if new_count == 0 {
+        if new_count == Some(0) {
             return Err(ParseFailure {
                 kind: ParseError::Count,
                 line: new_line,
@@ -454,7 +513,7 @@ impl<'a> Parser<'a> {
             });
         }
 
-        let new = self.read_payload(new_count)?;
+        let new = self.read_block(new_count, new_line)?;
         self.consume_endop_after_block()?;
 
         Ok(Operation::Insert {
@@ -476,7 +535,7 @@ fn read_payload(
 ) -> Result<Vec<String>, ParseError> {
     let mut parser = Parser::new(lines, token);
     parser.index = *index;
-    let res = parser.read_payload(count);
+    let res = parser.read_block(Some(count), parser.index + 1);
     *index = parser.index;
     res.map_err(|f| f.kind)
 }
@@ -1563,5 +1622,294 @@ CVB::k7Q2xw9R::END ops=1";
             !message.contains("NoEnvelope"),
             "message should not contain raw debug variant: {message}"
         );
+    }
+    #[test]
+    fn parses_operations_without_line_counts() {
+        let envelope = concat!(
+            "CVB::k7Q2xw9R::BEGIN v=1 id=no-counts\n",
+            "CVB::k7Q2xw9R::FILE path=src/example.rs\n",
+            "CVB::k7Q2xw9R::OP replace lines=2-2\n",
+            "CVB::k7Q2xw9R::OLD\n",
+            "let answer = 41;\n",
+            "CVB::k7Q2xw9R::NEW\n",
+            "let answer = 42;\n",
+            "CVB::k7Q2xw9R::ENDOP\n",
+            "CVB::k7Q2xw9R::OP delete lines=4-4\n",
+            "CVB::k7Q2xw9R::OLD\n",
+            "// remove this\n",
+            "CVB::k7Q2xw9R::ENDOP\n",
+            "CVB::k7Q2xw9R::OP insert after=2-2\n",
+            "CVB::k7Q2xw9R::ANCHOR\n",
+            "let answer = 42;\n",
+            "CVB::k7Q2xw9R::NEW\n",
+            "println!(\"{answer}\");\n",
+            "CVB::k7Q2xw9R::ENDOP\n",
+            "CVB::k7Q2xw9R::END ops=3\n",
+        );
+
+        let parsed = parse_envelope(envelope).expect("envelope without counts should parse successfully");
+        assert_eq!(parsed.id, "no-counts");
+        assert_eq!(parsed.files.len(), 1);
+        assert_eq!(parsed.files[0].operations.len(), 3);
+    }
+
+    #[test]
+    fn rejects_empty_uncounted_blocks() {
+        // 1. Empty uncounted OLD block in replace
+        let empty_old = concat!(
+            "CVB::k7Q2xw9R::BEGIN v=1 id=empty-old\n",
+            "CVB::k7Q2xw9R::FILE path=src/example.rs\n",
+            "CVB::k7Q2xw9R::OP replace lines=2-2\n",
+            "CVB::k7Q2xw9R::OLD\n",
+            "CVB::k7Q2xw9R::NEW\n",
+            "let answer = 42;\n",
+            "CVB::k7Q2xw9R::ENDOP\n",
+            "CVB::k7Q2xw9R::END ops=1\n",
+        );
+        let err = parse_envelope(empty_old).unwrap_err();
+        assert_eq!(err.kind, ParseError::Count);
+        assert_eq!(err.line, 4);
+
+        // 2. Empty uncounted NEW block in replace
+        let empty_new = concat!(
+            "CVB::k7Q2xw9R::BEGIN v=1 id=empty-new\n",
+            "CVB::k7Q2xw9R::FILE path=src/example.rs\n",
+            "CVB::k7Q2xw9R::OP replace lines=2-2\n",
+            "CVB::k7Q2xw9R::OLD\n",
+            "let answer = 41;\n",
+            "CVB::k7Q2xw9R::NEW\n",
+            "CVB::k7Q2xw9R::ENDOP\n",
+            "CVB::k7Q2xw9R::END ops=1\n",
+        );
+        let err = parse_envelope(empty_new).unwrap_err();
+        assert_eq!(err.kind, ParseError::Count);
+        assert_eq!(err.line, 6);
+
+        // 3. Empty uncounted ANCHOR block in insert
+        let empty_anchor = concat!(
+            "CVB::k7Q2xw9R::BEGIN v=1 id=empty-anchor\n",
+            "CVB::k7Q2xw9R::FILE path=src/example.rs\n",
+            "CVB::k7Q2xw9R::OP insert after=2-2\n",
+            "CVB::k7Q2xw9R::ANCHOR\n",
+            "CVB::k7Q2xw9R::NEW\n",
+            "println!(\"hello\");\n",
+            "CVB::k7Q2xw9R::ENDOP\n",
+            "CVB::k7Q2xw9R::END ops=1\n",
+        );
+        let err = parse_envelope(empty_anchor).unwrap_err();
+        assert_eq!(err.kind, ParseError::Count);
+        assert_eq!(err.line, 4);
+    }
+
+    #[test]
+    fn truncation_never_parses_as_success_for_countless_and_mixed_envelopes() {
+        // 1. Entirely countless envelope
+        let countless = concat!(
+            "CVB::k7Q2xw9R::BEGIN v=1 id=trunc-countless\n",
+            "CVB::k7Q2xw9R::FILE path=first.rs\n",
+            "CVB::k7Q2xw9R::OP replace lines=1-1\n",
+            "CVB::k7Q2xw9R::OLD\n",
+            "first\n",
+            "CVB::k7Q2xw9R::NEW\n",
+            "new first\n",
+            "CVB::k7Q2xw9R::ENDOP\n",
+            "CVB::k7Q2xw9R::OP insert after=1-1\n",
+            "CVB::k7Q2xw9R::ANCHOR\n",
+            "first\n",
+            "CVB::k7Q2xw9R::NEW\n",
+            "inserted\n",
+            "CVB::k7Q2xw9R::ENDOP\n",
+            "CVB::k7Q2xw9R::FILE path=second.rs\n",
+            "CVB::k7Q2xw9R::OP delete lines=1-1\n",
+            "CVB::k7Q2xw9R::OLD\n",
+            "second\n",
+            "CVB::k7Q2xw9R::ENDOP\n",
+            "CVB::k7Q2xw9R::END ops=3",
+        );
+
+        for cut in countless.char_indices().map(|(i, _)| i) {
+            let prefix = &countless[..cut];
+            assert!(
+                parse_envelope(prefix).is_err(),
+                "countless prefix up to byte {cut} must not parse successfully: {prefix:?}"
+            );
+        }
+        assert!(parse_envelope(countless).is_ok());
+
+        // 2. Mixed envelope (some counted, some countless)
+        let mixed = concat!(
+            "CVB::k7Q2xw9R::BEGIN v=1 id=trunc-mixed\n",
+            "CVB::k7Q2xw9R::FILE path=first.rs\n",
+            "CVB::k7Q2xw9R::OP replace lines=1-1\n",
+            "CVB::k7Q2xw9R::OLD n=1\n",
+            "first\n",
+            "CVB::k7Q2xw9R::NEW\n",
+            "new first\n",
+            "CVB::k7Q2xw9R::ENDOP\n",
+            "CVB::k7Q2xw9R::FILE path=second.rs\n",
+            "CVB::k7Q2xw9R::OP delete lines=1-1\n",
+            "CVB::k7Q2xw9R::OLD\n",
+            "second\n",
+            "CVB::k7Q2xw9R::ENDOP\n",
+            "CVB::k7Q2xw9R::END ops=2",
+        );
+
+        for cut in mixed.char_indices().map(|(i, _)| i) {
+            let prefix = &mixed[..cut];
+            assert!(
+                parse_envelope(prefix).is_err(),
+                "mixed prefix up to byte {cut} must not parse successfully: {prefix:?}"
+            );
+        }
+        assert!(parse_envelope(mixed).is_ok());
+    }
+
+    #[test]
+    fn uncounted_blocks_preserve_trailing_blank_lines() {
+        let envelope = concat!(
+            "CVB::k7Q2xw9R::BEGIN v=1 id=trailing-blank\n",
+            "CVB::k7Q2xw9R::FILE path=src/example.rs\n",
+            "CVB::k7Q2xw9R::OP replace lines=1-1\n",
+            "CVB::k7Q2xw9R::OLD\n",
+            "first\n",
+            "\n",
+            "CVB::k7Q2xw9R::NEW\n",
+            "first replaced\n",
+            "\n",
+            "CVB::k7Q2xw9R::ENDOP\n",
+            "CVB::k7Q2xw9R::END ops=1\n",
+        );
+        let parsed = parse_envelope(envelope).expect("should parse envelope with trailing blank lines");
+        match &parsed.files[0].operations[0] {
+            Operation::Replace { old, new, .. } => {
+                assert_eq!(old, &["first".to_string(), "".to_string()]);
+                assert_eq!(new, &["first replaced".to_string(), "".to_string()]);
+            }
+            _ => panic!("expected replace operation"),
+        }
+    }
+
+    #[test]
+    fn uncounted_payload_permits_foreign_token_and_treats_real_token_as_structural() {
+        // 1. Foreign token control lines inside uncounted payload are preserved as payload lines
+        let foreign_envelope = concat!(
+            "CVB::k7Q2xw9R::BEGIN v=1 id=foreign-token\n",
+            "CVB::k7Q2xw9R::FILE path=src/example.rs\n",
+            "CVB::k7Q2xw9R::OP replace lines=1-1\n",
+            "CVB::k7Q2xw9R::OLD\n",
+            "CVB::DIFFTOK::OLD\n",
+            "CVB::DIFFTOK::NEW\n",
+            "CVB::k7Q2xw9R::NEW\n",
+            "replacement\n",
+            "CVB::k7Q2xw9R::ENDOP\n",
+            "CVB::k7Q2xw9R::END ops=1\n",
+        );
+        let parsed = parse_envelope(foreign_envelope).expect("foreign token inside uncounted block must be treated as payload");
+        match &parsed.files[0].operations[0] {
+            Operation::Replace { old, .. } => {
+                assert_eq!(old, &["CVB::DIFFTOK::OLD".to_string(), "CVB::DIFFTOK::NEW".to_string()]);
+            }
+            _ => panic!("expected replace operation"),
+        }
+
+        // 2. Real token prefix on line 1 of payload terminates block immediately (0 lines -> ParseError::Count)
+        let immediate_collision = concat!(
+            "CVB::k7Q2xw9R::BEGIN v=1 id=collision-immediate\n",
+            "CVB::k7Q2xw9R::FILE path=src/example.rs\n",
+            "CVB::k7Q2xw9R::OP replace lines=1-1\n",
+            "CVB::k7Q2xw9R::OLD\n",
+            "CVB::k7Q2xw9R::NOT_A_VALID_HEADER\n",
+            "CVB::k7Q2xw9R::NEW\n",
+            "replacement\n",
+            "CVB::k7Q2xw9R::ENDOP\n",
+            "CVB::k7Q2xw9R::END ops=1\n",
+        );
+        let err = parse_envelope(immediate_collision).unwrap_err();
+        assert_eq!(err.kind, ParseError::Count);
+
+        // 3. Real token prefix after payload terminates block, and subsequent line is checked as structural (-> ParseError::Syntax)
+        let mid_payload_collision = concat!(
+            "CVB::k7Q2xw9R::BEGIN v=1 id=collision-mid\n",
+            "CVB::k7Q2xw9R::FILE path=src/example.rs\n",
+            "CVB::k7Q2xw9R::OP replace lines=1-1\n",
+            "CVB::k7Q2xw9R::OLD\n",
+            "valid old line\n",
+            "CVB::k7Q2xw9R::NOT_A_VALID_HEADER\n",
+            "CVB::k7Q2xw9R::NEW\n",
+            "replacement\n",
+            "CVB::k7Q2xw9R::ENDOP\n",
+            "CVB::k7Q2xw9R::END ops=1\n",
+        );
+        let err = parse_envelope(mid_payload_collision).unwrap_err();
+        assert_eq!(err.kind, ParseError::Syntax);
+    }
+
+    #[test]
+    fn parses_mixed_counted_and_uncounted_blocks() {
+        let envelope = concat!(
+            "CVB::k7Q2xw9R::BEGIN v=1 id=mixed-counts\n",
+            "CVB::k7Q2xw9R::FILE path=src/example.rs\n",
+            "CVB::k7Q2xw9R::OP replace lines=1-1\n",
+            "CVB::k7Q2xw9R::OLD n=1\n",
+            "first\n",
+            "CVB::k7Q2xw9R::NEW\n",
+            "first replaced\n",
+            "CVB::k7Q2xw9R::ENDOP\n",
+            "CVB::k7Q2xw9R::OP insert after=1-1\n",
+            "CVB::k7Q2xw9R::ANCHOR\n",
+            "first replaced\n",
+            "CVB::k7Q2xw9R::NEW n=2\n",
+            "added 1\n",
+            "added 2\n",
+            "CVB::k7Q2xw9R::ENDOP\n",
+            "CVB::k7Q2xw9R::END ops=2\n",
+        );
+        let parsed = parse_envelope(envelope).expect("mixed count envelope must parse successfully");
+        assert_eq!(parsed.files[0].operations.len(), 2);
+    }
+
+    #[test]
+    fn new_block_trailing_blank_line_vs_dropped_diff_differs() {
+        use crate::surgery::plan::plan_envelope;
+        use crate::surgery::render::{render_plan_diff, RenderOptions};
+        use std::collections::HashMap;
+
+        let envelope_with_blank = concat!(
+            "CVB::k7Q2xw9R::BEGIN v=1 id=with-blank\n",
+            "CVB::k7Q2xw9R::FILE path=test.rs\n",
+            "CVB::k7Q2xw9R::OP replace lines=1-1\n",
+            "CVB::k7Q2xw9R::OLD\n",
+            "original line\n",
+            "CVB::k7Q2xw9R::NEW\n",
+            "replacement\n",
+            "\n",
+            "CVB::k7Q2xw9R::ENDOP\n",
+            "CVB::k7Q2xw9R::END ops=1\n",
+        );
+
+        let envelope_without_blank = concat!(
+            "CVB::k7Q2xw9R::BEGIN v=1 id=without-blank\n",
+            "CVB::k7Q2xw9R::FILE path=test.rs\n",
+            "CVB::k7Q2xw9R::OP replace lines=1-1\n",
+            "CVB::k7Q2xw9R::OLD\n",
+            "original line\n",
+            "CVB::k7Q2xw9R::NEW\n",
+            "replacement\n",
+            "CVB::k7Q2xw9R::ENDOP\n",
+            "CVB::k7Q2xw9R::END ops=1\n",
+        );
+
+        let mut originals = HashMap::new();
+        originals.insert("test.rs".to_string(), "original line\n".to_string());
+
+        let plan_with = plan_envelope(&parse_envelope(envelope_with_blank).unwrap(), &originals).unwrap();
+        let plan_without = plan_envelope(&parse_envelope(envelope_without_blank).unwrap(), &originals).unwrap();
+
+        let diff_with = render_plan_diff(&plan_with, RenderOptions { color: false });
+        let diff_without = render_plan_diff(&plan_without, RenderOptions { color: false });
+
+        assert_ne!(diff_with, diff_without);
+        assert!(diff_with.contains("+\n") || diff_with.contains("+ \n"));
+        assert!(!diff_without.contains("+\n") && !diff_without.contains("+ \n"));
     }
 }

@@ -614,20 +614,24 @@ ENVELOPE GRAMMAR
   CVB::{TOKEN}::BEGIN v=1 id=UNIQUE_ID
   CVB::{TOKEN}::FILE path=RELATIVE_PATH
   CVB::{TOKEN}::OP replace lines=START-END
-  CVB::{TOKEN}::OLD n=COUNT
+  CVB::{TOKEN}::OLD [n=COUNT]
   ...exact original lines...
-  CVB::{TOKEN}::NEW n=COUNT
+  CVB::{TOKEN}::NEW [n=COUNT]
   ...replacement lines...
   CVB::{TOKEN}::ENDOP
   CVB::{TOKEN}::END ops=OPERATION_COUNT
 
   Each operation belongs to a FILE section. Repeat OP blocks as needed.
   Replace may replace one or more lines. OLD must match the target exactly.
-  delete uses OLD n=COUNT and the original lines, then ENDOP.
-  insert uses ANCHOR n=COUNT and the original anchor lines, then
-  NEW n=COUNT and the inserted lines, then ENDOP.
+  delete uses OLD [n=COUNT] and the original lines, then ENDOP.
+  insert uses ANCHOR [n=COUNT] and the original anchor lines, then
+  NEW [n=COUNT] and the inserted lines, then ENDOP.
   Every control line must use the same token.
   Counts describe payload lines; do not include control lines.
+  Line counts (n=COUNT) on OLD, ANCHOR, and NEW are opt-in per block.
+  When n= is omitted, the block extends to the next CVB::{TOKEN}:: control line.
+  Always use n=COUNT on blocks that end with a trailing blank line, because
+  markdown code fences often drop trailing blank lines.
   Ranges are 1-based, inclusive, and refer to the original file.
   Even a single-line range uses START-END, for example lines=12-12.
   Insert anchors also use ranges: after=20-20 or before=20-20.
@@ -903,6 +907,8 @@ mod tests {
         assert!(spec.contains("exactly ONE envelope per paste"));
         assert!(spec.contains("Multiple envelopes in one input are rejected."));
         assert!(spec.contains("--dry-run"));
+        assert!(spec.contains("opt-in per block"));
+        assert!(spec.contains("trailing blank line"));
     }
 
     #[test]
