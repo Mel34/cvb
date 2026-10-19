@@ -180,6 +180,33 @@ def test_missing_session_token():
         require_unchanged(target)
 
 
+def test_mismatched_session_token():
+    with tempfile.TemporaryDirectory(prefix="cvb-surgery-bad-token-") as tmp:
+        root, target = make_project(tmp)
+        envelope = ENVELOPE.replace(
+            b"testtoken123", b"differenttoken123"
+        )
+        result = subprocess.run(
+            [
+                str(BINARY), "surgery", "--stdin", "--dry-run",
+                "--root", str(root),
+            ],
+            input=envelope,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={**os.environ, "CVB_TOKEN": "testtoken123"},
+            start_new_session=True,
+            timeout=10,
+        )
+
+        require(result.returncode == 2, f"expected exit 2, got {result.returncode}")
+        require(
+            b"E-TOKEN" in result.stderr,
+            f"expected E-TOKEN for a mismatched session token, got: {result.stderr!r}",
+        )
+        require_unchanged(target)
+
+
 def test_missing_tty():
     with tempfile.TemporaryDirectory(prefix="cvb-surgery-no-tty-") as tmp:
         root, target = make_project(tmp)
@@ -458,6 +485,7 @@ def main():
         ("spec output", test_spec),
         ("dry-run", test_dry_run),
         ("missing session token", test_missing_session_token),
+        ("mismatched session token", test_mismatched_session_token),
         ("missing TTY", test_missing_tty),
         ("declined confirmation", test_decline),
         ("confirmed apply", test_confirmed_apply),

@@ -744,7 +744,7 @@ pub(crate) fn run(
         std::process::exit(0);
     }
 
-    let _session_token = match std::env::var("CVB_TOKEN") {
+    let session_token = match std::env::var("CVB_TOKEN") {
         Ok(token) if !token.trim().is_empty() => token,
         _ => {
             eprintln!("CVB: E-NOSESSION: no active surgery session (CVB_TOKEN not set).");
@@ -779,13 +779,22 @@ pub(crate) fn run(
         }
     };
 
-    let (_envelope, plan) = match parse_load_plan(&root, input) {
+    let (envelope, plan) = match parse_load_plan(&root, input) {
         Ok(result) => result,
         Err(error) => {
             eprintln!("{error}");
             std::process::exit(2);
         }
     };
+
+    if envelope.token != session_token {
+        eprintln!(
+            "CVB: E-TOKEN: envelope token '{}' does not match active session token '{}'; run `cvb token` to print the current token.",
+            envelope.token,
+            session_token
+        );
+        std::process::exit(2);
+    }
 
     let diff = render_plan_diff(&plan, RenderOptions { color: false });
     print!("{diff}");
