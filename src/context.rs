@@ -40,8 +40,17 @@ pub(crate) fn initialize() {
         return;
     };
 
-    match prepare_with(
+    let token = match env::var("CVB_TOKEN") {
+        Ok(token) if !token.trim().is_empty() => token,
+        _ => {
+            eprintln!("{NOT_PREPARED_MESSAGE}: CVB_TOKEN is not set");
+            return;
+        }
+    };
+
+    match prepare_context_with(
         Path::new(&bash_source),
+        &token,
         clipboard::needs_chunking,
         clipboard::process,
     ) {
@@ -66,6 +75,52 @@ fn prepare_with(
     } else {
         Outcome::Ready
     })
+}
+
+fn prepare_context_with(
+    bash_source: &Path,
+    token: &str,
+    will_chunk: impl FnOnce(&ClipboardBuffer) -> bool,
+    process: impl FnOnce(&ClipboardBuffer) -> Result<(), String>,
+) -> Result<Outcome, String> {
+    let manual = load_manual(bash_source)?;
+    let manual = std::str::from_utf8(manual.as_bytes())
+        .map_err(|error| format!("CVB: manual is not valid UTF-8: {error}"))?;
+    let context = build_context(manual, token)?;
+    let buffer = ClipboardBuffer::new(context.into_bytes());
+    let chunked = will_chunk(&buffer);
+
+    process(&buffer)?;
+
+    Ok(if chunked {
+        Outcome::SentInParts
+    } else {
+        Outcome::Ready
+    })
+}
+
+fn build_context(manual: &str, token: &str) -> Result<String, String> {
+    let workflow = concat!(
+        "Use the CVB surgery envelope format from the start of this conversation.\n",
+        "Inspect the relevant source before proposing edits. Make one atomic change per envelope.\n",
+        "Submit exactly one envelope per paste to `cvb surgery`; use a unique id per envelope.\n",
+        "Reuse the session token below for every envelope. Never print or disclose the token.\n",
+        "If you need the token again, run `cvb token`.\n",
+    );
+    let spec = crate::surgery::spec_text(token);
+    let context = format!(
+        "{manual}\n\nWORKFLOW INSTRUCTIONS\n{workflow}\n{spec}\n\nCVB SESSION TOKEN: {token}"
+    );
+    let limit = clipboard::configured_copy_limit();
+    let chars = context.chars().count();
+
+    if chars > limit {
+        return Err(format!(
+            "CVB: initialization context is {chars} characters, exceeding the configured limit of {limit}"
+        ));
+    }
+
+    Ok(context)
 }
 
 fn load_manual(bash_source: &Path) -> Result<ClipboardBuffer, String> {
@@ -246,6 +301,25 @@ mod tests {
 
         assert_eq!(outcome, Outcome::Ready);
         assert_eq!(seen.into_inner(), "# Manual\n\nüñí\n".as_bytes());
+    }
+
+    #[test]
+    fn launch_context_contains_workflow_spec_and_session_token() {
+        let manual = "MANUAL_SENTINEL";
+        let token = "ContextToken1234";
+        let context = build_context(manual, token).expect("build launch context");
+        let expected_token_line = format!("CVB SESSION TOKEN: {token}");
+
+        assert!(
+            context.contains(manual)
+                && context.contains(
+                    "Use the CVB surgery envelope format from the start of this conversation."
+                )
+                && context.contains("CVB Surgery Language (CSL), protocol version 1")
+                && context.contains(&format!("CVB::{token}::BEGIN"))
+                && context.lines().last() == Some(expected_token_line.as_str()),
+            "launch context is missing required content; actual context: {context:?}"
+        );
     }
 
     #[test]

@@ -8,7 +8,7 @@ pub(crate) struct ClipboardBuffer {
 
 const DEFAULT_COPY_LIMIT: usize = 9_750;
 
-fn configured_copy_limit() -> usize {
+pub(crate) fn configured_copy_limit() -> usize {
     let config_dir = std::env::var_os("XDG_CONFIG_HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
