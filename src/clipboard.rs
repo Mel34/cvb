@@ -175,6 +175,14 @@ pub(crate) fn process(buffer: &ClipboardBuffer) -> Result<(), String> {
     )
 }
 
+/// Whether `process` will hand this buffer to the interactive chunk pager
+/// rather than copy it in one piece.
+pub(crate) fn needs_chunking(buffer: &ClipboardBuffer) -> bool {
+    std::str::from_utf8(buffer.as_bytes())
+        .map(|text| text.chars().count() > configured_copy_limit())
+        .unwrap_or(false)
+}
+
 fn process_with<C, S>(
     buffer: &ClipboardBuffer,
     limit: usize,

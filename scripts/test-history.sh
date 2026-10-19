@@ -60,8 +60,11 @@ EOF
 
     # Stand-in for the real Rust cvb executable: generate the real rcfile,
     # then run the child Bash directly without a PTY proxy.
+    # Every invocation appends its argument count to a log, so tests can verify
+    # the wrapper starts the session once and never runs `cvb <file>` itself.
     cat >"$work/$name/bin/cvb" <<EOF
 #!/usr/bin/env bash
+printf '%s\n' "\$#" >>"$work/$name/cvb-calls"
 exec 3>/dev/null
 rc=\$("$work/rcgen") || exit 1
 bash --noprofile --rcfile "\$rc" -i
@@ -127,6 +130,12 @@ check "round trip (histappend on)" \
     "old1|old2|echo before|cvb|echo in1|echo in2|echo after|exit" \
     "$(hist_of roundtrip-on)"
 check "round trip: temp files removed" "0" "$(leftovers_of roundtrip-on)"
+
+# Starting a session invokes cvb exactly once, with no arguments. Context
+# initialization belongs to Rust; the wrapper must not run `cvb manual.md`.
+check "round trip: wrapper starts cvb once, with no arguments" \
+    "0" \
+    "$(paste -sd'|' "$work/roundtrip-on/cvb-calls")"
 
 # 2. The same with histappend off. The parent's shopt state is replayed into
 # the child, so the lifecycle must not depend on histappend.

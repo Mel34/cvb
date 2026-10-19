@@ -5,6 +5,7 @@ use std::path::Path;
 pub(crate) mod cascade;
 mod cli;
 pub(crate) mod clipboard;
+mod context;
 mod control;
 mod keybind;
 mod keyboard;
@@ -32,6 +33,8 @@ fn main() {
     match cli::parse() {
         cli::Command::Start => match shell::create_rcfile() {
             Ok(rcfile) => {
+                context::initialize();
+
                 let result = pty::run(&rcfile);
                 let _ = std::fs::remove_file(&rcfile);
 
