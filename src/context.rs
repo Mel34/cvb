@@ -100,6 +100,14 @@ fn prepare_context_with(
 }
 
 fn build_context(manual: &str, token: &str) -> Result<String, String> {
+    build_context_with_limit(manual, token, clipboard::configured_copy_limit())
+}
+
+fn build_context_with_limit(
+    manual: &str,
+    token: &str,
+    limit: usize,
+) -> Result<String, String> {
     let workflow = concat!(
         "Use the CVB surgery envelope format from the start of this conversation.\n",
         "Inspect the relevant source before proposing edits. Make one atomic change per envelope.\n",
@@ -111,7 +119,6 @@ fn build_context(manual: &str, token: &str) -> Result<String, String> {
     let context = format!(
         "{manual}\n\nWORKFLOW INSTRUCTIONS\n{workflow}\n{spec}\n\nCVB SESSION TOKEN: {token}"
     );
-    let limit = clipboard::configured_copy_limit();
     let chars = context.chars().count();
 
     if chars > limit {
@@ -319,6 +326,27 @@ mod tests {
                 && context.contains(&format!("CVB::{token}::BEGIN"))
                 && context.lines().last() == Some(expected_token_line.as_str()),
             "launch context is missing required content; actual context: {context:?}"
+        );
+    }
+
+    #[test]
+    fn launch_context_respects_exact_character_limit() {
+        let manual = "MANUAL_SENTINEL";
+        let token = "ContextToken1234";
+        let context = build_context_with_limit(manual, token, usize::MAX)
+            .expect("build context with generous limit");
+        let exact_limit = context.chars().count();
+
+        assert!(
+            build_context_with_limit(manual, token, exact_limit).is_ok(),
+            "context should fit when the limit equals its character count"
+        );
+
+        let error = build_context_with_limit(manual, token, exact_limit - 1)
+            .expect_err("context should exceed a limit one character too small");
+        assert!(
+            error.contains(&format!("configured limit of {}", exact_limit - 1)),
+            "unexpected error: {error}"
         );
     }
 
