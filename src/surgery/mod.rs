@@ -904,10 +904,15 @@ fn run_surgery_mode(root: std::path::PathBuf, session_token: String) -> i32 {
                                 envelope.id,
                                 plan.files.len()
                             );
-                            let _ = control.send(&ControlMessage::SurgeryEnd {
+                            if let Err(send_error) = control.send(&ControlMessage::SurgeryEnd {
                                 status: 0,
                                 outcome: outcome.clone(),
-                            });
+                            }) {
+                                eprintln!(
+                                    "\r\x1b[2KCVB: surgery was applied, but completion reporting failed: {send_error}"
+                                );
+                                return 2;
+                            }
                             eprint!("\r\x1b[2K{outcome}");
                             return SurgeryExitStatus::Applied.code();
                         }
