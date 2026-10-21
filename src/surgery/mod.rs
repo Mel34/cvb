@@ -1149,9 +1149,14 @@ pub(crate) fn run(
     let diff = render_plan_diff(&plan, RenderOptions { color: false });
     let mut control = crate::control::ControlChannel::client_on_fd(3).ok();
     if let Some(ref mut c) = control {
-        let _ = c.send(&crate::control::ControlMessage::SurgeryBegin {
-            token: session_token.clone(),
-        });
+        if let Err(send_error) =
+            c.send(&crate::control::ControlMessage::SurgeryBegin {
+                token: session_token.clone(),
+            })
+        {
+            eprintln!("CVB: failed to report surgery start: {send_error}");
+            std::process::exit(2);
+        }
         let _ = c.send(&crate::control::ControlMessage::ClipboardWrite {
             text: diff.clone(),
         });
