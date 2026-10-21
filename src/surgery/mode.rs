@@ -58,6 +58,10 @@ pub(crate) fn step(
             ),
             Event::PasteKey => (ModeState::Idle, vec![ModeAction::ReadClipboard]),
             Event::Paste(text) => handle_paste(ModeState::Idle, &text, session_token),
+            Event::PasteError(message) => (
+                ModeState::Idle,
+                vec![ModeAction::IgnoreNonEnvelope { message }],
+            ),
             _ => (ModeState::Idle, Vec::new()),
         },
         ModeState::Candidate(candidate) => match event {
@@ -76,6 +80,10 @@ pub(crate) fn step(
             ),
             Event::PasteKey => (ModeState::Candidate(candidate), vec![ModeAction::ReadClipboard]),
             Event::Paste(text) => handle_paste(ModeState::Candidate(candidate), &text, session_token),
+            Event::PasteError(message) => (
+                ModeState::Candidate(candidate),
+                vec![ModeAction::IgnoreNonEnvelope { message }],
+            ),
             Event::Space => handle_pager_nav(candidate, DiffPagerKey::Space),
             Event::Left => handle_pager_nav(candidate, DiffPagerKey::Left),
             Event::Right => handle_pager_nav(candidate, DiffPagerKey::Right),
@@ -112,6 +120,13 @@ pub(crate) fn step(
                         actions.insert(0, ModeAction::Disarm);
                         (next_state, actions)
                     }
+                    Event::PasteError(message) => (
+                        ModeState::Candidate(candidate),
+                        vec![
+                            ModeAction::Disarm,
+                            ModeAction::IgnoreNonEnvelope { message },
+                        ],
+                    ),
                     Event::Space => {
                         let (next_state, mut actions) =
                             handle_pager_nav(candidate, DiffPagerKey::Space);
@@ -152,6 +167,13 @@ pub(crate) fn step(
                         actions.insert(0, ModeAction::Disarm);
                         (next_state, actions)
                     }
+                    Event::PasteError(message) => (
+                        ModeState::Candidate(candidate),
+                        vec![
+                            ModeAction::Disarm,
+                            ModeAction::IgnoreNonEnvelope { message },
+                        ],
+                    ),
                     Event::Space => {
                         let (next_state, mut actions) =
                             handle_pager_nav(candidate, DiffPagerKey::Space);
@@ -308,6 +330,68 @@ mod tests {
             assert_eq!(state, ModeState::Idle);
             assert!(actions.is_empty());
         }
+    }
+
+    #[test]
+    fn idle_paste_error_yields_ignore_non_envelope() {
+        let now = Instant::now();
+        let (state, actions) = step(
+            ModeState::Idle,
+            Event::PasteError("clipboard failure".to_string()),
+            now,
+            "tok123",
+        );
+        assert_eq!(state, ModeState::Idle);
+        assert_eq!(
+            actions,
+            vec![ModeAction::IgnoreNonEnvelope {
+                message: "clipboard failure".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn candidate_paste_error_keeps_candidate_and_yields_ignore_non_envelope() {
+        let now = Instant::now();
+        let candidate = sample_candidate("cand1");
+        let (state, actions) = step(
+            ModeState::Candidate(candidate.clone()),
+            Event::PasteError("clipboard failure".to_string()),
+            now,
+            "tok123",
+        );
+        assert_eq!(state, ModeState::Candidate(candidate));
+        assert_eq!(
+            actions,
+            vec![ModeAction::IgnoreNonEnvelope {
+                message: "clipboard failure".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn armed_paste_error_disarms_and_yields_ignore_non_envelope() {
+        let now = Instant::now();
+        let candidate = sample_candidate("cand1");
+        let (state, actions) = step(
+            ModeState::Armed {
+                candidate: candidate.clone(),
+                armed_at: now,
+            },
+            Event::PasteError("clipboard failure".to_string()),
+            now,
+            "tok123",
+        );
+        assert_eq!(state, ModeState::Candidate(candidate));
+        assert_eq!(
+            actions,
+            vec![
+                ModeAction::Disarm,
+                ModeAction::IgnoreNonEnvelope {
+                    message: "clipboard failure".to_string(),
+                },
+            ]
+        );
     }
 
     #[test]

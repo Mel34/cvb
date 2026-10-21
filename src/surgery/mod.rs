@@ -825,11 +825,25 @@ fn run_surgery_mode(root: std::path::PathBuf, session_token: String) -> i32 {
                                 pending_actions.extend(acts);
                             }
                             Err(err) => {
-                                eprintln!("\r\x1b[2KCVB: clipboard content is not valid UTF-8: {err}");
+                                let (s, acts) = step(
+                                    state,
+                                    Event::PasteError(format!("CVB: clipboard content is not valid UTF-8: {err}")),
+                                    std::time::Instant::now(),
+                                    &session_token,
+                                );
+                                state = s;
+                                pending_actions.extend(acts);
                             }
                         },
                         Err(err) => {
-                            eprintln!("\r\x1b[2KCVB: unable to read clipboard: {err}");
+                            let (s, acts) = step(
+                                state,
+                                Event::PasteError(format!("CVB: unable to read clipboard: {err}")),
+                                std::time::Instant::now(),
+                                &session_token,
+                            );
+                            state = s;
+                            pending_actions.extend(acts);
                         }
                     }
                 }
