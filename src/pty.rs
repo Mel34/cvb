@@ -1056,15 +1056,33 @@ fn proxy(
 
 
         if stdin_events.contains(nix::poll::PollFlags::POLLIN) {
-            let count = read(stdin.as_fd(), &mut buffer)
-                .map_err(|error| format!("CVB: stdin read failed: {error}"))?;
+            let count = loop {
+                match read(stdin.as_fd(), &mut buffer) {
+                    Ok(count) => break count,
+                    Err(nix::errno::Errno::EINTR) => continue,
+                    Err(error) => {
+                        return Err(format!("CVB: stdin read failed: {error}"));
+                    }
+                }
+            };
 
             if count == 0 {
                 break;
             }
 
-            write(master.as_fd(), &buffer[..count])
-                .map_err(|error| format!("CVB: PTY write failed: {error}"))?;
+            let mut written = 0;
+            while written < count {
+                match write(master.as_fd(), &buffer[written..count]) {
+                    Ok(0) => {
+                        return Err("CVB: PTY write returned zero bytes".to_string());
+                    }
+                    Ok(count) => written += count,
+                    Err(nix::errno::Errno::EINTR) => continue,
+                    Err(error) => {
+                        return Err(format!("CVB: PTY write failed: {error}"));
+                    }
+                }
+            }
         } else if stdin_events.intersects(
             nix::poll::PollFlags::POLLHUP | nix::poll::PollFlags::POLLERR,
         ) {
@@ -1076,10 +1094,15 @@ fn proxy(
                 | nix::poll::PollFlags::POLLHUP
                 | nix::poll::PollFlags::POLLERR,
         ) {
-            let count = match read(master.as_fd(), &mut buffer) {
-                Ok(count) => count,
-                Err(nix::errno::Errno::EIO) => break,
-                Err(error) => return Err(format!("CVB: PTY read failed: {error}")),
+            let count = loop {
+                match read(master.as_fd(), &mut buffer) {
+                    Ok(count) => break count,
+                    Err(nix::errno::Errno::EINTR) => continue,
+                    Err(nix::errno::Errno::EIO) => break 0,
+                    Err(error) => {
+                        return Err(format!("CVB: PTY read failed: {error}"));
+                    }
+                }
             };
 
             if count == 0 {
