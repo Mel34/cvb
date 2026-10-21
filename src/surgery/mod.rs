@@ -724,7 +724,18 @@ fn run_surgery_mode(root: std::path::PathBuf, session_token: String) -> i32 {
     let mut held_envelope: Option<Envelope> = None;
 
     eprint!("\r\x1b[2K[CVB surgery] ^C cancel  ^V paste  ^B build\r\n");
-    let _ = std::io::stderr().flush();
+    if let Err(error) = std::io::stderr().flush() {
+        eprintln!("CVB: failed to flush surgery startup banner: {error}");
+        if let Err(send_error) = control.send(&ControlMessage::SurgeryEnd {
+            status: 1,
+            outcome: String::new(),
+        }) {
+            eprintln!(
+                "CVB: additionally failed to report surgery cleanup: {send_error}"
+            );
+        }
+        return 2;
+    }
 
     loop {
         let event = match reader.next_event() {
