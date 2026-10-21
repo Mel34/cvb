@@ -880,9 +880,14 @@ fn run_surgery_mode(root: std::path::PathBuf, session_token: String) -> i32 {
 
                             if is_stale {
                                 let error_text = error.to_string();
-                                let _ = control.send(&ControlMessage::ClipboardWrite {
+                                if let Err(send_error) = control.send(&ControlMessage::ClipboardWrite {
                                     text: error_text.clone(),
-                                });
+                                }) {
+                                    eprintln!(
+                                        "\r\x1b[2KCVB: control channel failed while reporting stale-plan error: {send_error}"
+                                    );
+                                    return 2;
+                                }
                                 eprintln!("\r\x1b[2K{error}");
                                 state = ModeState::Idle;
                                 held_plan = None;
