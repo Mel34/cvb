@@ -1228,6 +1228,19 @@ pub(crate) fn run(
     let state_base = match resolve_state_dir() {
         Ok(path) => path,
         Err(error) => {
+            if let Some(ref mut c) = control {
+                if let Err(send_error) =
+                    c.send(&crate::control::ControlMessage::SurgeryEnd {
+                        status: 1,
+                        outcome: String::new(),
+                    })
+                {
+                    eprintln!(
+                        "{error}; additionally failed to report surgery cleanup: {send_error}"
+                    );
+                    std::process::exit(2);
+                }
+            }
             eprintln!("{error}");
             std::process::exit(SurgeryExitStatus::RejectedBeforeCommit.code());
         }
