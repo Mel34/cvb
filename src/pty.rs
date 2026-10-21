@@ -1016,6 +1016,10 @@ fn proxy(
 
             write(master.as_fd(), &buffer[..count])
                 .map_err(|error| format!("CVB: PTY write failed: {error}"))?;
+        } else if stdin_events.intersects(
+            nix::poll::PollFlags::POLLHUP | nix::poll::PollFlags::POLLERR,
+        ) {
+            break;
         }
 
         if master_events.intersects(
