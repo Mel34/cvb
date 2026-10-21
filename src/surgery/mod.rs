@@ -1017,7 +1017,22 @@ fn run_surgery_mode(root: std::path::PathBuf, session_token: String) -> i32 {
                     } else {
                         eprint!("\r\x1b[2K[^C cancel  ^V paste  ^B build] ");
                     }
-                    let _ = std::io::stderr().flush();
+                    if let Err(error) = std::io::stderr().flush() {
+                        eprintln!(
+                            "\r\x1b[2KCVB: failed to flush surgery terminal output: {error}"
+                        );
+                        if let Err(send_error) =
+                            control.send(&ControlMessage::SurgeryEnd {
+                                status: 1,
+                                outcome: String::new(),
+                            })
+                        {
+                            eprintln!(
+                                "\r\x1b[2KCVB: additionally failed to report surgery cleanup: {send_error}"
+                            );
+                        }
+                        return 2;
+                    }
                 }
                 ModeAction::ReportDryRunError(err) => {
                     if let Err(error) = control.send(&ControlMessage::ClipboardWrite {
