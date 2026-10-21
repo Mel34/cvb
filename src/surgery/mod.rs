@@ -619,6 +619,59 @@ fn enter_surgery_mode(root: std::path::PathBuf, session_token: String) -> ! {
     std::process::exit(exit_code);
 }
 
+fn start_surgery(
+    control: &crate::control::ControlChannel,
+    session_token: &str,
+    enter_terminal: impl FnOnce() -> Result<
+        crate::surgery::keys::SurgeryTerminalGuard,
+        (String, i32),
+    >,
+    open_tty: impl FnOnce() -> std::io::Result<std::fs::File>,
+) -> Result<
+    (crate::surgery::keys::SurgeryTerminalGuard, std::fs::File),
+    (String, i32),
+> {
+    if let Err(err) = control.send(&crate::control::ControlMessage::SurgeryBegin {
+        token: session_token.to_string(),
+    }) {
+        return Err((
+            format!(
+                "CVB: E-NOSESSION: failed to initialize surgery session on control channel: {err}"
+            ),
+            2,
+        ));
+    }
+
+    let guard = match enter_terminal() {
+        Ok(guard) => guard,
+        Err((message, code)) => {
+            let _ = control.send(&crate::control::ControlMessage::SurgeryEnd {
+                status: 1,
+                outcome: String::new(),
+            });
+            return Err((message, code));
+        }
+    };
+
+    let tty = match open_tty() {
+        Ok(file) => file,
+        Err(error) => {
+            let _ = control.send(&crate::control::ControlMessage::SurgeryEnd {
+                status: 1,
+                outcome: String::new(),
+            });
+            return Err((
+                format!(
+                    "CVB: E-NOTTY: interactive terminal confirmation requires /dev/tty: {error}"
+                ),
+                2,
+            ));
+        }
+    };
+
+    Ok((guard, tty))
+}
+
 fn run_surgery_mode(root: std::path::PathBuf, session_token: String) -> i32 {
     use std::io::Write as _;
     use crate::surgery::keys::{Event, EventReader, SurgeryTerminalGuard};
@@ -634,26 +687,16 @@ fn run_surgery_mode(root: std::path::PathBuf, session_token: String) -> i32 {
         }
     };
 
-    if let Err(err) = control.send(&ControlMessage::SurgeryBegin {
-        token: session_token.clone(),
-    }) {
-        eprintln!("CVB: E-NOSESSION: failed to initialize surgery session on control channel: {err}");
-        return 2;
-    }
-
-    let _guard = match SurgeryTerminalGuard::enter() {
-        Ok(g) => g,
-        Err((msg, code)) => {
-            eprintln!("{msg}");
+    let (_guard, tty) = match start_surgery(
+        &control,
+        &session_token,
+        SurgeryTerminalGuard::enter,
+        || std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty"),
+    ) {
+        Ok(resources) => resources,
+        Err((message, code)) => {
+            eprintln!("{message}");
             return code;
-        }
-    };
-
-    let tty = match std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty") {
-        Ok(file) => file,
-        Err(error) => {
-            eprintln!("CVB: E-NOTTY: interactive terminal confirmation requires /dev/tty: {error}");
-            return 2;
         }
     };
 
@@ -1114,8 +1157,119 @@ pub(crate) fn kind<T, E: ErrorKind<K>, K>(r: Result<T, E>) -> Result<T, K> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::control::{ControlChannel, ControlMessage};
+    use crate::surgery::keys::SurgeryTerminalGuard;
     use std::fs;
+    use std::os::fd::{FromRawFd, OwnedFd};
     use std::path::PathBuf;
+
+    fn control_pair() -> (ControlChannel, ControlChannel) {
+        let mut fds = [0; 2];
+        let result = unsafe {
+            libc::socketpair(
+                libc::AF_UNIX,
+                libc::SOCK_STREAM,
+                0,
+                fds.as_mut_ptr(),
+            )
+        };
+        assert_eq!(result, 0, "socketpair must succeed");
+
+        unsafe {
+            (
+                ControlChannel::new(OwnedFd::from_raw_fd(fds[0])),
+                ControlChannel::new(OwnedFd::from_raw_fd(fds[1])),
+            )
+        }
+    }
+
+    #[test]
+    fn startup_terminal_entry_failure_sends_surgery_end() {
+        let (control, mut peer) = control_pair();
+        let (reader, _writer) = nix::unistd::pipe().expect("pipe must succeed");
+
+        let result = start_surgery(
+            &control,
+            "test-token",
+            || SurgeryTerminalGuard::enter_on(&reader),
+            || panic!("TTY open must not run after terminal-entry failure"),
+        );
+
+        assert!(matches!(result, Err((ref message, 2)) if message.starts_with("E-NOTTY")));
+
+        drop(control);
+        assert_eq!(
+            peer.receive().unwrap(),
+            vec![
+                ControlMessage::SurgeryBegin {
+                    token: "test-token".to_string(),
+                },
+                ControlMessage::SurgeryEnd {
+                    status: 1,
+                    outcome: String::new(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn startup_tty_open_failure_sends_surgery_end() {
+        let (control, mut peer) = control_pair();
+        let pty = nix::pty::openpty(None, None).expect("openpty must succeed");
+
+        let result = start_surgery(
+            &control,
+            "test-token",
+            || SurgeryTerminalGuard::enter_on(&pty.slave),
+            || Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "injected TTY failure",
+            )),
+        );
+
+        assert!(
+            matches!(result, Err((ref message, 2))
+                if message.starts_with("CVB: E-NOTTY:")
+                    && message.contains("injected TTY failure"))
+        );
+
+        drop(control);
+        assert_eq!(
+            peer.receive().unwrap(),
+            vec![
+                ControlMessage::SurgeryBegin {
+                    token: "test-token".to_string(),
+                },
+                ControlMessage::SurgeryEnd {
+                    status: 1,
+                    outcome: String::new(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn startup_begin_failure_does_not_send_surgery_end() {
+        let (control, mut peer) = control_pair();
+        let oversized_token = "x".repeat(5 * 1024 * 1024);
+
+        let result = start_surgery(
+            &control,
+            &oversized_token,
+            || panic!("terminal entry must not run after begin failure"),
+            || panic!("TTY open must not run after begin failure"),
+        );
+
+        assert!(
+            matches!(result, Err((ref message, 2))
+                if message.starts_with(
+                    "CVB: E-NOSESSION: failed to initialize surgery session"
+                ))
+        );
+
+        drop(control);
+        assert!(peer.receive().unwrap().is_empty());
+    }
 
     #[test]
     fn check_input_size_accepts_within_cap() {

@@ -631,6 +631,17 @@ pub(crate) enum SurgeryProxyState {
     Aborted,
 }
 
+fn capture_terminal_output(
+    capture: &mut CaptureState,
+    transcript: &mut Transcript,
+    state: &SurgeryProxyState,
+    output: &[u8],
+) {
+    if capture.capturing && *state == SurgeryProxyState::Ordinary {
+        transcript.push_terminal(output);
+        capture.push(output);
+    }
+}
 pub fn run(rcfile: &Path) -> Result<i32, String> {
     let stdin = io::stdin();
 
@@ -1023,10 +1034,12 @@ fn proxy(
             for event in events {
                 match event {
                     MarkerEvent::Data(output) => {
-                        if capture.capturing && surgery_state == SurgeryProxyState::Ordinary {
-                            transcript.push_terminal(&output);
-                            capture.push(&output);
-                        }
+                        capture_terminal_output(
+                            &mut capture,
+                            &mut transcript,
+                            &surgery_state,
+                            &output,
+                        );
                     }
 
                     MarkerEvent::Pathop => {
@@ -1649,7 +1662,43 @@ mod tests {
     }
 
     #[test]
-    fn terminal_capture_and_transcript_suppressed_when_not_ordinary() {
+    fn terminal_capture_and_transcript_follow_surgery_state() {
+        let sample_data = b"some modal surgery output";
+        let ordinary = super::SurgeryProxyState::Ordinary;
+
+        // Ordinary + enabled: both capture and transcript record output.
+        let mut capture = super::CaptureState::default();
+        capture.start();
+        let mut transcript = super::Transcript::default();
+
+        super::capture_terminal_output(
+            &mut capture,
+            &mut transcript,
+            &ordinary,
+            sample_data,
+        );
+
+        assert_eq!(capture.end().as_slice(), sample_data);
+        assert_eq!(
+            transcript.segments,
+            vec![super::TranscriptSegment::Terminal(sample_data.to_vec())]
+        );
+
+        // Ordinary + disabled: neither records output.
+        let mut capture = super::CaptureState::default();
+        let mut transcript = super::Transcript::default();
+
+        super::capture_terminal_output(
+            &mut capture,
+            &mut transcript,
+            &ordinary,
+            sample_data,
+        );
+
+        assert!(capture.end().is_empty());
+        assert!(transcript.segments.is_empty());
+
+        // Interactive surgery states suppress both outputs.
         for state in [
             super::SurgeryProxyState::Active {
                 token: "test-token".to_string(),
@@ -1663,12 +1712,12 @@ mod tests {
             capture.start();
             let mut transcript = super::Transcript::default();
 
-            let sample_data = b"some modal surgery output";
-
-            if capture.capturing && state == super::SurgeryProxyState::Ordinary {
-                transcript.push_terminal(sample_data);
-                capture.push(sample_data);
-            }
+            super::capture_terminal_output(
+                &mut capture,
+                &mut transcript,
+                &state,
+                sample_data,
+            );
 
             assert!(
                 capture.end().is_empty(),
@@ -1679,20 +1728,6 @@ mod tests {
                 "transcript must not accumulate data while in state {state:?}"
             );
         }
-
-        // Verify it still records normally when Ordinary
-        let mut capture = super::CaptureState::default();
-        capture.start();
-        let mut transcript = super::Transcript::default();
-        let sample_data = b"ls -la\n";
-
-        if capture.capturing && super::SurgeryProxyState::Ordinary == super::SurgeryProxyState::Ordinary {
-            transcript.push_terminal(sample_data);
-            capture.push(sample_data);
-        }
-
-        assert_eq!(capture.end().as_slice(), sample_data);
-        assert!(!transcript.segments.is_empty());
     }
 
     #[test]
