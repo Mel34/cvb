@@ -563,6 +563,242 @@ def test_terminal_restoration_on_sigterm():
         require_unchanged(target)
 
 
+def test_mode_bracketed_paste_and_abort():
+    with tempfile.TemporaryDirectory(prefix="cvb-surgery-mode-abort-") as tmp:
+        root, target = make_project(tmp)
+        state_home = pathlib.Path(tmp) / "state-home"
+        pid, master_fd = pty.fork()
+
+        if pid == 0:
+            try:
+                os.environ["XDG_STATE_HOME"] = str(state_home)
+                os.environ["CVB_TOKEN"] = "testtoken123"
+                os.execv(
+                    str(BINARY),
+                    [
+                        str(BINARY), "surgery",
+                        "--root", str(root),
+                    ],
+                )
+            except BaseException:
+                os._exit(127)
+
+        stty_before = get_stty(master_fd)
+        output = bytearray()
+        paste_sent = False
+        abort_sent = False
+        child_status = None
+        deadline = time.monotonic() + 10
+
+        try:
+            while time.monotonic() < deadline:
+                ready, _, _ = select.select([master_fd], [], [], 0.1)
+                if ready:
+                    try:
+                        data = os.read(master_fd, 4096)
+                    except OSError as exc:
+                        if exc.errno == errno.EIO:
+                            data = b""
+                        else:
+                            raise
+                    if data:
+                        output.extend(data)
+
+                if not paste_sent and b"[CVB surgery]" in output:
+                    os.write(master_fd, b"\x1b[200~" + ENVELOPE + b"\x1b[201~")
+                    paste_sent = True
+
+                if paste_sent and not abort_sent and b"println!(\"goodbye\");" in output:
+                    time.sleep(0.05)
+                    os.write(master_fd, b"q")
+                    abort_sent = True
+
+                waited_pid, status = os.waitpid(pid, os.WNOHANG)
+                if waited_pid == pid:
+                    child_status = status
+                    break
+
+            if child_status is None:
+                os.kill(pid, 9)
+                _, child_status = os.waitpid(pid, 0)
+                raise AssertionError("CLI mode did not exit within 10 seconds")
+        finally:
+            stty_after = get_stty(master_fd)
+            os.close(master_fd)
+
+        require(stty_after == stty_before, f"terminal state not restored: before={stty_before} after={stty_after}")
+        require(os.WIFEXITED(child_status), f"child did not exit normally: {child_status}")
+        exit_code = os.WEXITSTATUS(child_status)
+        require(exit_code == 3, f"expected abort exit 3, got {exit_code}")
+        require_unchanged(target)
+
+
+def test_mode_two_press_apply():
+    with tempfile.TemporaryDirectory(prefix="cvb-surgery-mode-apply-") as tmp:
+        root, target = make_project(tmp)
+        state_home = pathlib.Path(tmp) / "state-home"
+        pid, master_fd = pty.fork()
+
+        if pid == 0:
+            try:
+                os.environ["XDG_STATE_HOME"] = str(state_home)
+                os.environ["CVB_TOKEN"] = "testtoken123"
+                os.execv(
+                    str(BINARY),
+                    [
+                        str(BINARY), "surgery",
+                        "--root", str(root),
+                    ],
+                )
+            except BaseException:
+                os._exit(127)
+
+        stty_before = get_stty(master_fd)
+        output = bytearray()
+        paste_sent = False
+        first_b_sent = False
+        second_b_sent = False
+        child_status = None
+        deadline = time.monotonic() + 10
+
+        try:
+            while time.monotonic() < deadline:
+                ready, _, _ = select.select([master_fd], [], [], 0.1)
+                if ready:
+                    try:
+                        data = os.read(master_fd, 4096)
+                    except OSError as exc:
+                        if exc.errno == errno.EIO:
+                            data = b""
+                        else:
+                            raise
+                    if data:
+                        output.extend(data)
+
+                if not paste_sent and b"[CVB surgery]" in output:
+                    os.write(master_fd, b"\x1b[200~" + ENVELOPE + b"\x1b[201~")
+                    paste_sent = True
+
+                if paste_sent and not first_b_sent and b"println!(\"goodbye\");" in output:
+                    time.sleep(0.05)
+                    os.write(master_fd, b"\x02") # Ctrl+B
+                    first_b_sent = True
+
+                if first_b_sent and not second_b_sent and b"again to build" in output:
+                    require_unchanged(target) # target must NOT be modified after single Ctrl+B
+                    time.sleep(0.05)
+                    os.write(master_fd, b"\x02") # 2nd Ctrl+B fires build
+                    second_b_sent = True
+
+                waited_pid, status = os.waitpid(pid, os.WNOHANG)
+                if waited_pid == pid:
+                    child_status = status
+                    break
+
+            if child_status is None:
+                os.kill(pid, 9)
+                _, child_status = os.waitpid(pid, 0)
+                raise AssertionError("CLI mode did not exit within 10 seconds")
+        finally:
+            stty_after = get_stty(master_fd)
+            os.close(master_fd)
+
+        require(stty_after == stty_before, f"terminal state not restored: before={stty_before} after={stty_after}")
+        require(os.WIFEXITED(child_status), f"child did not exit normally: {child_status}")
+        exit_code = os.WEXITSTATUS(child_status)
+        require(exit_code == 0, f"expected apply exit 0, got {exit_code}")
+        expected = ORIGINAL.replace('println!("hello");', 'println!("goodbye");')
+        require(target.read_text() == expected, f"target content mismatch: {target.read_text()!r}")
+
+
+def test_mode_stale_file_stays_open_and_recovers():
+    with tempfile.TemporaryDirectory(prefix="cvb-surgery-mode-stale-") as tmp:
+        root, target = make_project(tmp)
+        state_home = pathlib.Path(tmp) / "state-home"
+        pid, master_fd = pty.fork()
+
+        if pid == 0:
+            try:
+                os.environ["XDG_STATE_HOME"] = str(state_home)
+                os.environ["CVB_TOKEN"] = "testtoken123"
+                os.execv(
+                    str(BINARY),
+                    [
+                        str(BINARY), "surgery",
+                        "--root", str(root),
+                    ],
+                )
+            except BaseException:
+                os._exit(127)
+
+        stty_before = get_stty(master_fd)
+        output = bytearray()
+        paste_sent = False
+        target_modified = False
+        arm_sent = False
+        fire_sent = False
+        abort_sent = False
+        child_status = None
+        deadline = time.monotonic() + 10
+
+        try:
+            while time.monotonic() < deadline:
+                ready, _, _ = select.select([master_fd], [], [], 0.1)
+                if ready:
+                    try:
+                        data = os.read(master_fd, 4096)
+                    except OSError as exc:
+                        if exc.errno == errno.EIO:
+                            data = b""
+                        else:
+                            raise
+                    if data:
+                        output.extend(data)
+
+                if not paste_sent and b"[CVB surgery]" in output:
+                    os.write(master_fd, b"\x1b[200~" + ENVELOPE + b"\x1b[201~")
+                    paste_sent = True
+
+                if paste_sent and not target_modified and b"println!(\"goodbye\");" in output:
+                    target.write_text("interfering concurrent edit\n")
+                    target_modified = True
+
+                if target_modified and not arm_sent:
+                    time.sleep(0.05)
+                    os.write(master_fd, b"\x02") # Ctrl+B (arm)
+                    arm_sent = True
+
+                if arm_sent and not fire_sent and b"again to build" in output:
+                    time.sleep(0.05)
+                    os.write(master_fd, b"\x02") # Ctrl+B (fire build -> encounters E-STALE)
+                    fire_sent = True
+
+                if fire_sent and not abort_sent and b"E-STALE" in output:
+                    # Mode must still be alive!
+                    time.sleep(0.05)
+                    os.write(master_fd, b"q") # Abort
+                    abort_sent = True
+
+                waited_pid, status = os.waitpid(pid, os.WNOHANG)
+                if waited_pid == pid:
+                    child_status = status
+                    break
+
+            if child_status is None:
+                os.kill(pid, 9)
+                _, child_status = os.waitpid(pid, 0)
+                raise AssertionError("CLI mode did not exit within 10 seconds")
+        finally:
+            stty_after = get_stty(master_fd)
+            os.close(master_fd)
+
+        require(stty_after == stty_before, f"terminal state not restored: before={stty_before} after={stty_after}")
+        require(os.WIFEXITED(child_status), f"child did not exit normally: {child_status}")
+        exit_code = os.WEXITSTATUS(child_status)
+        require(exit_code == 3, f"expected abort exit 3 after stale recovery, got {exit_code}")
+        require(target.read_text() == "interfering concurrent edit\n", "concurrent edit was overwritten")
+
+
 def main():
     build = subprocess.run(
         ["cargo", "build", "--quiet", "--bin", "cvb"],
@@ -588,6 +824,9 @@ def main():
         ("confirmed apply", test_confirmed_apply),
         ("precondition clean error", test_precondition_failure_reports_clean_e_precond),
         ("terminal restoration on SIGTERM", test_terminal_restoration_on_sigterm),
+        ("interactive mode paste and abort", test_mode_bracketed_paste_and_abort),
+        ("interactive mode two-press apply", test_mode_two_press_apply),
+        ("interactive mode stale file recovery", test_mode_stale_file_stays_open_and_recovers),
     ]
     failures = []
 

@@ -11,6 +11,7 @@ pub(crate) mod parse;
 pub(crate) mod plan;
 pub(crate) mod render;
 pub(crate) mod keys;
+pub(crate) mod mode;
 pub(crate) mod pager;
 pub(crate) mod token;
 #[allow(unused_imports)]
@@ -743,6 +744,282 @@ pub(crate) fn find_begin_token(input: &str) -> Option<&str> {
     None
 }
 
+fn enter_surgery_mode(root: std::path::PathBuf, session_token: String) -> ! {
+    let exit_code = run_surgery_mode(root, session_token);
+    std::process::exit(exit_code);
+}
+
+fn run_surgery_mode(root: std::path::PathBuf, session_token: String) -> i32 {
+    use std::io::Write as _;
+    use crate::surgery::keys::{Event, EventReader, SurgeryTerminalGuard};
+    use crate::surgery::mode::{step, step_dry_run_result, ModeAction, ModeState, CandidateData};
+    use crate::surgery::pager::DiffPager;
+    use crate::control::{ControlChannel, ControlMessage};
+
+    let _guard = match SurgeryTerminalGuard::enter() {
+        Ok(g) => g,
+        Err((msg, code)) => {
+            eprintln!("{msg}");
+            return code;
+        }
+    };
+
+    let tty = match std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty") {
+        Ok(file) => file,
+        Err(error) => {
+            eprintln!("CVB: E-NOTTY: interactive terminal confirmation requires /dev/tty: {error}");
+            return 2;
+        }
+    };
+
+    let mut control = ControlChannel::client_on_fd(3).ok();
+    if let Some(ref mut c) = control {
+        let _ = c.send(&ControlMessage::SurgeryBegin {
+            token: session_token.clone(),
+        });
+    }
+
+    let mut reader = EventReader::new(tty);
+    let mut state = ModeState::Idle;
+    let mut held_plan: Option<Plan> = None;
+    let mut held_envelope: Option<Envelope> = None;
+
+    eprint!("\r\x1b[2K[CVB surgery] ^C cancel  ^V paste  ^B build\r\n");
+    let _ = std::io::stderr().flush();
+
+    loop {
+        let event = match reader.next_event() {
+            Ok(ev) => ev,
+            Err(err) => {
+                eprintln!("CVB: error reading terminal event: {err}");
+                if let Some(ref mut c) = control {
+                    let _ = c.send(&ControlMessage::SurgeryEnd {
+                        status: 1,
+                        outcome: String::new(),
+                    });
+                }
+                return 3;
+            }
+        };
+
+        let now = std::time::Instant::now();
+        let (next_state, actions) = step(state, event, now, &session_token);
+        state = next_state;
+
+        let mut pending_actions = actions;
+        while !pending_actions.is_empty() {
+            let action = pending_actions.remove(0);
+            match action {
+                ModeAction::ReadClipboard => {
+                    match crate::clipboard::read_from_clipboard() {
+                        Ok(bytes) => match std::str::from_utf8(&bytes) {
+                            Ok(text) => {
+                                let (s, acts) = step(state, Event::Paste(text.to_string()), std::time::Instant::now(), &session_token);
+                                state = s;
+                                pending_actions.extend(acts);
+                            }
+                            Err(err) => {
+                                eprintln!("\r\x1b[2KCVB: clipboard content is not valid UTF-8: {err}");
+                            }
+                        },
+                        Err(err) => {
+                            eprintln!("\r\x1b[2KCVB: unable to read clipboard: {err}");
+                        }
+                    }
+                }
+                ModeAction::IgnoreNonEnvelope { message } => {
+                    eprintln!("\r\x1b[2K{message}");
+                    eprint!("\r\x1b[2K[^C cancel  ^V paste  ^B build] ");
+                    let _ = std::io::stderr().flush();
+                }
+                ModeAction::RunDryRun(payload) => {
+                    held_plan = None;
+                    held_envelope = None;
+
+                    match parse_load_plan(&root, &payload) {
+                        Ok((envelope, plan)) => {
+                            let diff = render_plan_diff(&plan, RenderOptions { color: false });
+                            let full_diff = format!(
+                                "CVB surgery candidate id={} files={}\n{}",
+                                envelope.id,
+                                plan.files.len(),
+                                diff
+                            );
+                            eprintln!("\r\x1b[2K{full_diff}");
+
+                            let limit = crate::clipboard::configured_copy_limit();
+                            match DiffPager::new(&full_diff, limit) {
+                                Ok(pager) => {
+                                    let candidate = CandidateData {
+                                        id: envelope.id.clone(),
+                                        files_count: plan.files.len(),
+                                        diff: full_diff,
+                                        pager,
+                                    };
+                                    held_plan = Some(plan);
+                                    held_envelope = Some(envelope);
+                                    let (s, acts) = step_dry_run_result(Ok(candidate));
+                                    state = s;
+                                    pending_actions.extend(acts);
+                                }
+                                Err(err) => {
+                                    eprintln!("\r\x1b[2K{err}");
+                                    let (s, acts) = step_dry_run_result(Err(err));
+                                    state = s;
+                                    pending_actions.extend(acts);
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            eprintln!("\r\x1b[2K{err}");
+                            let (s, acts) = step_dry_run_result(Err(err.to_string()));
+                            state = s;
+                            pending_actions.extend(acts);
+                        }
+                    }
+                }
+                ModeAction::ArmBuild => {
+                    eprint!("\r\x1b[2K[^B again to build, any other key disarms] ");
+                    let _ = std::io::stderr().flush();
+                }
+                ModeAction::FireBuild => {
+                    let plan = match held_plan.take() {
+                        Some(p) => p,
+                        None => {
+                            eprintln!("\r\x1b[2KCVB: no candidate plan available to build");
+                            state = ModeState::Idle;
+                            continue;
+                        }
+                    };
+                    let envelope = match held_envelope.take() {
+                        Some(e) => e,
+                        None => {
+                            eprintln!("\r\x1b[2KCVB: no candidate envelope available to build");
+                            state = ModeState::Idle;
+                            continue;
+                        }
+                    };
+
+                    let state_base = match resolve_state_dir() {
+                        Ok(p) => p,
+                        Err(e) => {
+                            eprintln!("\r\x1b[2K{e}");
+                            if let Some(ref mut c) = control {
+                                let _ = c.send(&ControlMessage::SurgeryEnd { status: 1, outcome: String::new() });
+                            }
+                            return SurgeryExitStatus::RejectedBeforeCommit.code();
+                        }
+                    };
+
+                    let project_state = match init_project_state(&state_base, &root) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            eprintln!("\r\x1b[2K{e}");
+                            if let Some(ref mut c) = control {
+                                let _ = c.send(&ControlMessage::SurgeryEnd { status: 1, outcome: String::new() });
+                            }
+                            return SurgeryExitStatus::RejectedBeforeCommit.code();
+                        }
+                    };
+
+                    match apply_plan(&project_state, &plan) {
+                        Ok(_) => {
+                            let outcome = format!(
+                                "CVB surgery APPLIED id={} files={}\n",
+                                envelope.id,
+                                plan.files.len()
+                            );
+                            if let Some(ref mut c) = control {
+                                let _ = c.send(&ControlMessage::SurgeryEnd {
+                                    status: 0,
+                                    outcome: outcome.clone(),
+                                });
+                            }
+                            let _ = crate::clipboard::copy_to_clipboard(&crate::clipboard::ClipboardBuffer::new(outcome.clone().into_bytes()));
+                            eprint!("\r\x1b[2K{outcome}");
+                            return SurgeryExitStatus::Applied.code();
+                        }
+                        Err(error) => {
+                            let is_stale = match &error {
+                                ApplyError::Stale { .. } => true,
+                                ApplyError::CommitFailed(report) if report.message.contains("E-STALE") => true,
+                                _ => false,
+                            };
+
+                            if is_stale {
+                                let error_text = error.to_string();
+                                if let Some(ref mut c) = control {
+                                    let _ = c.send(&ControlMessage::ClipboardWrite {
+                                        text: error_text.clone(),
+                                    });
+                                }
+                                let _ = crate::clipboard::copy_to_clipboard(&crate::clipboard::ClipboardBuffer::new(error_text.into_bytes()));
+                                eprintln!("\r\x1b[2K{error}");
+                                state = ModeState::Idle;
+                                held_plan = None;
+                                held_envelope = None;
+                                eprint!("\r\x1b[2K[^C cancel  ^V paste  ^B build] ");
+                                let _ = std::io::stderr().flush();
+                            } else {
+                                let report = error.to_string();
+                                if let Some(ref mut c) = control {
+                                    let _ = c.send(&ControlMessage::SurgeryEnd { status: 1, outcome: String::new() });
+                                }
+                                let _ = crate::clipboard::copy_to_clipboard(&crate::clipboard::ClipboardBuffer::new(report.into_bytes()));
+                                eprintln!("\r\x1b[2K{error}");
+                                return error.exit_status().code();
+                            }
+                        }
+                    }
+                }
+                ModeAction::Disarm => {
+                    eprint!("\r\x1b[2K[^C cancel  ^V paste  ^B build] ");
+                    let _ = std::io::stderr().flush();
+                }
+                ModeAction::NothingToBuild => {
+                    eprint!("\r\x1b[2Knothing to build\r\n[^C cancel  ^V paste  ^B build] ");
+                    let _ = std::io::stderr().flush();
+                }
+                ModeAction::UpdatePagerChunk { chunk, status_line } => {
+                    if let Some(ref mut c) = control {
+                        let _ = c.send(&ControlMessage::ClipboardWrite {
+                            text: chunk.clone(),
+                        });
+                    }
+                    let _ = crate::clipboard::copy_to_clipboard(&crate::clipboard::ClipboardBuffer::new(chunk.into_bytes()));
+
+                    if let Some(status) = status_line {
+                        eprint!("\r\x1b[2K[^C cancel  ^V paste  ^B build] {status} ");
+                    } else {
+                        eprint!("\r\x1b[2K[^C cancel  ^V paste  ^B build] ");
+                    }
+                    let _ = std::io::stderr().flush();
+                }
+                ModeAction::ReportDryRunError(err) => {
+                    if let Some(ref mut c) = control {
+                        let _ = c.send(&ControlMessage::ClipboardWrite {
+                            text: err.clone(),
+                        });
+                    }
+                    let _ = crate::clipboard::copy_to_clipboard(&crate::clipboard::ClipboardBuffer::new(err.into_bytes()));
+                    eprint!("\r\x1b[2K[^C cancel  ^V paste  ^B build] ");
+                    let _ = std::io::stderr().flush();
+                }
+                ModeAction::Abort { outcome } => {
+                    if let Some(ref mut c) = control {
+                        let _ = c.send(&ControlMessage::SurgeryEnd {
+                            status: 1,
+                            outcome: String::new(),
+                        });
+                    }
+                    let _ = crate::clipboard::copy_to_clipboard(&crate::clipboard::ClipboardBuffer::new(outcome.into_bytes()));
+                    return SurgeryExitStatus::UserDeclined.code();
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn verify_envelope_token(input: &str, session_token: &str) -> Result<(), String> {
     if let Some(token) = find_begin_token(input) {
         if token != session_token {
@@ -798,6 +1075,10 @@ pub(crate) fn run(
             }
         },
     };
+
+    if !stdin && !dry_run {
+        enter_surgery_mode(root, session_token);
+    }
 
     let input = match read_input(stdin) {
         Ok(input) => input,
