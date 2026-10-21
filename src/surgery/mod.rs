@@ -713,10 +713,15 @@ fn run_surgery_mode(root: std::path::PathBuf, session_token: String) -> i32 {
             Ok(ev) => ev,
             Err(err) => {
                 eprintln!("CVB: error reading terminal event: {err}");
-                let _ = control.send(&ControlMessage::SurgeryEnd {
+                if let Err(send_error) = control.send(&ControlMessage::SurgeryEnd {
                     status: 1,
                     outcome: String::new(),
-                });
+                }) {
+                    eprintln!(
+                        "CVB: control channel failed while ending surgery after terminal-event read error: {send_error}"
+                    );
+                    return 2;
+                }
                 return 3;
             }
         };
