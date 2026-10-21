@@ -1249,6 +1249,19 @@ pub(crate) fn run(
     let state = match init_project_state(&state_base, &root) {
         Ok(state) => state,
         Err(error) => {
+            if let Some(ref mut c) = control {
+                if let Err(send_error) =
+                    c.send(&crate::control::ControlMessage::SurgeryEnd {
+                        status: 1,
+                        outcome: String::new(),
+                    })
+                {
+                    eprintln!(
+                        "{error}; additionally failed to report surgery cleanup: {send_error}"
+                    );
+                    std::process::exit(2);
+                }
+            }
             eprintln!("{error}");
             std::process::exit(SurgeryExitStatus::RejectedBeforeCommit.code());
         }
