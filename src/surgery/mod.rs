@@ -1239,10 +1239,15 @@ pub(crate) fn run(
                     envelope.id,
                     plan.files.len()
                 );
-                let _ = c.send(&crate::control::ControlMessage::SurgeryEnd {
-                    status: 0,
-                    outcome,
-                });
+                if let Err(send_error) =
+                    c.send(&crate::control::ControlMessage::SurgeryEnd {
+                        status: 0,
+                        outcome,
+                    })
+                {
+                    eprintln!("CVB: failed to report applied surgery completion: {send_error}");
+                    std::process::exit(2);
+                }
             }
             std::process::exit(SurgeryExitStatus::Applied.code());
         }
