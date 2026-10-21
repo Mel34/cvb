@@ -1157,9 +1157,14 @@ pub(crate) fn run(
             eprintln!("CVB: failed to report surgery start: {send_error}");
             std::process::exit(2);
         }
-        let _ = c.send(&crate::control::ControlMessage::ClipboardWrite {
-            text: diff.clone(),
-        });
+        if let Err(send_error) =
+            c.send(&crate::control::ControlMessage::ClipboardWrite {
+                text: diff.clone(),
+            })
+        {
+            eprintln!("CVB: failed to send surgery diff to clipboard bridge: {send_error}");
+            std::process::exit(2);
+        }
     }
     print!("{diff}");
 
