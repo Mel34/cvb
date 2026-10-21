@@ -54,6 +54,35 @@ impl ControlChannel {
         &self.fd
     }
 
+    pub fn is_control_fd_socket(raw_fd: std::os::fd::RawFd) -> bool {
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        let res = unsafe { libc::fstat(raw_fd, stat.as_mut_ptr()) };
+        if res != 0 {
+            return false;
+        }
+        let stat = unsafe { stat.assume_init() };
+        (stat.st_mode & libc::S_IFMT) == libc::S_IFSOCK
+    }
+
+    pub fn client_on_fd(raw_fd: std::os::fd::RawFd) -> Result<Self, String> {
+        use std::os::fd::FromRawFd;
+
+        if !Self::is_control_fd_socket(raw_fd) {
+            return Err(format!("CVB: descriptor {raw_fd} is not a valid control socket"));
+        }
+
+        let dup_fd = unsafe { libc::dup(raw_fd) };
+        if dup_fd == -1 {
+            return Err(format!(
+                "CVB: unable to duplicate control descriptor {raw_fd}: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        let owned = unsafe { OwnedFd::from_raw_fd(dup_fd) };
+        Ok(Self::new(owned))
+    }
+
     pub fn send(&self, message: &ControlMessage) -> Result<(), String> {
         let payload = encode(message)?;
         let length = (payload.len() as u32).to_be_bytes();
@@ -572,5 +601,40 @@ mod tests {
         let payload = encode(&message).unwrap();
 
         assert_eq!(decode(&payload).unwrap(), message);
+    }
+
+    #[test]
+    fn verifies_socket_descriptor() {
+        use std::os::fd::AsRawFd;
+
+        let mut fds = [0; 2];
+        let res = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+        assert_eq!(res, 0);
+
+        assert!(ControlChannel::is_control_fd_socket(fds[0]));
+        assert!(ControlChannel::is_control_fd_socket(fds[1]));
+
+        let client = ControlChannel::client_on_fd(fds[0]).unwrap();
+        assert!(ControlChannel::is_control_fd_socket(client.fd().as_raw_fd()));
+
+        unsafe {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+
+        assert!(!ControlChannel::is_control_fd_socket(fds[0]));
+        assert!(!ControlChannel::is_control_fd_socket(-1));
+        assert!(ControlChannel::client_on_fd(-1).is_err());
+    }
+
+    #[test]
+    fn rejects_non_socket_descriptor() {
+        use nix::unistd::pipe;
+        use std::os::fd::AsRawFd;
+
+        let (read_end, write_end) = pipe().unwrap();
+        assert!(!ControlChannel::is_control_fd_socket(read_end.as_raw_fd()));
+        assert!(!ControlChannel::is_control_fd_socket(write_end.as_raw_fd()));
+        assert!(ControlChannel::client_on_fd(read_end.as_raw_fd()).is_err());
     }
 }

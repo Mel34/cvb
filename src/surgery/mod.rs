@@ -11,6 +11,7 @@ pub(crate) mod parse;
 pub(crate) mod plan;
 pub(crate) mod render;
 pub(crate) mod keys;
+pub(crate) mod pager;
 pub(crate) mod token;
 #[allow(unused_imports)]
 pub(crate) use apply::*;
@@ -837,6 +838,15 @@ pub(crate) fn run(
     }
 
     let diff = render_plan_diff(&plan, RenderOptions { color: false });
+    let mut control = crate::control::ControlChannel::client_on_fd(3).ok();
+    if let Some(ref mut c) = control {
+        let _ = c.send(&crate::control::ControlMessage::SurgeryBegin {
+            token: session_token.clone(),
+        });
+        let _ = c.send(&crate::control::ControlMessage::ClipboardWrite {
+            text: diff.clone(),
+        });
+    }
     print!("{diff}");
 
     use std::io::Write as _;
@@ -854,10 +864,22 @@ pub(crate) fn run(
     };
 
     if dry_run {
+        if let Some(ref mut c) = control {
+            let _ = c.send(&crate::control::ControlMessage::SurgeryEnd {
+                status: 1,
+                outcome: String::new(),
+            });
+        }
         std::process::exit(0);
     }
 
     if confirmation == ConfirmResult::Declined {
+        if let Some(ref mut c) = control {
+            let _ = c.send(&crate::control::ControlMessage::SurgeryEnd {
+                status: 1,
+                outcome: String::new(),
+            });
+        }
         std::process::exit(SurgeryExitStatus::UserDeclined.code());
     }
 
@@ -878,9 +900,28 @@ pub(crate) fn run(
     };
 
     match apply_plan(&state, &plan) {
-        Ok(_) => std::process::exit(SurgeryExitStatus::Applied.code()),
+        Ok(_) => {
+            if let Some(ref mut c) = control {
+                let outcome = format!(
+                    "CVB surgery APPLIED id={} files={}\n",
+                    envelope.id,
+                    plan.files.len()
+                );
+                let _ = c.send(&crate::control::ControlMessage::SurgeryEnd {
+                    status: 0,
+                    outcome,
+                });
+            }
+            std::process::exit(SurgeryExitStatus::Applied.code());
+        }
         Err(error) => {
             let status = error.exit_status().code();
+            if let Some(ref mut c) = control {
+                let _ = c.send(&crate::control::ControlMessage::SurgeryEnd {
+                    status: 1,
+                    outcome: String::new(),
+                });
+            }
             eprintln!("{error}");
             std::process::exit(status);
         }

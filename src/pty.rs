@@ -618,6 +618,19 @@ extern "C" fn handle_sigwinch(_: libc::c_int) {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) enum SurgeryProxyState {
+    #[default]
+    Ordinary,
+    Active {
+        token: String,
+    },
+    Completed {
+        outcome: String,
+    },
+    Aborted,
+}
+
 pub fn run(rcfile: &Path) -> Result<i32, String> {
     let stdin = io::stdin();
 
@@ -894,6 +907,7 @@ fn proxy(
     // Set by the SKIP marker: the finished command line consisted only of
     // commands from the skip list. Consumed by the next END marker.
     let mut skip_requested = false;
+    let mut surgery_state = SurgeryProxyState::Ordinary;
     debug_log("proxy_start", &format!("pid={}", std::process::id()));
 
     loop {
@@ -1009,7 +1023,7 @@ fn proxy(
             for event in events {
                 match event {
                     MarkerEvent::Data(output) => {
-                        if capture.capturing {
+                        if capture.capturing && surgery_state == SurgeryProxyState::Ordinary {
                             transcript.push_terminal(&output);
                         }
                         capture.push(&output);
@@ -1036,6 +1050,9 @@ fn proxy(
                     MarkerEvent::Start => {
                         let capturing_before = capture.capturing;
                         skip_requested = false;
+                        if !matches!(surgery_state, SurgeryProxyState::Active { .. }) {
+                            surgery_state = SurgeryProxyState::Ordinary;
+                        }
                         capture.start();
 
                         debug_log(
@@ -1063,6 +1080,22 @@ fn proxy(
                         }
 
                         let _captured = capture.end();
+
+                        match std::mem::replace(&mut surgery_state, SurgeryProxyState::Ordinary) {
+                            SurgeryProxyState::Completed { outcome } => {
+                                debug_log("surgery_dispatch_outcome", &outcome);
+                                let buffer = crate::clipboard::ClipboardBuffer::new(outcome.into_bytes());
+                                crate::clipboard::copy_to_clipboard(&buffer)?;
+                                transcript = Transcript::default();
+                                continue;
+                            }
+                            SurgeryProxyState::Active { .. } | SurgeryProxyState::Aborted => {
+                                debug_log("surgery_aborted_or_abrupt_end", "suppressing clipboard update");
+                                transcript = Transcript::default();
+                                continue;
+                            }
+                            SurgeryProxyState::Ordinary => {}
+                        }
 
                         // A skip-listed command line with no visible output
                         // leaves the clipboard untouched. Any output, such as
@@ -1111,7 +1144,7 @@ fn proxy(
                 | nix::poll::PollFlags::POLLERR,
         ) {
             for message in control.receive()? {
-                handle_control_message(message, control, &mut transcript)?;
+                handle_control_message(message, control, &mut transcript, &mut surgery_state)?;
             }
         }
     }
@@ -1123,7 +1156,27 @@ fn handle_control_message(
     message: ControlMessage,
     control: &ControlChannel,
     transcript: &mut Transcript,
+    surgery_state: &mut SurgeryProxyState,
 ) -> Result<(), String> {
+    handle_control_message_with(
+        message,
+        control,
+        transcript,
+        surgery_state,
+        crate::clipboard::copy_to_clipboard,
+    )
+}
+
+fn handle_control_message_with<F>(
+    message: ControlMessage,
+    control: &ControlChannel,
+    transcript: &mut Transcript,
+    surgery_state: &mut SurgeryProxyState,
+    mut copy: F,
+) -> Result<(), String>
+where
+    F: FnMut(&crate::clipboard::ClipboardBuffer) -> Result<(), String>,
+{
     match message {
         ControlMessage::Exit => {}
 
@@ -1163,7 +1216,27 @@ fn handle_control_message(
         }
 
         ControlMessage::TargetResponse { .. } => {}
-        _ => {}
+
+        ControlMessage::SurgeryBegin { token } => {
+            *surgery_state = SurgeryProxyState::Active { token };
+            *transcript = Transcript::default();
+        }
+
+        ControlMessage::ClipboardWrite { text } => {
+            if matches!(surgery_state, SurgeryProxyState::Active { .. }) {
+                let buffer = crate::clipboard::ClipboardBuffer::new(text.into_bytes());
+                copy(&buffer)?;
+            }
+        }
+
+        ControlMessage::SurgeryEnd { status, outcome } => {
+            if status == 0 {
+                *surgery_state = SurgeryProxyState::Completed { outcome };
+            } else {
+                *surgery_state = SurgeryProxyState::Aborted;
+            }
+            *transcript = Transcript::default();
+        }
     }
 
     Ok(())
@@ -1326,5 +1399,115 @@ mod tests {
         terminal.process(b"ONE\r\nTWO\r\nTHREE\r\nFOUR\r\nFIVE");
 
         assert_eq!(screen_viewport_to_text(&mut terminal), "THREE\nFOUR\nFIVE");
+    }
+
+    #[test]
+    fn surgery_begin_sets_active_state_and_clears_transcript() {
+        let (parent, _child) = super::control_socketpair().unwrap();
+        let control = super::ControlChannel::new(parent);
+        let mut transcript = super::Transcript::default();
+        transcript.push_terminal(b"dirty modal terminal output");
+        let mut state = super::SurgeryProxyState::Ordinary;
+
+        super::handle_control_message_with(
+            super::ControlMessage::SurgeryBegin {
+                token: "token123".to_string(),
+            },
+            &control,
+            &mut transcript,
+            &mut state,
+            |_| Ok(()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            state,
+            super::SurgeryProxyState::Active {
+                token: "token123".to_string()
+            }
+        );
+        assert!(transcript.segments.is_empty());
+    }
+
+    #[test]
+    fn clipboard_write_in_active_state_copies_payload() {
+        let (parent, _child) = super::control_socketpair().unwrap();
+        let control = super::ControlChannel::new(parent);
+        let mut transcript = super::Transcript::default();
+        let mut state = super::SurgeryProxyState::Active {
+            token: "tok".to_string(),
+        };
+        let mut copied = Vec::new();
+
+        super::handle_control_message_with(
+            super::ControlMessage::ClipboardWrite {
+                text: "diff candidate".to_string(),
+            },
+            &control,
+            &mut transcript,
+            &mut state,
+            |buffer| {
+                copied.push(buffer.as_bytes().to_vec());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(copied, vec![b"diff candidate".to_vec()]);
+    }
+
+    #[test]
+    fn surgery_end_completed_sets_completed_state() {
+        let (parent, _child) = super::control_socketpair().unwrap();
+        let control = super::ControlChannel::new(parent);
+        let mut transcript = super::Transcript::default();
+        let mut state = super::SurgeryProxyState::Active {
+            token: "tok".to_string(),
+        };
+
+        super::handle_control_message_with(
+            super::ControlMessage::SurgeryEnd {
+                status: 0,
+                outcome: "CVB surgery APPLIED id=xyz files=2\n".to_string(),
+            },
+            &control,
+            &mut transcript,
+            &mut state,
+            |_| Ok(()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            state,
+            super::SurgeryProxyState::Completed {
+                outcome: "CVB surgery APPLIED id=xyz files=2\n".to_string()
+            }
+        );
+        assert!(transcript.segments.is_empty());
+    }
+
+    #[test]
+    fn surgery_end_aborted_sets_aborted_state() {
+        let (parent, _child) = super::control_socketpair().unwrap();
+        let control = super::ControlChannel::new(parent);
+        let mut transcript = super::Transcript::default();
+        let mut state = super::SurgeryProxyState::Active {
+            token: "tok".to_string(),
+        };
+
+        super::handle_control_message_with(
+            super::ControlMessage::SurgeryEnd {
+                status: 1,
+                outcome: String::new(),
+            },
+            &control,
+            &mut transcript,
+            &mut state,
+            |_| Ok(()),
+        )
+        .unwrap();
+
+        assert_eq!(state, super::SurgeryProxyState::Aborted);
+        assert!(transcript.segments.is_empty());
     }
 }

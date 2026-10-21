@@ -139,7 +139,7 @@ fn split_chunk_payloads(
     Ok(chunks)
 }
 
-fn chunk_messages(text: &str, limit: usize) -> Result<Vec<String>, String> {
+pub(crate) fn chunk_messages(text: &str, limit: usize) -> Result<Vec<String>, String> {
     if text.chars().count() <= limit {
         return Ok(vec![text.to_string()]);
     }
@@ -365,7 +365,7 @@ fn progress_bar(index: usize, total: usize) -> String {
         .collect()
 }
 
-fn chunk_status_line(index: usize, total: usize) -> String {
+pub(crate) fn chunk_status_line(index: usize, total: usize) -> String {
     let bar = progress_bar(index, total);
     let number = index + 1;
 
