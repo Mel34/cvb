@@ -786,7 +786,12 @@ fn run_pty(rcfile: &Path) -> Result<i32, String> {
                     .map_err(|error| format!("CVB: unable to restore SIGWINCH handler: {error}"))?;
             }
 
-            result?;
+            if let Err(error) = result {
+                return match terminate_and_reap_child(child) {
+                    Ok(()) => Err(error),
+                    Err(cleanup_error) => Err(format!("{error}; additionally, {cleanup_error}")),
+                };
+            }
 
             let status = waitpid(child, None)
                 .map_err(|error| format!("CVB: unable to wait for child: {error}"))?;
@@ -1380,9 +1385,53 @@ fn status_to_code(status: WaitStatus) -> i32 {
     }
 }
 
+fn terminate_and_reap_child(child: Pid) -> Result<(), String> {
+    match signal::kill(child, Signal::SIGKILL) {
+        Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
+        Err(error) => {
+            return Err(format!(
+                "CVB: unable to terminate child after proxy failure: {error}"
+            ));
+        }
+    }
+
+    loop {
+        match waitpid(child, None) {
+            Ok(_) | Err(nix::errno::Errno::ECHILD) => return Ok(()),
+            Err(nix::errno::Errno::EINTR) => continue,
+            Err(error) => {
+                return Err(format!(
+                    "CVB: unable to reap child after proxy failure: {error}"
+                ));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{screen_to_text, screen_viewport_to_text};
+
+    #[test]
+    fn proxy_failure_cleanup_terminates_and_reaps_child() {
+        use nix::errno::Errno;
+        use nix::sys::wait::{waitpid, WaitPidFlag};
+        use nix::unistd::{fork, ForkResult};
+
+        let child = match unsafe { fork() }.expect("fork") {
+            ForkResult::Parent { child } => child,
+            ForkResult::Child => loop {
+                unsafe { libc::pause(); }
+            },
+        };
+
+        super::terminate_and_reap_child(child).expect("cleanup");
+
+        assert!(matches!(
+            waitpid(child, Some(WaitPidFlag::WNOHANG)),
+            Err(Errno::ECHILD)
+        ));
+    }
 
     #[test]
     fn renders_plain_multiline_output() {
