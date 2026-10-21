@@ -116,7 +116,15 @@ impl ControlChannel {
 
         loop {
             match read(self.fd.as_fd(), &mut buffer) {
-                Ok(0) => break,
+                Ok(0) => {
+                    if !self.receive_buffer.is_empty() {
+                        return Err(
+                            "CVB: control channel closed with an incomplete frame".to_string(),
+                        );
+                    }
+
+                    break;
+                }
                 Ok(count) => {
                     self.receive_buffer.extend_from_slice(&buffer[..count]);
 
@@ -539,6 +547,43 @@ mod tests {
         let messages = decode_frames(&mut buffer).unwrap();
 
         assert_eq!(messages, vec![ControlMessage::Exit]);
+    }
+    #[test]
+    fn receive_rejects_eof_with_incomplete_frame() {
+        use std::os::fd::FromRawFd;
+
+        let mut fds = [0; 2];
+        let result = unsafe {
+            libc::socketpair(
+                libc::AF_UNIX,
+                libc::SOCK_STREAM,
+                0,
+                fds.as_mut_ptr(),
+            )
+        };
+        assert_eq!(result, 0, "socketpair must succeed");
+
+        let mut channel =
+            ControlChannel::new(unsafe { OwnedFd::from_raw_fd(fds[0]) });
+        let peer = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+
+        // Declare a 5000-byte payload, but send only 4092 bytes of it.
+        // This fills receive()'s 4096-byte buffer and forces another read,
+        // which observes EOF while the frame is still incomplete.
+        let mut frame = Vec::with_capacity(4096);
+        frame.extend_from_slice(&5000_u32.to_be_bytes());
+        frame.resize(4096, 0);
+
+        let written = nix::unistd::write(peer.as_fd(), &frame).unwrap();
+        assert_eq!(written, frame.len(), "the complete test fragment must be written");
+        drop(peer);
+
+        let result = channel.receive();
+
+        assert!(
+            result.is_err(),
+            "EOF with an incomplete control frame must be reported"
+        );
     }
 
     #[test]
