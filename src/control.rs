@@ -587,6 +587,31 @@ mod tests {
     }
 
     #[test]
+    fn receive_accepts_clean_eof() {
+        use std::os::fd::FromRawFd;
+
+        let mut fds = [0; 2];
+        let result = unsafe {
+            libc::socketpair(
+                libc::AF_UNIX,
+                libc::SOCK_STREAM,
+                0,
+                fds.as_mut_ptr(),
+            )
+        };
+        assert_eq!(result, 0, "socketpair must succeed");
+
+        let mut channel = ControlChannel::new(unsafe { OwnedFd::from_raw_fd(fds[0]) });
+        let peer = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+        drop(peer);
+
+        assert!(
+            channel.receive().unwrap().is_empty(),
+            "clean EOF with no pending frame must return no messages"
+        );
+    }
+
+    #[test]
     fn decodes_frame_at_permitted_4mib_limit() {
         const FOUR_MIB: usize = 4 * 1024 * 1024;
         let message_len = FOUR_MIB - 17; // TargetResponse header overhead is 17 bytes
