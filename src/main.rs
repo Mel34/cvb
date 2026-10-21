@@ -94,25 +94,7 @@ A capture session ends with:
             println!("{token}");
             std::process::exit(0);
         }
-        cli::Command::Spec => {
-            let token = match std::env::var("CVB_TOKEN") {
-                Ok(token) if !token.trim().is_empty() => token,
-                _ => {
-                    eprintln!("CVB: E-NOSESSION: no active surgery session (CVB_TOKEN not set).");
-                    std::process::exit(2);
-                }
-            };
-            match context::get_spec_text(&token) {
-                Ok(text) => {
-                    print!("{text}");
-                    std::process::exit(0);
-                }
-                Err(error) => {
-                    eprintln!("{error}");
-                    std::process::exit(2);
-                }
-            }
-        }
+        cli::Command::Spec => context::print_spec(),
         cli::Command::Context => {
             let token = match std::env::var("CVB_TOKEN") {
                 Ok(token) if !token.trim().is_empty() => token,
@@ -141,25 +123,6 @@ A capture session ends with:
             std::process::exit(pull::run(&args));
         }
         cli::Command::Surgery(args) => {
-            if args.spec {
-                let token = match std::env::var("CVB_TOKEN") {
-                    Ok(token) if !token.trim().is_empty() => token,
-                    _ => {
-                        eprintln!("CVB: E-NOSESSION: no active surgery session (CVB_TOKEN not set).");
-                        std::process::exit(2);
-                    }
-                };
-                match context::get_spec_text(&token) {
-                    Ok(text) => {
-                        print!("{text}");
-                        std::process::exit(0);
-                    }
-                    Err(error) => {
-                        eprintln!("{error}");
-                        std::process::exit(2);
-                    }
-                }
-            }
             surgery::run(args.dry_run, args.stdin, args.root, args.spec);
         }
         cli::Command::Target(args) => {

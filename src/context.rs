@@ -179,6 +179,27 @@ pub(crate) fn get_spec_text(token: &str) -> Result<String, String> {
     Ok(unindented)
 }
 
+/// Prints the surgery specification (Section 8) populated with the session token.
+pub(crate) fn print_spec() -> ! {
+    let token = match std::env::var("CVB_TOKEN") {
+        Ok(token) if !token.trim().is_empty() => token,
+        _ => {
+            eprintln!("CVB: E-NOSESSION: no active surgery session (CVB_TOKEN not set).");
+            std::process::exit(2);
+        }
+    };
+    match get_spec_text(&token) {
+        Ok(text) => {
+            print!("{text}");
+            std::process::exit(0);
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    }
+}
+
 fn load_manual(bash_source: &Path) -> Result<ClipboardBuffer, String> {
     let text = load_manual_text(Some(bash_source))?;
     Ok(ClipboardBuffer::new(text.into_bytes()))

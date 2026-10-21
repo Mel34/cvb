@@ -599,136 +599,6 @@ impl std::fmt::Display for PipelineError {
 
 impl std::error::Error for PipelineError {}
 
-/// Runs the surgery CLI pipeline.
-///
-pub(crate) fn spec_text(token: &str) -> String {
-    r#"CVB Surgery Language (CSL), protocol version 1
-
-USAGE
-  cvb surgery --spec       Print this specification with a fresh token.
-  cvb surgery              Read one envelope from the clipboard.
-  cvb surgery --stdin      Read one envelope from standard input.
-  cvb surgery --root PATH  Select the project root.
-  cvb surgery --dry-run    Validate and render the diff without applying it.
-
-TOKEN
-  Replace {TOKEN} below with the token printed for this specification.
-  Use that exact token on every control line in one envelope.
-
-ENVELOPE GRAMMAR
-  CVB::{TOKEN}::BEGIN v=1 id=UNIQUE_ID
-  CVB::{TOKEN}::FILE path=RELATIVE_PATH
-  CVB::{TOKEN}::OP replace lines=START-END
-  CVB::{TOKEN}::OLD [n=COUNT]
-  ...exact original lines...
-  CVB::{TOKEN}::NEW [n=COUNT]
-  ...replacement lines...
-  CVB::{TOKEN}::ENDOP
-  CVB::{TOKEN}::END ops=OPERATION_COUNT
-
-  Each operation belongs to a FILE section. Repeat OP blocks as needed.
-  Replace may replace one or more lines. OLD must match the target exactly.
-  delete uses OLD [n=COUNT] and the original lines, then ENDOP.
-  insert uses ANCHOR [n=COUNT] and the original anchor lines, then
-  NEW [n=COUNT] and the inserted lines, then ENDOP.
-  Every control line must use the same token.
-  Counts describe payload lines; do not include control lines.
-  Line counts (n=COUNT) on OLD, ANCHOR, and NEW are opt-in per block.
-  When n= is omitted, the block extends to the next CVB::{TOKEN}:: control line.
-  Always use n=COUNT on blocks that end with a trailing blank line, because
-  markdown code fences often drop trailing blank lines.
-  Ranges are 1-based, inclusive, and refer to the original file.
-  Even a single-line range uses START-END, for example lines=12-12.
-  Insert anchors also use ranges: after=20-20 or before=20-20.
-  Payload lines are literal file content, not CSL control lines.
-
-OPERATION FORMS
-  CVB::{TOKEN}::OP replace lines=START-END
-  CVB::{TOKEN}::OP delete lines=START-END
-  CVB::{TOKEN}::OP insert after=START-END
-  CVB::{TOKEN}::OP insert before=START-END
-
-EXAMPLE 8.1 — REPLACE
-  CVB::{TOKEN}::BEGIN v=1 id=example-replace
-  CVB::{TOKEN}::FILE path=src/example.rs
-  CVB::{TOKEN}::OP replace lines=2-2
-  CVB::{TOKEN}::OLD n=1
-  let answer = 41;
-  CVB::{TOKEN}::NEW n=1
-  let answer = 42;
-  CVB::{TOKEN}::ENDOP
-  CVB::{TOKEN}::END ops=1
-
-EXAMPLE 8.2 — DELETE
-  CVB::{TOKEN}::BEGIN v=1 id=example-delete
-  CVB::{TOKEN}::FILE path=src/example.rs
-  CVB::{TOKEN}::OP delete lines=4-4
-  CVB::{TOKEN}::OLD n=1
-  // remove this obsolete comment
-  CVB::{TOKEN}::ENDOP
-  CVB::{TOKEN}::END ops=1
-
-EXAMPLE 8.3 — INSERT
-  CVB::{TOKEN}::BEGIN v=1 id=example-insert
-  CVB::{TOKEN}::FILE path=src/example.rs
-  CVB::{TOKEN}::OP insert after=2-2
-  CVB::{TOKEN}::ANCHOR n=1
-  let answer = 42;
-  CVB::{TOKEN}::NEW n=1
-  println!("{answer}");
-  CVB::{TOKEN}::ENDOP
-  CVB::{TOKEN}::END ops=1
-
-VALIDATION AND SAFETY
-  Submit exactly ONE envelope per paste or --stdin invocation.
-  Multiple envelopes in one input are rejected. For separate changes,
-  submit separate invocations and use a new unique id for each envelope.
-  The id must be 1–64 ASCII letters, digits, '.', '_' or '-'.
-  Tokens are ASCII alphanumeric; the generated token is 16 characters.
-  Paths are project-root-relative and must identify existing eligible files.
-  Unsafe paths, symlink targets, and protected targets such as .git are rejected.
-  OLD and ANCHOR payloads must match the original file exactly.
-  All operation ranges refer to the original file, not intermediate edits.
-  Overlapping or conflicting edits are rejected.
-  No-op replacements and deletion of an entire file are rejected.
-  Insertions before the first line or after the last line are rejected;
-  use a replacement that includes the boundary line instead.
-  Replacement content must be non-empty.
-  Review the rendered diff and confirm before changes are applied.
-  --dry-run validates and renders without applying changes.
-
-LIMITS
-  Maximum envelope input: 3 MiB.
-  Maximum individual target file: 8 MiB.
-  Maximum aggregate target-file size: 32 MiB.
-  Maximum operations per envelope: 500.
-
-ERRORS
-  E-LIMIT   Input exceeds the size limit.
-  E-LOCK    Surgery lock could not be acquired.
-  E-NOTTY   Interactive confirmation requires /dev/tty.
-  E-REPLAY  This envelope id has already been applied to the project.
-  E-RECOVER An unfinished transaction requires recovery.
-  E-STALE   A target changed since the plan was created.
-  E-IO      An I/O error occurred while committing changes.
-
-  Parse and planning failures also report diagnostics; do not assume every
-  validation failure has a dedicated E- code. Fix the reported issue and
-  submit a corrected envelope with a unique id.
-
-WORKFLOW
-  1. Inspect the relevant source and construct one small envelope.
-  2. Use the fresh token consistently and verify every OLD/ANCHOR block.
-  3. Run cvb surgery --dry-run to inspect the proposed diff.
-  4. Apply only after reviewing the diff and confirming the prompt.
-  5. Send each subsequent envelope separately.
-"#.lines()
-        .map(|line| line.strip_prefix("  ").unwrap_or(line))
-        .collect::<Vec<_>>()
-        .join("\n")
-        .replace("{TOKEN}", token)
-}
-
 /// Planning and diff rendering happen before confirmation. Persistent project
 /// state is initialized only after the user confirms the proposed changes.
 pub(crate) fn find_begin_token(input: &str) -> Option<&str> {
@@ -1015,11 +885,12 @@ fn run_surgery_mode(root: std::path::PathBuf, session_token: String) -> i32 {
                     eprint!("\r\x1b[2K[^C cancel  ^V paste  ^B build] ");
                     let _ = std::io::stderr().flush();
                 }
-                ModeAction::Abort { .. } => {
+                ModeAction::Abort { outcome } => {
                     let _ = control.send(&ControlMessage::SurgeryEnd {
                         status: 1,
                         outcome: String::new(),
                     });
+                    eprint!("\r\x1b[2K{outcome}");
                     return SurgeryExitStatus::UserDeclined.code();
                 }
             }
@@ -1045,23 +916,7 @@ pub(crate) fn run(
     spec: bool,
 ) -> ! {
     if spec {
-        let session_token = match std::env::var("CVB_TOKEN") {
-            Ok(token) if !token.trim().is_empty() => token,
-            _ => {
-                eprintln!("CVB: E-NOSESSION: no active surgery session (CVB_TOKEN not set).");
-                std::process::exit(2);
-            }
-        };
-        match crate::context::get_spec_text(&session_token) {
-            Ok(text) => {
-                print!("{text}");
-                std::process::exit(0);
-            }
-            Err(error) => {
-                eprintln!("{error}");
-                std::process::exit(2);
-            }
-        }
+        crate::context::print_spec();
     }
 
     let session_token = match std::env::var("CVB_TOKEN") {
@@ -1146,6 +1001,12 @@ pub(crate) fn run(
     let confirmation = match prompt_confirmation(dry_run) {
         Ok(result) => result,
         Err((message, code)) => {
+            if let Some(ref mut c) = control {
+                let _ = c.send(&crate::control::ControlMessage::SurgeryEnd {
+                    status: 1,
+                    outcome: String::new(),
+                });
+            }
             eprintln!("{message}");
             std::process::exit(code);
         }
@@ -1255,47 +1116,6 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::PathBuf;
-
-    #[test]
-    fn spec_text_interpolates_token_and_documents_protocol_limits_and_errors() {
-        let token = "AbCd1234EfGh5678";
-        let spec = spec_text(token);
-
-        assert!(spec.lines().any(|line| line == format!("CVB::{token}::BEGIN v=1 id=example-replace")));
-        assert!(spec.lines().any(|line| line == format!("CVB::{token}::OP replace lines=2-2")));
-        assert!(!spec.lines().any(|line| line.starts_with("  CVB::")));
-
-        assert!(spec.contains("CVB Surgery Language (CSL), protocol version 1"));
-        assert!(spec.contains(&format!("CVB::{token}::BEGIN")));
-        assert!(spec.contains(&format!("CVB::{token}::OP replace lines=START-END")));
-        assert!(spec.contains(&format!("CVB::{token}::OP insert after=START-END")));
-        assert!(spec.contains(&format!("CVB::{token}::OP insert before=START-END")));
-
-        assert!(spec.contains("Maximum envelope input: 3 MiB."));
-        assert!(spec.contains("Maximum individual target file: 8 MiB."));
-        assert!(spec.contains("Maximum aggregate target-file size: 32 MiB."));
-        assert!(spec.contains("Maximum operations per envelope: 500."));
-
-        assert!(spec.contains("lines=12-12"));
-        assert!(spec.contains("after=20-20"));
-        assert!(spec.contains("before=20-20"));
-        assert!(spec.contains("E-LIMIT"));
-        assert!(spec.contains("E-LOCK"));
-        assert!(spec.contains("E-NOTTY"));
-        assert!(spec.contains("E-REPLAY"));
-        assert!(spec.contains("E-RECOVER"));
-        assert!(spec.contains("E-STALE"));
-        assert!(spec.contains("E-IO"));
-
-        assert!(spec.contains("EXAMPLE 8.1 — REPLACE"));
-        assert!(spec.contains("EXAMPLE 8.2 — DELETE"));
-        assert!(spec.contains("EXAMPLE 8.3 — INSERT"));
-        assert!(spec.contains("exactly ONE envelope per paste"));
-        assert!(spec.contains("Multiple envelopes in one input are rejected."));
-        assert!(spec.contains("--dry-run"));
-        assert!(spec.contains("opt-in per block"));
-        assert!(spec.contains("trailing blank line"));
-    }
 
     #[test]
     fn check_input_size_accepts_within_cap() {
