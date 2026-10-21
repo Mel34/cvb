@@ -1588,6 +1588,38 @@ mod tests {
     }
 
     #[test]
+    fn clipboard_write_failure_is_propagated_without_changing_surgery_state() {
+        let (parent, _child) = super::control_socketpair().unwrap();
+        let control = super::ControlChannel::new(parent);
+        let mut transcript = super::Transcript::default();
+        transcript.push_terminal(b"existing transcript");
+        let transcript_before = transcript.clone();
+        let mut state = super::SurgeryProxyState::Active {
+            token: "tok".to_string(),
+        };
+
+        let result = super::handle_control_message_with(
+            super::ControlMessage::ClipboardWrite {
+                text: "diff candidate".to_string(),
+            },
+            &control,
+            &mut transcript,
+            &mut state,
+            Some("tok"),
+            |_| Err("test clipboard failure".to_string()),
+        );
+
+        assert_eq!(result.unwrap_err(), "test clipboard failure");
+        assert_eq!(
+            state,
+            super::SurgeryProxyState::Active {
+                token: "tok".to_string(),
+            }
+        );
+        assert_eq!(transcript.segments, transcript_before.segments);
+    }
+
+    #[test]
     fn surgery_begin_rejects_mismatched_token() {
         let (parent, _child) = super::control_socketpair().unwrap();
         let control = super::ControlChannel::new(parent);
