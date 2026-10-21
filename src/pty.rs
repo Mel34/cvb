@@ -1025,8 +1025,8 @@ fn proxy(
                     MarkerEvent::Data(output) => {
                         if capture.capturing && surgery_state == SurgeryProxyState::Ordinary {
                             transcript.push_terminal(&output);
+                            capture.push(&output);
                         }
-                        capture.push(&output);
                     }
 
                     MarkerEvent::Pathop => {
@@ -1645,6 +1645,53 @@ mod tests {
         .unwrap();
 
         assert_eq!(state, super::SurgeryProxyState::Ordinary);
+        assert!(!transcript.segments.is_empty());
+    }
+
+    #[test]
+    fn terminal_capture_and_transcript_suppressed_when_not_ordinary() {
+        for state in [
+            super::SurgeryProxyState::Active {
+                token: "test-token".to_string(),
+            },
+            super::SurgeryProxyState::Completed {
+                outcome: "test-outcome".to_string(),
+            },
+            super::SurgeryProxyState::Aborted,
+        ] {
+            let mut capture = super::CaptureState::default();
+            capture.start();
+            let mut transcript = super::Transcript::default();
+
+            let sample_data = b"some modal surgery output";
+
+            if capture.capturing && state == super::SurgeryProxyState::Ordinary {
+                transcript.push_terminal(sample_data);
+                capture.push(sample_data);
+            }
+
+            assert!(
+                capture.end().is_empty(),
+                "capture must not accumulate data while in state {state:?}"
+            );
+            assert!(
+                transcript.segments.is_empty(),
+                "transcript must not accumulate data while in state {state:?}"
+            );
+        }
+
+        // Verify it still records normally when Ordinary
+        let mut capture = super::CaptureState::default();
+        capture.start();
+        let mut transcript = super::Transcript::default();
+        let sample_data = b"ls -la\n";
+
+        if capture.capturing && super::SurgeryProxyState::Ordinary == super::SurgeryProxyState::Ordinary {
+            transcript.push_terminal(sample_data);
+            capture.push(sample_data);
+        }
+
+        assert_eq!(capture.end().as_slice(), sample_data);
         assert!(!transcript.segments.is_empty());
     }
 
