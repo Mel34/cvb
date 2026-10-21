@@ -978,6 +978,19 @@ fn proxy(
             .revents()
             .unwrap_or(nix::poll::PollFlags::empty());
 
+        for (name, events) in [
+            ("stdin", stdin_events),
+            ("PTY master", master_events),
+            ("signal pipe", signal_events),
+            ("control socket", control_events),
+            ("keyboard monitor", keyboard_events),
+            ("keybind watcher", keybind_events),
+        ] {
+            if events.contains(nix::poll::PollFlags::POLLNVAL) {
+                return Err(format!("CVB: {name} descriptor became invalid (POLLNVAL)"));
+            }
+        }
+
         if keybind_events.contains(nix::poll::PollFlags::POLLIN)
             && keybind_watcher.changed()?
         {
@@ -987,8 +1000,29 @@ fn proxy(
             }
         }
 
+        if keybind_events.intersects(
+            nix::poll::PollFlags::POLLERR | nix::poll::PollFlags::POLLHUP,
+        ) {
+            return Err(format!(
+                "CVB: keybind watcher failed: {:?}",
+                keybind_events
+            ));
+        }
+
         if signal_events.contains(nix::poll::PollFlags::POLLIN) {
-            let _ = read(signal_read.as_fd(), &mut signal_buffer);
+            let count = loop {
+                match read(signal_read.as_fd(), &mut signal_buffer) {
+                    Ok(count) => break count,
+                    Err(nix::errno::Errno::EINTR) => continue,
+                    Err(error) => {
+                        return Err(format!("CVB: signal pipe read failed: {error}"));
+                    }
+                }
+            };
+
+            if count == 0 {
+                return Err("CVB: signal pipe closed unexpectedly".to_string());
+            }
 
             let winsize = resize_pty(master, child)?;
             rows = winsize.ws_row;
@@ -997,6 +1031,12 @@ fn proxy(
                 .screen_mut()
                 .set_size(winsize.ws_row, winsize.ws_col);
         }
+        if signal_events.intersects(
+            nix::poll::PollFlags::POLLERR | nix::poll::PollFlags::POLLHUP,
+        ) {
+            return Err(format!("CVB: signal pipe failed: {:?}", signal_events));
+        }
+
 
         if keyboard_events.contains(nix::poll::PollFlags::POLLIN) && keyboard.poll()? {
             capture_screen(&mut screen_terminal)?;
@@ -1005,6 +1045,15 @@ fn proxy(
                 sound.play("screen-capture");
             }
         }
+        if keyboard_events.intersects(
+            nix::poll::PollFlags::POLLERR | nix::poll::PollFlags::POLLHUP,
+        ) {
+            return Err(format!(
+                "CVB: keyboard monitor failed: {:?}",
+                keyboard_events
+            ));
+        }
+
 
         if stdin_events.contains(nix::poll::PollFlags::POLLIN) {
             let count = read(stdin.as_fd(), &mut buffer)
