@@ -3,11 +3,14 @@ use std::os::fd::{AsFd, OwnedFd};
 use nix::unistd::read;
 
 const HEADER_SIZE: usize = 4;
-const MAX_FRAME_SIZE: usize = 1024 * 1024;
+const MAX_FRAME_SIZE: usize = 4 * 1024 * 1024;
 
 const EXIT: u8 = 0x03;
 const TARGET_REQUEST: u8 = 0x04;
 const TARGET_RESPONSE: u8 = 0x05;
+const SURGERY_BEGIN: u8 = 0x06;
+const CLIPBOARD_WRITE: u8 = 0x07;
+const SURGERY_END: u8 = 0x08;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ControlMessage {
@@ -21,6 +24,16 @@ pub enum ControlMessage {
         id: u64,
         status: i32,
         message: String,
+    },
+    SurgeryBegin {
+        token: String,
+    },
+    ClipboardWrite {
+        text: String,
+    },
+    SurgeryEnd {
+        status: u8,
+        outcome: String,
     },
 }
 
@@ -52,8 +65,11 @@ impl ControlChannel {
         let mut written = 0;
 
         while written < frame.len() {
-            let count = nix::unistd::write(self.fd.as_fd(), &frame[written..])
-                .map_err(|error| format!("CVB: unable to send control message: {error}"))?;
+            let count = match nix::unistd::write(self.fd.as_fd(), &frame[written..]) {
+                Ok(count) => count,
+                Err(nix::errno::Errno::EINTR) => continue,
+                Err(error) => return Err(format!("CVB: unable to send control message: {error}")),
+            };
 
             if count == 0 {
                 return Err("CVB: control message write returned zero bytes".to_string());
@@ -82,6 +98,7 @@ impl ControlChannel {
                         break;
                     }
                 }
+                Err(nix::errno::Errno::EINTR) => continue,
                 Err(nix::errno::Errno::EAGAIN) => break,
                 Err(error) => {
                     return Err(format!("CVB: unable to receive control message: {error}"));
@@ -130,6 +147,7 @@ impl ControlChannel {
                         return Err("CVB: control message exceeds maximum frame size".to_string());
                     }
                 }
+                Err(nix::errno::Errno::EINTR) => continue,
                 Err(error) => {
                     return Err(format!("CVB: unable to receive control message: {error}"));
                 }
@@ -175,6 +193,32 @@ fn encode(message: &ControlMessage) -> Result<Vec<u8>, String> {
             payload.extend_from_slice(&(message.len() as u32).to_be_bytes());
             payload.extend_from_slice(message);
         }
+
+        ControlMessage::SurgeryBegin { token } => {
+            payload.push(SURGERY_BEGIN);
+            let token = token.as_bytes();
+            payload.extend_from_slice(&(token.len() as u32).to_be_bytes());
+            payload.extend_from_slice(token);
+        }
+
+        ControlMessage::ClipboardWrite { text } => {
+            payload.push(CLIPBOARD_WRITE);
+            let text = text.as_bytes();
+            payload.extend_from_slice(&(text.len() as u32).to_be_bytes());
+            payload.extend_from_slice(text);
+        }
+
+        ControlMessage::SurgeryEnd { status, outcome } => {
+            payload.push(SURGERY_END);
+            payload.push(*status);
+            let outcome = outcome.as_bytes();
+            payload.extend_from_slice(&(outcome.len() as u32).to_be_bytes());
+            payload.extend_from_slice(outcome);
+        }
+    }
+
+    if payload.len() > MAX_FRAME_SIZE {
+        return Err("CVB: control message exceeds maximum frame size".to_string());
     }
 
     Ok(payload)
@@ -332,6 +376,73 @@ fn decode(payload: &[u8]) -> Result<ControlMessage, String> {
             })
         }
 
+        SURGERY_BEGIN => {
+            if payload.len() < 5 {
+                return Err("CVB: malformed SURGERY_BEGIN message".to_string());
+            }
+
+            let token_length = u32::from_be_bytes(
+                payload[1..5]
+                    .try_into()
+                    .map_err(|_| "CVB: malformed SURGERY_BEGIN message".to_string())?,
+            ) as usize;
+
+            if payload.len() != 5 + token_length {
+                return Err("CVB: malformed SURGERY_BEGIN message".to_string());
+            }
+
+            let token = std::str::from_utf8(&payload[5..])
+                .map_err(|_| "CVB: SURGERY_BEGIN token is not valid UTF-8".to_string())?
+                .to_string();
+
+            Ok(ControlMessage::SurgeryBegin { token })
+        }
+
+        CLIPBOARD_WRITE => {
+            if payload.len() < 5 {
+                return Err("CVB: malformed CLIPBOARD_WRITE message".to_string());
+            }
+
+            let text_length = u32::from_be_bytes(
+                payload[1..5]
+                    .try_into()
+                    .map_err(|_| "CVB: malformed CLIPBOARD_WRITE message".to_string())?,
+            ) as usize;
+
+            if payload.len() != 5 + text_length {
+                return Err("CVB: malformed CLIPBOARD_WRITE message".to_string());
+            }
+
+            let text = std::str::from_utf8(&payload[5..])
+                .map_err(|_| "CVB: CLIPBOARD_WRITE text is not valid UTF-8".to_string())?
+                .to_string();
+
+            Ok(ControlMessage::ClipboardWrite { text })
+        }
+
+        SURGERY_END => {
+            if payload.len() < 6 {
+                return Err("CVB: malformed SURGERY_END message".to_string());
+            }
+
+            let status = payload[1];
+            let outcome_length = u32::from_be_bytes(
+                payload[2..6]
+                    .try_into()
+                    .map_err(|_| "CVB: malformed SURGERY_END message".to_string())?,
+            ) as usize;
+
+            if payload.len() != 6 + outcome_length {
+                return Err("CVB: malformed SURGERY_END message".to_string());
+            }
+
+            let outcome = std::str::from_utf8(&payload[6..])
+                .map_err(|_| "CVB: SURGERY_END outcome is not valid UTF-8".to_string())?
+                .to_string();
+
+            Ok(ControlMessage::SurgeryEnd { status, outcome })
+        }
+
         _ => Err(format!(
             "CVB: unknown control message type: 0x{message_type:02x}"
         )),
@@ -398,5 +509,68 @@ mod tests {
         let messages = decode_frames(&mut buffer).unwrap();
 
         assert_eq!(messages, vec![ControlMessage::Exit]);
+    }
+
+    #[test]
+    fn decodes_frame_at_permitted_4mib_limit() {
+        const FOUR_MIB: usize = 4 * 1024 * 1024;
+        let message_len = FOUR_MIB - 17; // TargetResponse header overhead is 17 bytes
+        let message = ControlMessage::TargetResponse {
+            id: 1,
+            status: 0,
+            message: "x".repeat(message_len),
+        };
+        let payload = encode(&message).unwrap();
+        assert_eq!(payload.len(), FOUR_MIB);
+
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        buffer.extend_from_slice(&payload);
+
+        let messages = decode_frames(&mut buffer).unwrap();
+        assert_eq!(messages, vec![message]);
+    }
+
+    #[test]
+    fn rejects_frame_exceeding_4mib_limit() {
+        let oversized_len = 4 * 1024 * 1024 + 1;
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&(oversized_len as u32).to_be_bytes());
+        let err = decode_frames(&mut buffer).unwrap_err();
+        assert_eq!(err, "CVB: control message exceeds maximum frame size");
+    }
+
+    #[test]
+    fn encodes_and_decodes_surgery_begin() {
+        let message = ControlMessage::SurgeryBegin {
+            token: "0123456789abcdef".to_string(),
+        };
+
+        let payload = encode(&message).unwrap();
+
+        assert_eq!(decode(&payload).unwrap(), message);
+    }
+
+    #[test]
+    fn encodes_and_decodes_clipboard_write() {
+        let message = ControlMessage::ClipboardWrite {
+            text: "--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
+        };
+
+        let payload = encode(&message).unwrap();
+
+        assert_eq!(decode(&payload).unwrap(), message);
+    }
+
+    #[test]
+    fn encodes_and_decodes_surgery_end() {
+        let message = ControlMessage::SurgeryEnd {
+            status: 0,
+            outcome: "CVB surgery APPLIED id=test files=1\n".to_string(),
+        };
+
+        let payload = encode(&message).unwrap();
+
+        assert_eq!(decode(&payload).unwrap(), message);
     }
 }

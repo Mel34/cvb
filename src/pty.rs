@@ -1163,6 +1163,7 @@ fn handle_control_message(
         }
 
         ControlMessage::TargetResponse { .. } => {}
+        _ => {}
     }
 
     Ok(())

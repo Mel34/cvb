@@ -62,6 +62,10 @@ def require_unchanged(target):
     )
 
 
+def get_stty(fd):
+    return subprocess.check_output(["stty", "-g"], stdin=fd, text=True).strip()
+
+
 def test_spec():
     test_token = "SpecToken1234567"
     env = {**os.environ, "CVB_TOKEN": test_token}
@@ -281,6 +285,7 @@ def test_decline():
         finally:
             os.close(write_fd)
 
+        stty_before = get_stty(master_fd)
         output = bytearray()
         response_sent = False
         child_status = None
@@ -329,7 +334,9 @@ def test_decline():
                     break
                 output.extend(data)
         finally:
+            stty_after = get_stty(master_fd)
             os.close(master_fd)
+        require(stty_after == stty_before, f"terminal state was not restored: before={stty_before} after={stty_after}")
 
         require(response_sent, f"confirmation prompt not seen:\n{output.decode(errors='replace')}")
         require(os.WIFEXITED(child_status), f"child did not exit normally: {child_status}")
@@ -376,6 +383,7 @@ def test_confirmed_apply():
         finally:
             os.close(write_fd)
 
+        stty_before = get_stty(master_fd)
         output = bytearray()
         response_sent = False
         child_status = None
@@ -424,7 +432,9 @@ def test_confirmed_apply():
                     break
                 output.extend(data)
         finally:
+            stty_after = get_stty(master_fd)
             os.close(master_fd)
+        require(stty_after == stty_before, f"terminal state was not restored: before={stty_before} after={stty_after}")
 
         require(response_sent, f"confirmation prompt not seen:\n{output.decode(errors='replace')}")
         require(os.WIFEXITED(child_status), f"child did not exit normally: {child_status}")
@@ -486,6 +496,73 @@ CVB::testtoken123::END ops=1
         require_unchanged(target)
 
 
+def test_terminal_restoration_on_sigterm():
+    with tempfile.TemporaryDirectory(prefix="cvb-surgery-sigterm-") as tmp:
+        root, target = make_project(tmp)
+        read_fd, write_fd = os.pipe()
+        pid, master_fd = pty.fork()
+
+        if pid == 0:
+            try:
+                os.dup2(read_fd, 0)
+                os.close(read_fd)
+                os.close(write_fd)
+                os.environ["CVB_TOKEN"] = "testtoken123"
+                os.execv(
+                    str(BINARY),
+                    [
+                        str(BINARY), "surgery", "--stdin",
+                        "--root", str(root),
+                    ],
+                )
+            except BaseException:
+                os._exit(127)
+
+        os.close(read_fd)
+        try:
+            os.write(write_fd, ENVELOPE)
+        finally:
+            os.close(write_fd)
+
+        stty_before = get_stty(master_fd)
+        output = bytearray()
+        child_status = None
+        deadline = time.monotonic() + 10
+
+        try:
+            while time.monotonic() < deadline:
+                ready, _, _ = select.select([master_fd], [], [], 0.1)
+                if ready:
+                    try:
+                        data = os.read(master_fd, 4096)
+                    except OSError as exc:
+                        if exc.errno == errno.EIO:
+                            data = b""
+                        else:
+                            raise
+                    if data:
+                        output.extend(data)
+
+                if PROMPT in output:
+                    # Terminal guard has entered raw mode; send SIGTERM
+                    os.kill(pid, 15)
+                    _, child_status = os.waitpid(pid, 0)
+                    break
+
+            if child_status is None:
+                os.kill(pid, 9)
+                _, child_status = os.waitpid(pid, 0)
+                raise AssertionError("CLI did not enter prompt or exit within 10 seconds")
+        finally:
+            stty_after = get_stty(master_fd)
+            os.close(master_fd)
+
+        require(os.WIFSIGNALED(child_status), f"child expected to be signaled: {child_status}")
+        require(os.WTERMSIG(child_status) == 15, f"expected SIGTERM (15), got {os.WTERMSIG(child_status)}")
+        require(stty_after == stty_before, f"terminal state was not restored after SIGTERM: before={stty_before} after={stty_after}")
+        require_unchanged(target)
+
+
 def main():
     build = subprocess.run(
         ["cargo", "build", "--quiet", "--bin", "cvb"],
@@ -510,6 +587,7 @@ def main():
         ("declined confirmation", test_decline),
         ("confirmed apply", test_confirmed_apply),
         ("precondition clean error", test_precondition_failure_reports_clean_e_precond),
+        ("terminal restoration on SIGTERM", test_terminal_restoration_on_sigterm),
     ]
     failures = []
 

@@ -48,6 +48,8 @@ pub(crate) fn prompt_confirmation(
         return Ok(ConfirmResult::Confirmed);
     }
 
+    let _guard = crate::surgery::keys::SurgeryTerminalGuard::enter()?;
+
     let tty_in = OpenOptions::new()
         .read(true)
         .open("/dev/tty")

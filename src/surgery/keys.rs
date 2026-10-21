@@ -1,6 +1,14 @@
 #![allow(dead_code)]
 
 use std::io::Read;
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+use nix::sys::signal::{signal, SigHandler, Signal};
+use nix::sys::termios::{tcgetattr, tcsetattr, LocalFlags, SetArg, SpecialCharacterIndices, Termios};
+
 use crate::surgery::parse::MAX_INPUT_BYTES;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,9 +31,6 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     }
     haystack.windows(needle.len()).position(|w| w == needle)
 }
-
-
-use std::time::{Duration, Instant};
 
 pub(crate) const ARM_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -243,6 +248,149 @@ impl<R: Read> EventReader<R> {
     }
 }
 
+static GUARD_MUTEX: Mutex<()> = Mutex::new(());
+static ACTIVE_GUARD: AtomicBool = AtomicBool::new(false);
+static GUARD_FD: AtomicI32 = AtomicI32::new(-1);
+static mut SAVED_TERMIOS: nix::libc::termios = unsafe { std::mem::zeroed() };
+
+extern "C" fn surgery_signal_handler(sig: nix::libc::c_int) {
+    if ACTIVE_GUARD.swap(false, Ordering::SeqCst) {
+        let fd = GUARD_FD.load(Ordering::SeqCst);
+        if fd >= 0 {
+            unsafe {
+                let _ = nix::libc::write(
+                    fd,
+                    b"\x1b[?2004l".as_ptr() as *const nix::libc::c_void,
+                    8,
+                );
+                let ptr = std::ptr::addr_of!(SAVED_TERMIOS);
+                let _ = nix::libc::tcsetattr(
+                    fd,
+                    nix::libc::TCSADRAIN,
+                    ptr,
+                );
+            }
+        }
+    }
+
+    unsafe {
+        nix::libc::signal(sig, nix::libc::SIG_DFL);
+        nix::libc::raise(sig);
+    }
+}
+
+pub(crate) struct SurgeryTerminalGuard {
+    raw_fd: RawFd,
+    orig_termios: Termios,
+    prev_sigterm: SigHandler,
+    prev_sighup: SigHandler,
+    _file: Option<std::fs::File>,
+    _lock: Option<std::sync::MutexGuard<'static, ()>>,
+}
+
+impl SurgeryTerminalGuard {
+    pub(crate) fn enter() -> Result<Self, (String, i32)> {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")
+            .map_err(|_| {
+                (
+                    "E-NOTTY: interactive terminal confirmation requires /dev/tty".to_string(),
+                    2,
+                )
+            })?;
+        let mut guard = Self::enter_on(&file)?;
+        guard._file = Some(file);
+        Ok(guard)
+    }
+
+    pub(crate) fn enter_on<F: AsFd + AsRawFd>(fd: &F) -> Result<Self, (String, i32)> {
+        let lock = match GUARD_MUTEX.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        let orig = tcgetattr(fd.as_fd()).map_err(|_| {
+            (
+                "E-NOTTY: interactive terminal confirmation requires /dev/tty".to_string(),
+                2,
+            )
+        })?;
+
+        let mut raw = orig.clone();
+        raw.local_flags.remove(LocalFlags::ICANON);
+        raw.local_flags.remove(LocalFlags::ECHO);
+        raw.local_flags.remove(LocalFlags::ISIG);
+        raw.control_chars[SpecialCharacterIndices::VMIN as usize] = 1;
+        raw.control_chars[SpecialCharacterIndices::VTIME as usize] = 0;
+
+        tcsetattr(fd.as_fd(), SetArg::TCSADRAIN, &raw).map_err(|e| {
+            (
+                format!("CVB: failed to configure terminal raw mode: {e}"),
+                2,
+            )
+        })?;
+
+        let raw_fd = fd.as_raw_fd();
+        let prev_term;
+        let prev_hup;
+        unsafe {
+            let _ = nix::libc::write(
+                raw_fd,
+                b"\x1b[?2004h".as_ptr() as *const nix::libc::c_void,
+                8,
+            );
+            let c_termios: nix::libc::termios = orig.clone().into();
+            let ptr = std::ptr::addr_of_mut!(SAVED_TERMIOS);
+            *ptr = c_termios;
+            GUARD_FD.store(raw_fd, Ordering::SeqCst);
+            ACTIVE_GUARD.store(true, Ordering::SeqCst);
+
+            prev_term = signal(Signal::SIGTERM, SigHandler::Handler(surgery_signal_handler))
+                .unwrap_or(SigHandler::SigDfl);
+            prev_hup = signal(Signal::SIGHUP, SigHandler::Handler(surgery_signal_handler))
+                .unwrap_or(SigHandler::SigDfl);
+        }
+
+        Ok(Self {
+            raw_fd,
+            orig_termios: orig,
+            prev_sigterm: prev_term,
+            prev_sighup: prev_hup,
+            _file: None,
+            _lock: Some(lock),
+        })
+    }
+
+    pub(crate) fn file(&self) -> Option<&std::fs::File> {
+        self._file.as_ref()
+    }
+
+    pub(crate) fn raw_fd(&self) -> RawFd {
+        self.raw_fd
+    }
+}
+
+impl Drop for SurgeryTerminalGuard {
+    fn drop(&mut self) {
+        if ACTIVE_GUARD.swap(false, Ordering::SeqCst) {
+            let fd = self.raw_fd;
+            unsafe {
+                let _ = nix::libc::write(
+                    fd,
+                    b"\x1b[?2004l".as_ptr() as *const nix::libc::c_void,
+                    8,
+                );
+                let borrowed = BorrowedFd::borrow_raw(fd);
+                let _ = tcsetattr(borrowed, SetArg::TCSADRAIN, &self.orig_termios);
+                let _ = signal(Signal::SIGTERM, self.prev_sigterm);
+                let _ = signal(Signal::SIGHUP, self.prev_sighup);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,5 +589,53 @@ mod tests {
         let mut armed = ArmingState::Armed(now);
         assert_eq!(armed.step(Event::Abort, now), ArmingAction::Abort);
         assert_eq!(armed, ArmingState::Idle);
+    }
+
+    #[test]
+    fn terminal_guard_configures_raw_mode_and_restores_on_drop() {
+        use nix::pty::openpty;
+        use nix::sys::termios::LocalFlags;
+
+        let pty = openpty(None, None).expect("openpty must succeed");
+        let orig_slave = tcgetattr(&pty.slave).expect("tcgetattr on slave");
+
+        let mut master_file = std::fs::File::from(pty.master);
+        let mut buf = [0u8; 64];
+
+        {
+            let guard = SurgeryTerminalGuard::enter_on(&pty.slave).expect("guard enters");
+
+            // Assert ICANON, ECHO, ISIG are cleared
+            let current = tcgetattr(&pty.slave).expect("tcgetattr on slave");
+            assert!(!current.local_flags.contains(LocalFlags::ICANON));
+            assert!(!current.local_flags.contains(LocalFlags::ECHO));
+            assert!(!current.local_flags.contains(LocalFlags::ISIG));
+            assert_eq!(current.control_chars[SpecialCharacterIndices::VMIN as usize], 1);
+            assert_eq!(current.control_chars[SpecialCharacterIndices::VTIME as usize], 0);
+
+            // Master receives bracketed paste enable sequence "\x1b[?2004h"
+            let n = master_file.read(&mut buf).expect("read from master");
+            assert_eq!(&buf[..n], b"\x1b[?2004h");
+
+            drop(guard);
+        }
+
+        // On drop, master receives bracketed paste disable sequence "\x1b[?2004l"
+        let n = master_file.read(&mut buf).expect("read from master");
+        assert_eq!(&buf[..n], b"\x1b[?2004l");
+
+        // Slave termios is restored to exact original
+        let restored = tcgetattr(&pty.slave).expect("tcgetattr on slave");
+        assert_eq!(restored, orig_slave);
+    }
+
+    #[test]
+    fn terminal_guard_returns_enotty_on_non_terminal() {
+        let (reader, _writer) = nix::unistd::pipe().expect("pipe must succeed");
+        let result = SurgeryTerminalGuard::enter_on(&reader);
+        assert!(result.is_err());
+        let (msg, code) = result.err().unwrap();
+        assert!(msg.starts_with("E-NOTTY"));
+        assert_eq!(code, 2);
     }
 }
