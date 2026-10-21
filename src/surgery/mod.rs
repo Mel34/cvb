@@ -1187,10 +1187,15 @@ pub(crate) fn run(
 
     if dry_run {
         if let Some(ref mut c) = control {
-            let _ = c.send(&crate::control::ControlMessage::SurgeryEnd {
-                status: 1,
-                outcome: String::new(),
-            });
+            if let Err(send_error) =
+                c.send(&crate::control::ControlMessage::SurgeryEnd {
+                    status: 1,
+                    outcome: String::new(),
+                })
+            {
+                eprintln!("CVB: failed to report dry-run cleanup: {send_error}");
+                std::process::exit(2);
+            }
         }
         std::process::exit(0);
     }
