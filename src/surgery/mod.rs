@@ -1168,10 +1168,17 @@ pub(crate) fn run(
         Ok(result) => result,
         Err((message, code)) => {
             if let Some(ref mut c) = control {
-                let _ = c.send(&crate::control::ControlMessage::SurgeryEnd {
-                    status: 1,
-                    outcome: String::new(),
-                });
+                if let Err(send_error) =
+                    c.send(&crate::control::ControlMessage::SurgeryEnd {
+                        status: 1,
+                        outcome: String::new(),
+                    })
+                {
+                    eprintln!(
+                        "{message}; additionally failed to report surgery cleanup: {send_error}"
+                    );
+                    std::process::exit(2);
+                }
             }
             eprintln!("{message}");
             std::process::exit(code);
