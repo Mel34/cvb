@@ -645,10 +645,19 @@ fn start_surgery(
     let guard = match enter_terminal() {
         Ok(guard) => guard,
         Err((message, code)) => {
-            let _ = control.send(&crate::control::ControlMessage::SurgeryEnd {
-                status: 1,
-                outcome: String::new(),
-            });
+            if let Err(send_error) =
+                control.send(&crate::control::ControlMessage::SurgeryEnd {
+                    status: 1,
+                    outcome: String::new(),
+                })
+            {
+                return Err((
+                    format!(
+                        "{message}; additionally failed to report surgery cleanup: {send_error}"
+                    ),
+                    2,
+                ));
+            }
             return Err((message, code));
         }
     };
