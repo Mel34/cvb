@@ -1178,6 +1178,13 @@ fn proxy(
                 handle_control_message(message, control, &mut transcript, &mut surgery_state)?;
             }
 
+            if control_events.contains(nix::poll::PollFlags::POLLERR) {
+                return Err(format!(
+                    "CVB: control socket failed: {:?}",
+                    control_events
+                ));
+            }
+
             if control_events.contains(nix::poll::PollFlags::POLLHUP) {
                 break;
             }
