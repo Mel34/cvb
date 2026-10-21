@@ -1071,7 +1071,22 @@ fn run_surgery_mode(root: std::path::PathBuf, session_token: String) -> i32 {
                 }
                 ModeAction::NothingToBuild => {
                     eprint!("\r\x1b[2Knothing to build\r\n[^C cancel  ^V paste  ^B build] ");
-                    let _ = std::io::stderr().flush();
+                    if let Err(error) = std::io::stderr().flush() {
+                        eprintln!(
+                            "\r\x1b[2KCVB: failed to flush nothing-to-build prompt: {error}"
+                        );
+                        if let Err(send_error) =
+                            control.send(&ControlMessage::SurgeryEnd {
+                                status: 1,
+                                outcome: String::new(),
+                            })
+                        {
+                            eprintln!(
+                                "\r\x1b[2KCVB: additionally failed to report surgery cleanup: {send_error}"
+                            );
+                        }
+                        return 2;
+                    }
                 }
                 ModeAction::UpdatePagerChunk { chunk, status_line } => {
                     if let Err(error) = control.send(&ControlMessage::ClipboardWrite {
