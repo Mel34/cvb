@@ -1510,4 +1510,48 @@ mod tests {
         assert_eq!(state, super::SurgeryProxyState::Aborted);
         assert!(transcript.segments.is_empty());
     }
+
+    #[test]
+    fn fatal_error_clipboard_write_then_surgery_end_aborts() {
+        let (parent, _child) = super::control_socketpair().unwrap();
+        let control = super::ControlChannel::new(parent);
+        let mut transcript = super::Transcript::default();
+        let mut state = super::SurgeryProxyState::Active {
+            token: "tok".to_string(),
+        };
+        let mut copied = Vec::new();
+
+        super::handle_control_message_with(
+            super::ControlMessage::ClipboardWrite {
+                text: "CVB: fatal error report
+".to_string(),
+            },
+            &control,
+            &mut transcript,
+            &mut state,
+            |buffer| {
+                copied.push(buffer.as_bytes().to_vec());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(copied, vec![b"CVB: fatal error report
+".to_vec()]);
+
+        super::handle_control_message_with(
+            super::ControlMessage::SurgeryEnd {
+                status: 1,
+                outcome: String::new(),
+            },
+            &control,
+            &mut transcript,
+            &mut state,
+            |_| Ok(()),
+        )
+        .unwrap();
+
+        assert_eq!(state, super::SurgeryProxyState::Aborted);
+        assert!(transcript.segments.is_empty());
+    }
 }

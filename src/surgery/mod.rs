@@ -910,6 +910,9 @@ fn run_surgery_mode(root: std::path::PathBuf, session_token: String) -> i32 {
                         Ok(p) => p,
                         Err(e) => {
                             eprintln!("\r\x1b[2K{e}");
+                            let _ = control.send(&ControlMessage::ClipboardWrite {
+                                text: e.to_string(),
+                            });
                             let _ = control.send(&ControlMessage::SurgeryEnd { status: 1, outcome: String::new() });
                             return SurgeryExitStatus::RejectedBeforeCommit.code();
                         }
@@ -919,6 +922,9 @@ fn run_surgery_mode(root: std::path::PathBuf, session_token: String) -> i32 {
                         Ok(s) => s,
                         Err(e) => {
                             eprintln!("\r\x1b[2K{e}");
+                            let _ = control.send(&ControlMessage::ClipboardWrite {
+                                text: e.to_string(),
+                            });
                             let _ = control.send(&ControlMessage::SurgeryEnd { status: 1, outcome: String::new() });
                             return SurgeryExitStatus::RejectedBeforeCommit.code();
                         }
@@ -935,7 +941,6 @@ fn run_surgery_mode(root: std::path::PathBuf, session_token: String) -> i32 {
                                 status: 0,
                                 outcome: outcome.clone(),
                             });
-                            let _ = crate::clipboard::copy_to_clipboard(&crate::clipboard::ClipboardBuffer::new(outcome.clone().into_bytes()));
                             eprint!("\r\x1b[2K{outcome}");
                             return SurgeryExitStatus::Applied.code();
                         }
@@ -951,7 +956,6 @@ fn run_surgery_mode(root: std::path::PathBuf, session_token: String) -> i32 {
                                 let _ = control.send(&ControlMessage::ClipboardWrite {
                                     text: error_text.clone(),
                                 });
-                                let _ = crate::clipboard::copy_to_clipboard(&crate::clipboard::ClipboardBuffer::new(error_text.into_bytes()));
                                 eprintln!("\r\x1b[2K{error}");
                                 state = ModeState::Idle;
                                 held_plan = None;
@@ -960,8 +964,10 @@ fn run_surgery_mode(root: std::path::PathBuf, session_token: String) -> i32 {
                                 let _ = std::io::stderr().flush();
                             } else {
                                 let report = error.to_string();
+                                let _ = control.send(&ControlMessage::ClipboardWrite {
+                                    text: report.clone(),
+                                });
                                 let _ = control.send(&ControlMessage::SurgeryEnd { status: 1, outcome: String::new() });
-                                let _ = crate::clipboard::copy_to_clipboard(&crate::clipboard::ClipboardBuffer::new(report.into_bytes()));
                                 eprintln!("\r\x1b[2K{error}");
                                 return error.exit_status().code();
                             }
@@ -980,7 +986,6 @@ fn run_surgery_mode(root: std::path::PathBuf, session_token: String) -> i32 {
                     let _ = control.send(&ControlMessage::ClipboardWrite {
                         text: chunk.clone(),
                     });
-                    let _ = crate::clipboard::copy_to_clipboard(&crate::clipboard::ClipboardBuffer::new(chunk.into_bytes()));
 
                     if let Some(status) = status_line {
                         eprint!("\r\x1b[2K[^C cancel  ^V paste  ^B build] {status} ");
@@ -993,16 +998,14 @@ fn run_surgery_mode(root: std::path::PathBuf, session_token: String) -> i32 {
                     let _ = control.send(&ControlMessage::ClipboardWrite {
                         text: err.clone(),
                     });
-                    let _ = crate::clipboard::copy_to_clipboard(&crate::clipboard::ClipboardBuffer::new(err.into_bytes()));
                     eprint!("\r\x1b[2K[^C cancel  ^V paste  ^B build] ");
                     let _ = std::io::stderr().flush();
                 }
-                ModeAction::Abort { outcome } => {
+                ModeAction::Abort { .. } => {
                     let _ = control.send(&ControlMessage::SurgeryEnd {
                         status: 1,
                         outcome: String::new(),
                     });
-                    let _ = crate::clipboard::copy_to_clipboard(&crate::clipboard::ClipboardBuffer::new(outcome.into_bytes()));
                     return SurgeryExitStatus::UserDeclined.code();
                 }
             }
