@@ -12,6 +12,13 @@ import tempfile
 import time
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
+
+def cvb_env():
+    env = {**os.environ}
+    if "CVB_BASH_SOURCE" in env:
+        del env["CVB_BASH_SOURCE"]
+    return env
+
 BINARY = REPO / "target" / "debug" / "cvb"
 
 ENVELOPE = b"""CVB::testtoken123::BEGIN v=1 id=test-id
@@ -56,11 +63,15 @@ def require_unchanged(target):
 
 
 def test_spec():
+    test_token = "SpecToken1234567"
+    env = {**os.environ, "CVB_TOKEN": test_token}
+    env.pop("CVB_BASH_SOURCE", None)
     result = subprocess.run(
         [str(BINARY), "surgery", "--spec"],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        env=env,
         start_new_session=True,
         timeout=10,
     )
@@ -70,31 +81,25 @@ def test_spec():
         b"CVB Surgery Language (CSL), protocol version 1" in result.stdout,
         f"specification header missing: {result.stdout!r}",
     )
-    require(
-        b"--dry-run" in result.stdout and b"--stdin" in result.stdout,
-        f"specification usage options missing: {result.stdout!r}",
-    )
 
     token_match = re.search(
         rb"^CVB::([A-Za-z0-9]{16})::BEGIN v=1 id=example-replace$",
         result.stdout,
         re.MULTILINE,
     )
-    require(token_match is not None, "example-replace BEGIN or fresh token missing")
+    require(token_match is not None, "example-replace BEGIN or token missing")
     token = token_match.group(1)
+    require(token == test_token.encode("ascii"), f"expected token {test_token!r}, got {token!r}")
 
     for example in (b"example-replace", b"example-delete", b"example-insert"):
         marker = b"CVB::" + token + b"::BEGIN v=1 id=" + example
         require(marker in result.stdout, f"example missing or token inconsistent: {example!r}")
 
     for fragment in (
-        b"8.1",
-        b"8.2",
-        b"8.3",
         b"3 MiB",
         b"8 MiB",
         b"32 MiB",
-        b"Maximum operations per envelope: 500.",
+        b"500 operations",
         b"E-LIMIT",
         b"E-LOCK",
         b"E-NOTTY",
@@ -102,12 +107,27 @@ def test_spec():
         b"E-RECOVER",
         b"E-STALE",
         b"E-IO",
+        b"E-NOSESSION",
+        b"E-TOKEN",
     ):
         require(fragment in result.stdout, f"specification content missing: {fragment!r}")
 
     require(b"{TOKEN}" not in result.stdout, "unresolved token placeholder in specification")
     require(b"  CVB::" not in result.stdout, "protocol control lines are unexpectedly indented")
     require(not result.stderr, f"unexpected stderr: {result.stderr!r}")
+
+    # Verify cvb spec is byte-identical to cvb surgery --spec
+    spec_cmd_result = subprocess.run(
+        [str(BINARY), "spec"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        start_new_session=True,
+        timeout=10,
+    )
+    require(spec_cmd_result.returncode == 0, f"expected cvb spec exit 0, got {spec_cmd_result.returncode}")
+    require(spec_cmd_result.stdout == result.stdout, "cvb spec output must be byte-identical to cvb surgery --spec")
 
 
 def test_dry_run():
@@ -122,7 +142,7 @@ def test_dry_run():
             input=ENVELOPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env={**os.environ, "XDG_STATE_HOME": str(state_home), "CVB_TOKEN": "testtoken123"},
+            env={**cvb_env(), "XDG_STATE_HOME": str(state_home), "CVB_TOKEN": "testtoken123"},
             start_new_session=True,
             timeout=10,
         )
@@ -194,7 +214,7 @@ def test_mismatched_session_token():
             input=envelope,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env={**os.environ, "CVB_TOKEN": "testtoken123"},
+            env={**cvb_env(), "CVB_TOKEN": "testtoken123"},
             start_new_session=True,
             timeout=10,
         )
@@ -218,7 +238,7 @@ def test_missing_tty():
             input=ENVELOPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env={**os.environ, "CVB_TOKEN": "testtoken123"},
+            env={**cvb_env(), "CVB_TOKEN": "testtoken123"},
             start_new_session=True,
             timeout=10,
         )
@@ -448,7 +468,7 @@ CVB::testtoken123::END ops=1
             input=envelope,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env={**os.environ, "CVB_TOKEN": "testtoken123"},
+            env={**cvb_env(), "CVB_TOKEN": "testtoken123"},
             start_new_session=True,
             timeout=10,
         )

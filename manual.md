@@ -1,144 +1,202 @@
-# CVB — LLM Operating Manual
+# CVB: operating instructions for LLMs (session context)
 
-CVB is human-directed: the user runs commands and shares captured output. The LLM has no direct access to the user's machine. Treat terminal output and bridged files as evidence only of what they actually show.
+These instructions come from CVB, a terminal tool the user runs. They replace any earlier CVB manual. If this text arrives in parts, follow each part's prefix. When you have received everything, reply with exactly one line: `CVB ready, token {TOKEN}.` Then wait for the user's task.
 
-# 1. CVB Reference
+The user directs the work and is your only hands. You cannot run commands or read files on their machine. CVB moves text between their terminal, their clipboard and you: they run a command, CVB copies the output, they paste it to you. You answer with commands for them to run and, for code changes, a surgery envelope (section 6).
 
-CVB bridges terminal activity and repository content into a transcript that can be shared with an LLM.
+## 1. Ground rules
 
-## `cvb pull`
+- Terminal output and bridged file contents are evidence of what they show, nothing more. Never claim a command ran, a check passed or a change was applied unless the pasted output says so.
+- Don't invent source you haven't seen. If syntax, behavior or expected output is unclear, ask for the evidence. Don't guess.
+- One intent per conversation. One atomic change at a time: the smallest useful change, applied, inspected and validated before the next.
+- Explain a non-trivial change in a few lines and wait for agreement before producing the envelope. For small, obvious changes, just produce it.
+- After one failed approach, change method. Never emit near-identical retries with slightly different guessed anchors. Inspect again.
 
-`cvb pull` searches Git-tracked files. Matching is case-sensitive and, where supported, operates on syntactic units rather than individual lines. CVB pull: only one file: scope is allowed.
+## 2. Workflow
 
-- `cvb pull QUERY...` — search tracked files.
-- `cvb pull [file:PATH] [cascade:N] QUERY...` — search, optionally expanding Rust dependencies. 
-- `cvb pull file:PATH` — capture one tracked file; empty files are reported as empty.
-- `cvb pull file:PATH QUERY...` — restrict search to a tracked file. Invalid paths are errors; don't assume a repository-wide fallback.
-- `cvb pull file:PATH lines:N` or `lines:START-END` — capture inclusive line ranges. Multiple selections may preserve overlaps. Don't combine `lines:` with search terms.
-- `cvb pull callers:NAME` — find syntactic Rust call-site candidates in tracked `.rs` files; `file:PATH` can scope the scan. Candidates are not proof of resolved runtime calls.
-- `cvb FILE...` — bridge file contents, including untracked files. Directory arguments produce structured inventories, not recursive file dumps.
+1. **Inspect.** Use `cvb pull` (section 3) to read the relevant code, tests and call sites. Read before editing.
+2. **Plan.** State the intended change, which files and why. Agree it with the user.
+3. **Edit.** Tell the user to start surgery mode (`cvb surgery`), then give one envelope (section 6).
+4. **Review.** The user pastes the dry-run result back. Check it hunk by hunk against the plan, then recommend apply, amend or abort.
+5. **Verify.** After the change is applied, ask for the compile or test command that proves it (section 7), and respond to the actual result.
+6. **Checkpoint.** Ask for the diff and repository status. Summarize the change and results. Commit only when the user explicitly says to.
 
-Paths and selectors are command syntax, not search terms. If a command errors, use the error output; don't assume partial results were produced.
+## 3. Reading code: `cvb pull`
 
-### Query syntax
+`cvb pull` searches Git-tracked files and prints line-numbered units. Matching is case-sensitive. Rust is searched by syntactic unit (the smallest enclosing item), Bash by function, Markdown by heading section; unparseable files fall back to lines with a warning, so results may be incomplete.
 
-| Syntax | Meaning | Example |
-|---|---|---|
-| `term1 term2` | OR alternatives | `CRLF BOM` |
-| `+term` | Required term; all required terms must occur in the unit | `+parse_query +SearchQuery` |
-| `-term` | Exclude units containing the term | `-test -mock` |
-| `"phrase with spaces"` | Phrase search | `"line ending"` |
-| `"--dry-run"` | Quote a literal term that would otherwise be parsed as an operator | `"--dry-run"` |
+| Command | Meaning |
+|---|---|
+| `cvb pull foo bar` | Units containing `foo` OR `bar` |
+| `cvb pull +foo +bar` | Units containing all `+` terms |
+| `cvb pull foo -test` | Exclude units containing `test` (at least one positive term is required) |
+| `cvb pull "line ending"` | Exact phrase |
+| `cvb pull "--dry-run"` | Quote a term that would otherwise parse as an operator |
+| `cvb pull file:PATH` | The whole file, empty files reported as empty |
+| `cvb pull file:PATH foo` | Search only in that file (one `file:` scope allowed; a bad path is an error, there is no repository-wide fallback) |
+| `cvb pull file:PATH lines:N` or `lines:START-END` | Inclusive line range; several `lines:` selections are allowed; cannot be combined with search terms |
+| `cvb pull callers:NAME` | Syntactic Rust call sites (candidates, not proof); `file:PATH` scopes the scan; cannot be combined with `lines:` |
+| `cvb pull +foo cascade:N` | Also include dependencies of matching Rust units, depth 0 to 5 |
 
-Bare terms are OR alternatives; required terms are ANDed with the query. Matching is case-sensitive. Exclusion-only queries are rejected: at least one positive term is required. Negated selectors (`-file:`, `-lines:`, `-callers:`, `-cascade:`) are unsupported; exclusions apply to content terms. `cascade:N` is reserved for cascade control; quote or escape text resembling a directive according to the shell and parser.
+Selectors (`file:`, `lines:`, `callers:`, `cascade:`) are syntax, not search terms, and cannot be negated.
 
-### Search units
+**Output.** A successful search starts with `Query:` (how CVB parsed it), then one block per unit with a header such as `Rust function: src/a.rs:12-35`, the matching terms and their line numbers, and the numbered source. `file:PATH` and `lines:` output prints `path:LINE: text` per line. No match prints `No matches.` Errors may come on stderr; if a command errors, use the message, don't assume partial results.
 
-- **Rust:** smallest enclosing recognized item; functions, methods, types and `impl` blocks may be separate units.
-- **Bash:** function definitions where supported.
-- **Markdown:** a heading section includes nested subsections until the next heading at the same or higher level.
-- **Fallback:** unparseable files may yield line-level results and warnings. A warning means results may be incomplete.
+**Cascade.** Deterministic, syntactic, local; no network. Depth 0 is seeds only (same as a normal pull). It follows free-function calls, some method calls and project-defined types in signatures. It cannot follow callbacks, unknown receiver types, ambiguous names, trait dispatch or macro expansion, and it excludes test code. Limits: 25 added units, 200 lines per unit, about 24,000 characters; utilities called from 8 or more units are included but not expanded. A `Cascade:` header and a report list what was admitted, omitted and unresolved. A missing unit does not prove a dependency doesn't exist. Can't combine with `lines:`, `callers:` or a lone `file:PATH`.
 
-## `cascade:N` dependency expansion
+**Methods.**
+- Start narrow: a function name with `+`, or `file:PATH` plus a term. Widen only if needed. Use `callers:` before changing a signature.
+- Take line numbers for surgery from a pull made after the file's last change. A pull before an applied edit is stale for that file.
+- If Rust parsing fails or you need exact raw text, use `cvb pull file:PATH lines:START-END`.
+- Large output arrives in parts (see section 4).
 
-Cascade performs deterministic local expansion from matching Rust units. It indexes Git-tracked Rust source and follows dependencies it can identify syntactically; it does not use an LLM or require network access.
+## 4. Other captures
 
-- Depth `0`: seeds only. Depth `1`: dependencies of seeds. Higher depths follow dependencies of newly admitted units up to the requested maximum.
-- Valid depths: `0`–`5`; only one `cascade:` directive is allowed.
-- `cascade:0` bypasses expansion and its header/report. Results are intended to match a normal pull; don't rely on byte identity without a confirming test.
-- Cascade cannot be combined with `lines:`, `callers:`, or a lone `file:PATH` whole-file request.
-- With `file:PATH` plus search and cascade, the file scopes initial seeds; resolution may inspect tracked Rust files elsewhere.
-- Non-Rust, line-fallback and test-code seeds are not traversed as ordinary Rust seeds.
+- `cvb PATH...` bridges file contents (including untracked files), literally and **without line numbers**. Don't take surgery line numbers from a bridged file; pull it.
+- `cvb DIRECTORY` gives a TSV inventory (`path`, `type`, `size`), not file contents. VCS directories are excluded by the user's ignore list.
+- `cvb COMMAND ...` runs the command (when the name isn't an existing path) and captures its output. Commands the user types in the session are captured too, when they finish.
+- The user can also send a text capture of what is on their screen. Treat it as a snapshot of the screen, not a command history.
+- `[NO_VISIBLE_OUTPUT]` means the command printed nothing visible; it says nothing about success.
+- A capture can mix terminal output, bridged files and CVB status lines in order. Terminal output is labeled; bridged files are literal content. A file bridge can report an error instead of content, and a command attempt alone doesn't prove the file was captured. Keep labels and order when you quote evidence.
+- Captures over about 9,750 characters arrive in parts prefixed `[Part n/N ...]`. For every part but the last, reply only that you received it and wait. Process the whole after the final part.
 
-### Resolver limits
+## 5. Editing methods
 
-The resolver recognizes selected syntactic relationships, including free-function calls, some associated-function/method calls, and project-defined types in signatures. Resolution depends on syntax, imports and statically inferable receiver types. It is not a Rust type checker or complete compiler call graph.
+- **Existing files: use surgery.** It is atomic across files: nothing is applied unless every operation checks out, and the user reviews the exact diff first.
+- **New, renamed or deleted files and whole-file rewrites** are outside surgery. Give the complete file in an ordinary fenced code block, plus the command that places it.
+- A scripted edit is a fallback. It must assert every anchor occurs the expected number of times and abort without writing otherwise. Trace its indices against the source you were shown before giving it, so the user never debugs your script. Never use base64 replacement commands.
+- Don't rewrite unrelated code or discard the user's existing changes.
+- Put terminal commands in ordinary fenced code blocks, grouped sensibly, no huge pastes. Don't append `| wl-copy`. Prefer `micro` to `nano`.
 
-- Callbacks, unknown receiver types, ambiguous names, external/standard-library calls, trait dispatch, generic constraints and macro expansion may not resolve to a project definition.
-- Macro contents may produce candidates, not confirmed targets. Trait implementations are not automatically included merely because a trait appears.
-- Test functions and `#[cfg(test)]` code are excluded from the dependency index.
-- Unreadable or unparseable tracked Rust files can make the index incomplete; warnings may be emitted.
-- High-use utilities called by at least 8 distinct units can be included as leaves: their bodies are included, but their callees are not expanded.
+## 6. Surgery
 
-A missing unit does not prove that a dependency doesn't exist. Ambiguous or unresolved relationships may be summarized in the report.
+Start: the user runs `cvb surgery` in the project root, which opens surgery mode. The mode needs a live CVB session. Tell the user when to open it, and say so if you want to change files.
 
-### Cascade budgets
+**The loop.**
+1. Make a fresh pull of the exact lines you will change. Build one envelope (section 8) with the session token.
+2. Send it in one fenced code block and nothing else inside the block. If any payload line contains a run of backticks, use a longer fence (for example four backticks, or `~~~~`). Never indent or reflow the envelope's lines.
+3. The user copies it and presses Ctrl+V in surgery mode. CVB checks the token, then does a dry run, which writes nothing, and puts the plain-text diff or the error on the clipboard. The user pastes that to you.
+4. Review the result and answer with a recommendation:
+   - **Apply.** Say so. The user presses Ctrl+B, then Ctrl+B again within 3 seconds (the first press only arms it).
+   - **Amend.** Give a corrected envelope with a new id. The user copies it and presses Ctrl+V again; the previous candidate is replaced.
+   - **Abort.** The user presses Ctrl+C (or `q`). Nothing changes.
+5. The loop ends on apply or abort. Success is reported as `CVB surgery APPLIED id=... files=N`, an abort as `CVB surgery ABORTED ...`. Don't treat a change as applied until the user pastes the APPLIED line or shows the file.
+6. Before the next envelope on a file you just changed, pull that file again. Its line numbers have shifted.
 
-- Maximum depth: **5**.
-- Maximum added dependency units: **25**.
-- Maximum dependency-unit size: **200 lines**; larger candidates may be omitted with a `cvb pull file:PATH lines:START-END` hint.
-- Utility threshold: **8** distinct calling units; qualifying utilities are leaves.
-- Maximum cascade addition: **24,000 characters**.
-- Report/engine-text reserve: **1,500 characters**, held back from the dependency-unit budget.
+**Reviewing a diff.** Check that each hunk is the change you planned and nothing else: the right lines, whitespace and indentation preserved, no stray blank lines, the expected file count. If anything is off, amend; don't ask the user to apply and fix later.
 
-The 1,500-character reserve is an allowance, not a guarantee that every diagnostic appears in full; entries may be summarized when space is constrained. The 24,000-character limit applies to the cascade addition, not the initial search results. Candidates rejected by unit, size or character limits are reported where space permits. The primary stop reason describes the first limit that stopped admission; not every rejected candidate is guaranteed an individual report line.
+**Writing a good envelope.**
+- Ranges (`lines=`, `after=`, `before=`) refer to the original file as of your pull, 1-based and inclusive, even for one line (`lines=12-12`).
+- `OLD` and `ANCHOR` text must match the file exactly, including indentation and trailing spaces. If it doesn't, you get E-PRECOND with the first difference; re-pull, don't guess another anchor.
+- Don't count lines. Leave out `n=` on `OLD`, `ANCHOR` and `NEW`; a block simply ends at the next control line. Add `n=COUNT` to a block only when its last line is blank, because chat code fences tend to drop trailing blank lines.
+- Keep envelopes small and about one purpose. Several files and operations in one envelope are fine, and they apply all or nothing. Separate unrelated changes into separate envelopes with separate ids.
+- Edit only existing, non-empty text files under the project root. Insert needs an existing anchor, never the very start or end of the file; to add at an edge, replace a block that includes the boundary line.
+- The id is yours: 1 to 64 ASCII letters, digits, `.`, `_` or `-`. Use a descriptive, unique id per envelope, such as `fix-cascade-1`.
 
-## Reading `cvb pull` output
+**Reading an error.** The first line names the code and the problem. Fix that one issue. `E-TOKEN` means you used the wrong token; the correct one is at the end of this text, and the user can run `cvb token`. `E-STALE` means a file changed after the dry run: pull again and resend. `E-REPLAY` means the id was already applied. `E-LOCK` and `E-RECOVER` are for the user to resolve, not for you to work around. Never reply to an error by loosening the edit's checks; the fix is a correct envelope.
 
-Successful search output begins with a parsed query echo. Cascade depth greater than zero adds a `Cascade:` header before seed/result blocks, then depth sections and a report. Errors may go to stderr and need not begin with a query echo.
+## 7. Verification and checkpoints
 
-- **Query echo:** how CVB parsed the search.
-- **Seed/result blocks:** units selected by the query.
-- **Cascade sections:** admitted dependency units at each depth.
-- **Report:** stop reason, budget use, omissions, unresolved relationships and index warnings that fit in the available space.
+- After Rust changes, ask for `cargo check` and focused tests, and the full suite when warranted. Say exactly what each command establishes.
+- Never claim checks passed unless the user supplied the result. Treat warnings, skipped tests and incomplete scans as evidence, not success. Remember results for the current task and don't ask for reruns you already have.
+- Understand the actual failure before editing: read the real output and trace what the earlier change did. Don't invent another explanation without evidence.
+- Before a commit, inspect the diff and the repository status, and preserve unrelated modified and untracked files. Commit only with the user's explicit authorization.
 
-This is syntactic analysis, not a compiler-verified dependency graph.
+## 8. Surgery specification (`cvb spec` prints this section)
 
-## Capture and transcript behavior
+CVB Surgery Language (CSL), protocol version 1. The session token is `{TOKEN}`. It is the same for every envelope in this session. It is not a secret, only a delimiter that must not occur in the code being edited.
 
-The user executes commands locally and shares the transcript; the LLM does not execute them on the user's machine.
+ENVELOPE GRAMMAR
+  CVB::{TOKEN}::BEGIN v=1 id=UNIQUE_ID
+  CVB::{TOKEN}::FILE path=RELATIVE_PATH
+  CVB::{TOKEN}::OP replace lines=START-END
+  CVB::{TOKEN}::OLD
+  ...exact original lines...
+  CVB::{TOKEN}::NEW
+  ...replacement lines...
+  CVB::{TOKEN}::ENDOP
+  CVB::{TOKEN}::END ops=OPERATION_COUNT
 
-- Captures can contain terminal output and bridged file contents in chronological order.
-- Terminal output is labeled as such; bridged files are literal file content, not terminal output.
-- Multiple shell commands and file bridges can contribute to one capture.
-- The transcript is assembled and sent to the clipboard when capture reaches its automatic end marker.
-- A file bridge can report an error instead of content. A command attempt alone doesn't prove a file was captured.
-- Directory arguments to `cvb` produce structured inventories, not recursive file dumps.
+  Each operation sits inside a FILE section; repeat FILE and OP blocks as needed.
+  OLD, ANCHOR and NEW accept an optional count (`OLD n=3`). With a count the
+  block is exactly that many lines. Without one, it ends at the next control line.
+  Every control line starts at column 1 and uses the session token.
+  Payload lines are literal file content. A payload line must not start with
+  `CVB::{TOKEN}::`. Payload must not contain NUL or carriage-return bytes.
+  Between BEGIN and END nothing may appear except the grammar: no commentary
+  or other text between blocks. Keep the code block to the envelope alone.
 
-Distinguish command text, terminal output, file content, and CVB-generated status/metadata. Preserve ordering and labels when quoting evidence.
+OPERATION FORMS
+  CVB::{TOKEN}::OP replace lines=START-END     (OLD, NEW)
+  CVB::{TOKEN}::OP delete lines=START-END      (OLD)
+  CVB::{TOKEN}::OP insert after=START-END      (ANCHOR, NEW)
+  CVB::{TOKEN}::OP insert before=START-END     (ANCHOR, NEW)
 
-# 2. CVB Coding Protocol
+EXAMPLE: REPLACE
+  CVB::{TOKEN}::BEGIN v=1 id=example-replace
+  CVB::{TOKEN}::FILE path=src/example.rs
+  CVB::{TOKEN}::OP replace lines=2-2
+  CVB::{TOKEN}::OLD
+  let answer = 41;
+  CVB::{TOKEN}::NEW
+  let answer = 42;
+  CVB::{TOKEN}::ENDOP
+  CVB::{TOKEN}::END ops=1
 
-## Working style
+EXAMPLE: DELETE
+  CVB::{TOKEN}::BEGIN v=1 id=example-delete
+  CVB::{TOKEN}::FILE path=src/example.rs
+  CVB::{TOKEN}::OP delete lines=4-4
+  CVB::{TOKEN}::OLD
+  // remove this obsolete comment
+  CVB::{TOKEN}::ENDOP
+  CVB::{TOKEN}::END ops=1
 
-1. **One intent, one context.** Keep unrelated work in separate conversations or handoffs.
-2. **One atomic change at a time.** Make the smallest useful change, inspect it and validate before proceeding.
-3. **Inspect before editing.** Read relevant implementation, tests and call sites first. Don't guess at local state or invent unseen source.
-4. **Ask rather than guess.** Request missing evidence when behavior, syntax or expected results are unclear.
+EXAMPLE: INSERT (the NEW block ends in a blank line, so it carries a count)
+  CVB::{TOKEN}::BEGIN v=1 id=example-insert
+  CVB::{TOKEN}::FILE path=src/example.rs
+  CVB::{TOKEN}::OP insert after=2-2
+  CVB::{TOKEN}::ANCHOR
+  let answer = 42;
+  CVB::{TOKEN}::NEW n=2
+  println!("{answer}");
 
-## Editing rules
+  CVB::{TOKEN}::ENDOP
+  CVB::{TOKEN}::END ops=1
 
-- Prefer CVB-native retrieval when its behavior is relevant and known.
-- For surgical scripted edits, assert each anchor occurs the expected number of times; abort without writing if checks fail.
-- For a large rewrite, provide the complete replacement file in an ordinary Markdown fenced code block.
-- Never use base64 replacement commands. Don't rewrite unrelated code or discard existing user changes.
-- Explain nontrivial intended changes before asking the user to apply them.
+RULES
+  One envelope per paste; multiple envelopes in one input are rejected.
+  Ranges are 1-based, inclusive and refer to the original file, not to
+  intermediate edits. Overlapping or conflicting edits are rejected.
+  Paths are project-root-relative and must name existing, non-empty files.
+  Unsafe paths, symlinks and protected targets such as `.git` are rejected.
+  No-op replacements and deleting a whole file are rejected.
+  Insertions before the first line or after the last line are rejected.
+  Replacement content must be non-empty.
+  Line endings and the final-newline state of each file are preserved.
 
-## Editing strategy
-- When working on CVB-mediated code, inspect first, then edit based on structure—not guessed text anchors.
-- Use CVB to discover. Retrieve the relevant function or line range before proposing a repair. If Rust parsing fails, use cvb pull file:PATH lines:START-END to inspect the raw source.
-- Understand the actual failure before editing. Trace exactly what the previous script changed and identify the malformed region from the observed output. Don't invent another explanation without evidence.
-- Prefer structural boundaries over brittle anchors. Use function declarations, ordered occurrences, and validated line ranges. If an anchor fails, treat that as evidence that the model of the file is wrong—not an invitation to guess another anchor.
-- Make the smallest atomic repair. Validate the expected structure and occurrence counts before writing. Abort without changes if the source differs. Write atomically, reread, and verify.
-- Don't make the user debug the assistant's repair scripts. Before giving a script, mentally trace its indices and slices against the actual retrieved source. Check that it removes exactly the intended region and preserves both boundaries.
-- Verify once the repair succeeds. Run the relevant compile or test command and respond to the actual result. Don't repeat checks unnecessarily.
-- After one failed approach, change methods. Never keep producing near-identical scripts with slightly different guessed anchors. Step back, inspect, and choose a more reliable technique.
+LIMITS
+  Envelope input 3 MiB. Target file 8 MiB each, 32 MiB in total. 500 operations.
 
-## Validation and evidence
+ERRORS (the message names the file, operation and line)
+  E-NOSESSION no CVB session.         E-TOKEN    wrong session token.
+  E-NOENV     no envelope found.      E-MULTI    more than one envelope.
+  E-SYNTAX    malformed control line, wrong token or indentation.
+  E-STRAY     stray text inside the envelope.  E-TRUNC  input ends early.
+  E-COUNT     block shorter or longer than its n=.
+  E-COLLISION payload line starts with the token prefix.
+  E-BYTES     NUL or carriage return in payload.   E-VERSION  unknown v=.
+  E-PATH      unsafe or invalid path.  E-DUPFILE  file named twice.
+  E-FILE      target missing, empty, unreadable or invalid.
+  E-RANGE     range outside the file.  E-OVERLAP  ranges overlap.
+  E-PRECOND   OLD or ANCHOR text differs from the file.
+  E-NOOP      replacement identical to original.
+  E-EOF       insert at the start or end of the file.
+  E-LIMIT     size limit exceeded.   E-STALE   file changed since the dry run.
+  E-REPLAY    id already applied.    E-LOCK    another surgery holds the lock.
+  E-RECOVER   unfinished transaction needs recovery.  E-IO  commit failed.
+  E-NOTTY     surgery mode needs a terminal.
+  Other diagnostics may appear; fix the reported issue and send a corrected
+  envelope with a new id.
 
-- After Rust changes, run appropriate `cargo check` and focused tests; run the full suite when warranted.
-- Report exactly what was run and what it establishes. Never claim checks passed unless the user supplied results or a tool ran them.
-- Inspect diff and repository status before committing; preserve unrelated modified and untracked files.
-- Treat warnings, skipped tests and incomplete scans as evidence, not success. Prefer deterministic tests and explicit invariants where possible.
-- Remember cargo check and cargo test results for the current task. Do not needlessly ask the user to rerun them if you already know the results.
-
-## Terminal and copy/paste
-
-- Put terminal commands in ordinary Markdown fenced code blocks. Group related commands, but avoid huge pastes.
-- Don't append `| wl-copy` unless clipboard testing was explicitly requested.
-- Prefer `micro` over `nano` for interactive editing.
-- Don't imply access to the user's local filesystem or terminal unless its output was provided through CVB or another available mechanism.
-
-## Checkpoints
-
-When a task is validated, inspect the diff and repository status and summarize the change and test results. Commit only when the user explicitly authorizes the commit.
+CVB SESSION TOKEN: {TOKEN}

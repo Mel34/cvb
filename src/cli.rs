@@ -6,6 +6,9 @@ pub enum Command {
     Target(Vec<String>),
     Pull(Vec<String>),
     Surgery(SurgeryArgs),
+    Context,
+    Spec,
+    Token,
     Help,
     Version,
 }
@@ -19,12 +22,20 @@ pub struct SurgeryArgs {
 }
 
 pub fn parse() -> Command {
-    let mut args = env::args().skip(1);
+    parse_args(env::args().skip(1))
+}
 
+pub fn parse_args<I>(mut args: I) -> Command
+where
+    I: Iterator<Item = String>,
+{
     match args.next().as_deref() {
         Some("--help") | Some("-h") => Command::Help,
         Some("--version") | Some("-V") => Command::Version,
         None => Command::Start,
+        Some("context") => Command::Context,
+        Some("spec") => Command::Spec,
+        Some("token") => Command::Token,
         Some("pull") => Command::Pull(args.collect()),
         Some("surgery") => {
             let surgery_args = parse_surgery_args(args)
@@ -90,17 +101,41 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_surgery_args, SurgeryArgs};
+    use super::{parse_args, parse_surgery_args, Command, SurgeryArgs};
     use std::path::PathBuf;
 
-    fn parse(args: &[&str]) -> Result<SurgeryArgs, String> {
+    fn parse_surgery(args: &[&str]) -> Result<SurgeryArgs, String> {
         parse_surgery_args(args.iter().map(|arg| (*arg).to_string()))
+    }
+
+    #[test]
+    fn parses_context_subcommand() {
+        assert_eq!(
+            parse_args(["context".to_string()].into_iter()),
+            Command::Context
+        );
+    }
+
+    #[test]
+    fn parses_spec_subcommand() {
+        assert_eq!(
+            parse_args(["spec".to_string()].into_iter()),
+            Command::Spec
+        );
+    }
+
+    #[test]
+    fn parses_token_subcommand() {
+        assert_eq!(
+            parse_args(["token".to_string()].into_iter()),
+            Command::Token
+        );
     }
 
     #[test]
     fn surgery_args_default_to_disabled() {
         assert_eq!(
-            parse(&[]).unwrap(),
+            parse_surgery(&[]).unwrap(),
             SurgeryArgs {
                 dry_run: false,
                 stdin: false,
@@ -113,7 +148,7 @@ mod tests {
     #[test]
     fn parses_boolean_flags() {
         assert_eq!(
-            parse(&["--dry-run", "--stdin", "--spec"]).unwrap(),
+            parse_surgery(&["--dry-run", "--stdin", "--spec"]).unwrap(),
             SurgeryArgs {
                 dry_run: true,
                 stdin: true,
@@ -126,7 +161,7 @@ mod tests {
     #[test]
     fn parses_root_as_separate_argument() {
         assert_eq!(
-            parse(&["--root", "/tmp/project"]).unwrap().root,
+            parse_surgery(&["--root", "/tmp/project"]).unwrap().root,
             Some(PathBuf::from("/tmp/project"))
         );
     }
@@ -134,7 +169,7 @@ mod tests {
     #[test]
     fn parses_root_with_equals() {
         assert_eq!(
-            parse(&["--root=/tmp/project"]).unwrap().root,
+            parse_surgery(&["--root=/tmp/project"]).unwrap().root,
             Some(PathBuf::from("/tmp/project"))
         );
     }
@@ -142,7 +177,7 @@ mod tests {
     #[test]
     fn rejects_missing_root_value() {
         assert_eq!(
-            parse(&["--root"]).unwrap_err(),
+            parse_surgery(&["--root"]).unwrap_err(),
             "missing argument for --root"
         );
     }
@@ -150,7 +185,7 @@ mod tests {
     #[test]
     fn rejects_root_value_that_is_an_option() {
         assert_eq!(
-            parse(&["--root", "--stdin"]).unwrap_err(),
+            parse_surgery(&["--root", "--stdin"]).unwrap_err(),
             "missing argument for --root"
         );
     }
@@ -158,7 +193,7 @@ mod tests {
     #[test]
     fn rejects_empty_root_equals_value() {
         assert_eq!(
-            parse(&["--root="]).unwrap_err(),
+            parse_surgery(&["--root="]).unwrap_err(),
             "missing argument for --root"
         );
     }
@@ -166,32 +201,32 @@ mod tests {
     #[test]
     fn rejects_unknown_arguments() {
         assert_eq!(
-            parse(&["--unknown"]).unwrap_err(),
+            parse_surgery(&["--unknown"]).unwrap_err(),
             "unknown surgery argument: --unknown"
         );
     }
 
     #[test]
     fn parse_surgery_rejects_duplicate_root_separated() {
-        let result = parse(&["--root", "/project-a", "--root", "/project-b"]);
+        let result = parse_surgery(&["--root", "/project-a", "--root", "/project-b"]);
         let err = result.expect_err("should reject duplicate separated --root");
         assert!(err.contains("duplicate argument: --root"));
     }
 
     #[test]
     fn parse_surgery_rejects_duplicate_root_equals() {
-        let result = parse(&["--root=/project-a", "--root=/project-b"]);
+        let result = parse_surgery(&["--root=/project-a", "--root=/project-b"]);
         let err = result.expect_err("should reject duplicate equals --root");
         assert!(err.contains("duplicate argument: --root"));
     }
 
     #[test]
     fn parse_surgery_rejects_duplicate_root_mixed() {
-        let result = parse(&["--root", "/project-a", "--root=/project-b"]);
+        let result = parse_surgery(&["--root", "/project-a", "--root=/project-b"]);
         let err = result.expect_err("should reject mixed duplicate --root");
         assert!(err.contains("duplicate argument: --root"));
 
-        let result_rev = parse(&["--root=/project-a", "--root", "/project-b"]);
+        let result_rev = parse_surgery(&["--root=/project-a", "--root", "/project-b"]);
         let err_rev = result_rev.expect_err("should reject mixed duplicate --root");
         assert!(err_rev.contains("duplicate argument: --root"));
     }

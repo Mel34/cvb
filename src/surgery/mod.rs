@@ -10,6 +10,7 @@ pub(crate) mod load;
 pub(crate) mod parse;
 pub(crate) mod plan;
 pub(crate) mod render;
+pub(crate) mod keys;
 pub(crate) mod token;
 #[allow(unused_imports)]
 pub(crate) use apply::*;
@@ -24,6 +25,8 @@ pub(crate) use parse::*;
 pub(crate) use plan::*;
 #[allow(unused_imports)]
 pub(crate) use render::*;
+#[allow(unused_imports)]
+pub(crate) use keys::*;
 #[allow(unused_imports)]
 pub(crate) use token::*;
 
@@ -726,6 +729,30 @@ WORKFLOW
 
 /// Planning and diff rendering happen before confirmation. Persistent project
 /// state is initialized only after the user confirms the proposed changes.
+pub(crate) fn find_begin_token(input: &str) -> Option<&str> {
+    for line in input.lines() {
+        if let Some(rest) = line.strip_prefix("CVB::") {
+            if let Some((token, suffix)) = rest.split_once("::BEGIN") {
+                if suffix.is_empty() || suffix.starts_with(' ') {
+                    return Some(token);
+                }
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn verify_envelope_token(input: &str, session_token: &str) -> Result<(), String> {
+    if let Some(token) = find_begin_token(input) {
+        if token != session_token {
+            return Err(format!(
+                "CVB: E-TOKEN: envelope token '{token}' does not match active session token '{session_token}'; run `cvb token` to print the current token."
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn run(
     dry_run: bool,
     stdin: bool,
@@ -733,15 +760,23 @@ pub(crate) fn run(
     spec: bool,
 ) -> ! {
     if spec {
-        let token = match token::generate_token() {
-            Ok(token) => token,
-            Err(error) => {
-                eprintln!("CVB: unable to generate surgery specification token: {error}");
+        let session_token = match std::env::var("CVB_TOKEN") {
+            Ok(token) if !token.trim().is_empty() => token,
+            _ => {
+                eprintln!("CVB: E-NOSESSION: no active surgery session (CVB_TOKEN not set).");
                 std::process::exit(2);
             }
         };
-        println!("{}", spec_text(&token));
-        std::process::exit(0);
+        match crate::context::get_spec_text(&session_token) {
+            Ok(text) => {
+                print!("{text}");
+                std::process::exit(0);
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        }
     }
 
     let session_token = match std::env::var("CVB_TOKEN") {
@@ -778,6 +813,11 @@ pub(crate) fn run(
             std::process::exit(2);
         }
     };
+
+    if let Err(error) = verify_envelope_token(input, &session_token) {
+        eprintln!("{error}");
+        std::process::exit(2);
+    }
 
     let (envelope, plan) = match parse_load_plan(&root, input) {
         Ok(result) => result,
@@ -1581,5 +1621,34 @@ mod tests {
         );
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn verify_envelope_token_accepts_matching_session_token() {
+        let input = "CVB::session123::BEGIN v=1 id=test\nCVB::session123::END ops=0";
+        assert!(verify_envelope_token(input, "session123").is_ok());
+    }
+
+    #[test]
+    fn verify_envelope_token_rejects_mismatched_token() {
+        let input = "CVB::other456::BEGIN v=1 id=test\nCVB::other456::END ops=0";
+        let err = verify_envelope_token(input, "session123").expect_err("should reject mismatched token");
+        assert_eq!(
+            err,
+            "CVB: E-TOKEN: envelope token 'other456' does not match active session token 'session123'; run `cvb token` to print the current token."
+        );
+    }
+
+    #[test]
+    fn verify_envelope_token_rejects_before_parsing_even_if_malformed_syntax() {
+        let malformed_input = "CVB::wrong_tok::BEGIN broken syntax\n!!!NOT VALID CSL!!!";
+        let err = verify_envelope_token(malformed_input, "session123").expect_err("should reject token before syntax parsing");
+        assert!(err.starts_with("CVB: E-TOKEN: envelope token 'wrong_tok' does not match active session token 'session123'"));
+    }
+
+    #[test]
+    fn verify_envelope_token_ignores_input_without_begin() {
+        let no_begin = "random text without begin line";
+        assert!(verify_envelope_token(no_begin, "session123").is_ok());
     }
 }

@@ -8,7 +8,7 @@ use std::process::{Command, Output};
 use crate::cascade;
 
 const SURGERY_REMINDER: &str =
-    "Edit with: cvb surgery --spec (one envelope per paste, use the printed token).";
+    "Edit with: cvb surgery (use the surgery format and the session token from the start of the conversation; cvb token prints it again).";
 
 type FileScope = (Option<String>, Vec<(usize, usize)>, Vec<String>);
 
@@ -2786,7 +2786,7 @@ fn other() {
     #[test]
     fn surgery_reminder_only_appears_once_on_successful_content_captures() {
         const REMINDER: &str =
-            "Edit with: cvb surgery --spec (one envelope per paste, use the printed token).";
+            "Edit with: cvb surgery (use the surgery format and the session token from the start of the conversation; cvb token prints it again).";
 
         let dir = std::env::temp_dir()
             .join(format!("cvb-pull-surgery-reminder-{}", std::process::id()));
@@ -2851,6 +2851,13 @@ fn other() {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+    #[test]
+    fn surgery_reminder_has_no_token_and_references_session_token_and_cvb_token() {
+        assert!(SURGERY_REMINDER.contains("session token from the start of the conversation"));
+        assert!(SURGERY_REMINDER.contains("cvb token"));
+        assert!(!SURGERY_REMINDER.contains("{TOKEN}"));
+    }
+
 
     #[test]
     fn run_end_to_end_in_temporary_git_repo() {
