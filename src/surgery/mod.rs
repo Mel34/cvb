@@ -1282,9 +1282,25 @@ pub(crate) fn run(
             std::process::exit(2);
         }
     }
-    print!("{diff}");
-
     use std::io::Write as _;
+    if let Err(error) = std::io::stdout().write_all(diff.as_bytes()) {
+        if let Some(ref mut c) = control {
+            if let Err(send_error) =
+                c.send(&crate::control::ControlMessage::SurgeryEnd {
+                    status: 1,
+                    outcome: String::new(),
+                })
+            {
+                eprintln!(
+                    "CVB: unable to write surgery diff: {error}; additionally failed to report surgery cleanup: {send_error}"
+                );
+                std::process::exit(2);
+            }
+        }
+        eprintln!("CVB: unable to write surgery diff: {error}");
+        std::process::exit(2);
+    }
+
     if let Err(error) = std::io::stdout().flush() {
         if let Some(ref mut c) = control {
             if let Err(send_error) =
