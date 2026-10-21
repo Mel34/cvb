@@ -1170,6 +1170,19 @@ pub(crate) fn run(
 
     use std::io::Write as _;
     if let Err(error) = std::io::stdout().flush() {
+        if let Some(ref mut c) = control {
+            if let Err(send_error) =
+                c.send(&crate::control::ControlMessage::SurgeryEnd {
+                    status: 1,
+                    outcome: String::new(),
+                })
+            {
+                eprintln!(
+                    "CVB: unable to flush surgery diff: {error}; additionally failed to report surgery cleanup: {send_error}"
+                );
+                std::process::exit(2);
+            }
+        }
         eprintln!("CVB: unable to flush surgery diff: {error}");
         std::process::exit(2);
     }
