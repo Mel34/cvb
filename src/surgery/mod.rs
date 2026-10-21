@@ -665,10 +665,19 @@ fn start_surgery(
     let tty = match open_tty() {
         Ok(file) => file,
         Err(error) => {
-            let _ = control.send(&crate::control::ControlMessage::SurgeryEnd {
-                status: 1,
-                outcome: String::new(),
-            });
+            if let Err(send_error) =
+                control.send(&crate::control::ControlMessage::SurgeryEnd {
+                    status: 1,
+                    outcome: String::new(),
+                })
+            {
+                return Err((
+                    format!(
+                        "CVB: E-NOTTY: interactive terminal confirmation requires /dev/tty: {error}; additionally failed to report surgery cleanup: {send_error}"
+                    ),
+                    2,
+                ));
+            }
             return Err((
                 format!(
                     "CVB: E-NOTTY: interactive terminal confirmation requires /dev/tty: {error}"
