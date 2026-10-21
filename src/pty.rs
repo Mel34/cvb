@@ -1159,6 +1159,10 @@ fn proxy(
             for message in control.receive()? {
                 handle_control_message(message, control, &mut transcript, &mut surgery_state)?;
             }
+
+            if control_events.contains(nix::poll::PollFlags::POLLHUP) {
+                break;
+            }
         }
     }
 
