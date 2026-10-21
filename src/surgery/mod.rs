@@ -1202,10 +1202,15 @@ pub(crate) fn run(
 
     if confirmation == ConfirmResult::Declined {
         if let Some(ref mut c) = control {
-            let _ = c.send(&crate::control::ControlMessage::SurgeryEnd {
-                status: 1,
-                outcome: String::new(),
-            });
+            if let Err(send_error) =
+                c.send(&crate::control::ControlMessage::SurgeryEnd {
+                    status: 1,
+                    outcome: String::new(),
+                })
+            {
+                eprintln!("CVB: failed to report declined-confirmation cleanup: {send_error}");
+                std::process::exit(2);
+            }
         }
         std::process::exit(SurgeryExitStatus::UserDeclined.code());
     }
