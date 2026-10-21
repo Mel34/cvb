@@ -1254,10 +1254,17 @@ pub(crate) fn run(
         Err(error) => {
             let status = error.exit_status().code();
             if let Some(ref mut c) = control {
-                let _ = c.send(&crate::control::ControlMessage::SurgeryEnd {
-                    status: 1,
-                    outcome: String::new(),
-                });
+                if let Err(send_error) =
+                    c.send(&crate::control::ControlMessage::SurgeryEnd {
+                        status: 1,
+                        outcome: String::new(),
+                    })
+                {
+                    eprintln!(
+                        "{error}; additionally failed to report surgery failure: {send_error}"
+                    );
+                    std::process::exit(2);
+                }
             }
             eprintln!("{error}");
             std::process::exit(status);
