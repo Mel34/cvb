@@ -779,12 +779,21 @@ fn run_pty(rcfile: &Path) -> Result<i32, String> {
                 sound.as_ref(),
             );
 
-            unsafe {
+            let restore_result = unsafe {
                 SIGWINCH_PIPE = None;
 
                 signal::signal(Signal::SIGWINCH, SigHandler::SigDfl)
-                    .map_err(|error| format!("CVB: unable to restore SIGWINCH handler: {error}"))?;
-            }
+                    .map_err(|error| format!("CVB: unable to restore SIGWINCH handler: {error}"))
+            };
+
+            let result = match (result, restore_result) {
+                (Ok(()), Ok(_)) => Ok(()),
+                (Err(proxy_error), Ok(_)) => Err(proxy_error),
+                (Ok(()), Err(restore_error)) => Err(restore_error),
+                (Err(proxy_error), Err(restore_error)) => {
+                    Err(format!("{proxy_error}; additionally, {restore_error}"))
+                }
+            };
 
             if let Err(error) = result {
                 return match terminate_and_reap_child(child) {
