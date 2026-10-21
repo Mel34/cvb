@@ -7,6 +7,7 @@ import pathlib
 import pty
 import re
 import select
+import socket
 import subprocess
 import tempfile
 import time
@@ -567,10 +568,14 @@ def test_mode_bracketed_paste_and_abort():
     with tempfile.TemporaryDirectory(prefix="cvb-surgery-mode-abort-") as tmp:
         root, target = make_project(tmp)
         state_home = pathlib.Path(tmp) / "state-home"
+        ctrl_parent, ctrl_child = socket.socketpair()
         pid, master_fd = pty.fork()
 
         if pid == 0:
             try:
+                os.dup2(ctrl_child.fileno(), 3)
+                ctrl_child.close()
+                ctrl_parent.close()
                 os.environ["XDG_STATE_HOME"] = str(state_home)
                 os.environ["CVB_TOKEN"] = "testtoken123"
                 os.execv(
@@ -582,6 +587,8 @@ def test_mode_bracketed_paste_and_abort():
                 )
             except BaseException:
                 os._exit(127)
+
+        ctrl_child.close()
 
         stty_before = get_stty(master_fd)
         output = bytearray()
@@ -623,6 +630,7 @@ def test_mode_bracketed_paste_and_abort():
                 _, child_status = os.waitpid(pid, 0)
                 raise AssertionError("CLI mode did not exit within 10 seconds")
         finally:
+            ctrl_parent.close()
             stty_after = get_stty(master_fd)
             os.close(master_fd)
 
@@ -637,10 +645,14 @@ def test_mode_two_press_apply():
     with tempfile.TemporaryDirectory(prefix="cvb-surgery-mode-apply-") as tmp:
         root, target = make_project(tmp)
         state_home = pathlib.Path(tmp) / "state-home"
+        ctrl_parent, ctrl_child = socket.socketpair()
         pid, master_fd = pty.fork()
 
         if pid == 0:
             try:
+                os.dup2(ctrl_child.fileno(), 3)
+                ctrl_child.close()
+                ctrl_parent.close()
                 os.environ["XDG_STATE_HOME"] = str(state_home)
                 os.environ["CVB_TOKEN"] = "testtoken123"
                 os.execv(
@@ -652,6 +664,8 @@ def test_mode_two_press_apply():
                 )
             except BaseException:
                 os._exit(127)
+
+        ctrl_child.close()
 
         stty_before = get_stty(master_fd)
         output = bytearray()
@@ -700,6 +714,7 @@ def test_mode_two_press_apply():
                 _, child_status = os.waitpid(pid, 0)
                 raise AssertionError("CLI mode did not exit within 10 seconds")
         finally:
+            ctrl_parent.close()
             stty_after = get_stty(master_fd)
             os.close(master_fd)
 
@@ -715,10 +730,14 @@ def test_mode_stale_file_stays_open_and_recovers():
     with tempfile.TemporaryDirectory(prefix="cvb-surgery-mode-stale-") as tmp:
         root, target = make_project(tmp)
         state_home = pathlib.Path(tmp) / "state-home"
+        ctrl_parent, ctrl_child = socket.socketpair()
         pid, master_fd = pty.fork()
 
         if pid == 0:
             try:
+                os.dup2(ctrl_child.fileno(), 3)
+                ctrl_child.close()
+                ctrl_parent.close()
                 os.environ["XDG_STATE_HOME"] = str(state_home)
                 os.environ["CVB_TOKEN"] = "testtoken123"
                 os.execv(
@@ -730,6 +749,8 @@ def test_mode_stale_file_stays_open_and_recovers():
                 )
             except BaseException:
                 os._exit(127)
+
+        ctrl_child.close()
 
         stty_before = get_stty(master_fd)
         output = bytearray()
@@ -789,6 +810,7 @@ def test_mode_stale_file_stays_open_and_recovers():
                 _, child_status = os.waitpid(pid, 0)
                 raise AssertionError("CLI mode did not exit within 10 seconds")
         finally:
+            ctrl_parent.close()
             stty_after = get_stty(master_fd)
             os.close(master_fd)
 
@@ -797,6 +819,23 @@ def test_mode_stale_file_stays_open_and_recovers():
         exit_code = os.WEXITSTATUS(child_status)
         require(exit_code == 3, f"expected abort exit 3 after stale recovery, got {exit_code}")
         require(target.read_text() == "interfering concurrent edit\n", "concurrent edit was overwritten")
+
+
+def test_missing_control_socket_fails():
+    with tempfile.TemporaryDirectory(prefix="cvb-surgery-missing-control-") as tmp:
+        root, _ = make_project(tmp)
+        proc = subprocess.run(
+            [str(BINARY), "surgery", "--root", str(root)],
+            env=dict(cvb_env(), CVB_TOKEN="testtoken123"),
+            capture_output=True,
+            text=True,
+            close_fds=True,
+        )
+        require(proc.returncode == 2, f"expected exit code 2, got {proc.returncode}")
+        require(
+            "E-NOSESSION: interactive surgery requires an active CVB session" in proc.stderr,
+            f"expected E-NOSESSION in stderr, got: {proc.stderr}",
+        )
 
 
 def main():
@@ -820,6 +859,7 @@ def main():
         ("missing session token", test_missing_session_token),
         ("mismatched session token", test_mismatched_session_token),
         ("missing TTY", test_missing_tty),
+        ("missing control socket fails", test_missing_control_socket_fails),
         ("declined confirmation", test_decline),
         ("confirmed apply", test_confirmed_apply),
         ("precondition clean error", test_precondition_failure_reports_clean_e_precond),

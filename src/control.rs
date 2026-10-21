@@ -112,6 +112,7 @@ impl ControlChannel {
 
     pub fn receive(&mut self) -> Result<Vec<ControlMessage>, String> {
         let mut buffer = [0u8; 4096];
+        let mut messages = decode_frames(&mut self.receive_buffer)?;
 
         loop {
             match read(self.fd.as_fd(), &mut buffer) {
@@ -119,9 +120,7 @@ impl ControlChannel {
                 Ok(count) => {
                     self.receive_buffer.extend_from_slice(&buffer[..count]);
 
-                    if self.receive_buffer.len() > HEADER_SIZE + MAX_FRAME_SIZE {
-                        return Err("CVB: control message exceeds maximum frame size".to_string());
-                    }
+                    messages.append(&mut decode_frames(&mut self.receive_buffer)?);
 
                     if count < buffer.len() {
                         break;
@@ -135,7 +134,9 @@ impl ControlChannel {
             }
         }
 
-        decode_frames(&mut self.receive_buffer)
+        messages.append(&mut decode_frames(&mut self.receive_buffer)?);
+
+        Ok(messages)
     }
 
     pub fn receive_one(&mut self) -> Result<ControlMessage, String> {
@@ -146,6 +147,10 @@ impl ControlChannel {
                         .try_into()
                         .map_err(|_| "CVB: invalid control message header".to_string())?,
                 ) as usize;
+
+                if length == 0 {
+                    return Err("CVB: control message has empty payload".to_string());
+                }
 
                 if length > MAX_FRAME_SIZE {
                     return Err("CVB: control message exceeds maximum frame size".to_string());
@@ -171,10 +176,6 @@ impl ControlChannel {
                 }
                 Ok(count) => {
                     self.receive_buffer.extend_from_slice(&buffer[..count]);
-
-                    if self.receive_buffer.len() > HEADER_SIZE + MAX_FRAME_SIZE {
-                        return Err("CVB: control message exceeds maximum frame size".to_string());
-                    }
                 }
                 Err(nix::errno::Errno::EINTR) => continue,
                 Err(error) => {
