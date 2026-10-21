@@ -837,10 +837,30 @@ fn run_surgery_mode(root: std::path::PathBuf, session_token: String) -> i32 {
                         Ok(p) => p,
                         Err(e) => {
                             eprintln!("\r\x1b[2K{e}");
-                            let _ = control.send(&ControlMessage::ClipboardWrite {
-                                text: e.to_string(),
-                            });
-                            let _ = control.send(&ControlMessage::SurgeryEnd { status: 1, outcome: String::new() });
+                            let clipboard_error = control
+                                .send(&ControlMessage::ClipboardWrite {
+                                    text: e.to_string(),
+                                })
+                                .err();
+                            let end_error = control
+                                .send(&ControlMessage::SurgeryEnd {
+                                    status: 1,
+                                    outcome: String::new(),
+                                })
+                                .err();
+
+                            if let Some(error) = clipboard_error {
+                                eprintln!(
+                                    "\r\x1b[2KCVB: control channel failed while reporting state-directory error: {error}"
+                                );
+                                return 2;
+                            }
+                            if let Some(error) = end_error {
+                                eprintln!(
+                                    "\r\x1b[2KCVB: control channel failed while ending surgery after state-directory error: {error}"
+                                );
+                                return 2;
+                            }
                             return SurgeryExitStatus::RejectedBeforeCommit.code();
                         }
                     };
