@@ -927,9 +927,14 @@ fn run_surgery_mode(root: std::path::PathBuf, session_token: String) -> i32 {
                     let _ = std::io::stderr().flush();
                 }
                 ModeAction::ReportDryRunError(err) => {
-                    let _ = control.send(&ControlMessage::ClipboardWrite {
+                    if let Err(error) = control.send(&ControlMessage::ClipboardWrite {
                         text: err.clone(),
-                    });
+                    }) {
+                        eprintln!(
+                            "\r\x1b[2KCVB: control channel failed while reporting dry-run error: {error}"
+                        );
+                        return 2;
+                    }
                     eprint!("\r\x1b[2K[^C cancel  ^V paste  ^B build] ");
                     let _ = std::io::stderr().flush();
                 }
