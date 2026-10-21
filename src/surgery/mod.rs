@@ -936,11 +936,31 @@ fn run_surgery_mode(root: std::path::PathBuf, session_token: String) -> i32 {
                                 let _ = std::io::stderr().flush();
                             } else {
                                 let report = error.to_string();
-                                let _ = control.send(&ControlMessage::ClipboardWrite {
-                                    text: report.clone(),
-                                });
-                                let _ = control.send(&ControlMessage::SurgeryEnd { status: 1, outcome: String::new() });
+                                let clipboard_error = control
+                                    .send(&ControlMessage::ClipboardWrite {
+                                        text: report,
+                                    })
+                                    .err();
+                                let end_error = control
+                                    .send(&ControlMessage::SurgeryEnd {
+                                        status: 1,
+                                        outcome: String::new(),
+                                    })
+                                    .err();
+
                                 eprintln!("\r\x1b[2K{error}");
+                                if let Some(send_error) = clipboard_error {
+                                    eprintln!(
+                                        "\r\x1b[2KCVB: control channel failed while reporting apply-plan error: {send_error}"
+                                    );
+                                    return 2;
+                                }
+                                if let Some(send_error) = end_error {
+                                    eprintln!(
+                                        "\r\x1b[2KCVB: control channel failed while ending surgery after apply-plan error: {send_error}"
+                                    );
+                                    return 2;
+                                }
                                 return error.exit_status().code();
                             }
                         }
