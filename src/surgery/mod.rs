@@ -1263,7 +1263,13 @@ pub(crate) fn run(
     }
 
     let diff = render_plan_diff(&plan, RenderOptions { color: false });
-    let mut control = crate::control::ControlChannel::client_on_fd(3).ok();
+    let mut control = match crate::control::ControlChannel::client_on_fd(3) {
+        Ok(control) => Some(control),
+        Err(error) => {
+            eprintln!("CVB: E-NOSESSION: surgery requires an active CVB session ({error}).");
+            std::process::exit(2);
+        }
+    };
     if let Some(ref mut c) = control {
         if let Err(send_error) =
             c.send(&crate::control::ControlMessage::SurgeryBegin {

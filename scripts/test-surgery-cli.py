@@ -21,6 +21,24 @@ def cvb_env():
         del env["CVB_BASH_SOURCE"]
     return env
 
+def run_with_control_socket(args, **kwargs):
+    ctrl_parent, ctrl_child = socket.socketpair()
+    source_fd = ctrl_child.fileno()
+    duplicate_fd = None
+    try:
+        if source_fd == 3:
+            duplicate_fd = os.dup(source_fd)
+            source_fd = duplicate_fd
+        kwargs["pass_fds"] = (3, source_fd)
+        kwargs["preexec_fn"] = lambda: os.dup2(source_fd, 3)
+        return subprocess.run(args, **kwargs)
+    finally:
+        if duplicate_fd is not None:
+            os.close(duplicate_fd)
+        ctrl_child.close()
+        ctrl_parent.close()
+
+
 BINARY = REPO / "target" / "debug" / "cvb"
 
 ENVELOPE = b"""CVB::testtoken123::BEGIN v=1 id=test-id
@@ -140,7 +158,7 @@ def test_dry_run():
     with tempfile.TemporaryDirectory(prefix="cvb-surgery-dry-run-") as tmp:
         root, target = make_project(tmp)
         state_home = pathlib.Path(tmp) / "state-home"
-        result = subprocess.run(
+        result = run_with_control_socket(
             [
                 str(BINARY), "surgery", "--dry-run", "--stdin",
                 "--root", str(root),
@@ -236,7 +254,7 @@ def test_mismatched_session_token():
 def test_missing_tty():
     with tempfile.TemporaryDirectory(prefix="cvb-surgery-no-tty-") as tmp:
         root, target = make_project(tmp)
-        result = subprocess.run(
+        result = run_with_control_socket(
             [
                 str(BINARY), "surgery", "--stdin",
                 "--root", str(root),
