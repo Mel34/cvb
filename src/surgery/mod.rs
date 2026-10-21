@@ -910,9 +910,14 @@ fn run_surgery_mode(root: std::path::PathBuf, session_token: String) -> i32 {
                     let _ = std::io::stderr().flush();
                 }
                 ModeAction::UpdatePagerChunk { chunk, status_line } => {
-                    let _ = control.send(&ControlMessage::ClipboardWrite {
+                    if let Err(error) = control.send(&ControlMessage::ClipboardWrite {
                         text: chunk.clone(),
-                    });
+                    }) {
+                        eprintln!(
+                            "\r\x1b[2KCVB: control channel failed while updating surgery clipboard: {error}"
+                        );
+                        return 2;
+                    }
 
                     if let Some(status) = status_line {
                         eprint!("\r\x1b[2K[^C cancel  ^V paste  ^B build] {status} ");
