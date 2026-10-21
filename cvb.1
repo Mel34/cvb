@@ -1,4 +1,4 @@
-.TH CVB 1 "October 2026" "CVB 0.4.0" "User Commands"
+.TH CVB 1 "October 2026" "CVB 0.7.0" "User Commands"
 .SH NAME
 cvb - terminal-to-LLM exchange utility
 .SH SYNOPSIS
@@ -8,6 +8,24 @@ cvb - terminal-to-LLM exchange utility
 .B cvb on
 .br
 .B cvb off
+.br
+.B cvb pull
+.RI [ file:PATH ]
+.RI [ cascade:N ]
+.I search-term...
+.br
+.B cvb surgery
+.RI [ --dry-run ]
+.RI [ --stdin ]
+.RI [ --root
+.IR PATH ]
+.RI [ --spec ]
+.br
+.B cvb context
+.br
+.B cvb spec
+.br
+.B cvb token
 .br
 .B cvb
 .I path
@@ -35,6 +53,23 @@ The active session is indicated by a red dot in the shell prompt.
 End the active CVB Bash session.
 
 When used outside an active session, CVB reports that no session is running.
+.TP
+.B pull R[Bfile:IPATHR] [Bcascade:INR] Isearch-term...R
+Search Git-tracked source files. Rust is parsed syntactically by item, Bash by function, and Markdown by heading.
+.TP
+.B surgery R[B--dry-runR] [B--stdinR] [B--root IPATHR] [B--specR]
+Enter interactive surgery mode on B/dev/ttyR to apply CVB Surgery Language (CSL) envelopes.
+Supports bracketed paste and Ctrl+V for envelope dry run, Space and arrow keys for multi-chunk diff paging, Ctrl+B two-press arming/commit, and Ctrl+C / 'q' abort.
+Requires an active CVB session (BCVB_TOKENR).
+.TP
+.B context
+Print the full context initialization text (instructions, manual, CSL specification, and session token), byte-identical to the launch clipboard.
+.TP
+.B spec
+Print the CSL surgery specification populated with the current session token.
+.TP
+.B token
+Print the active session token (BCVB_TOKENR).
 .TP
 .B --help, -h
 Display command-line help.
@@ -274,10 +309,19 @@ wl-clipboard
 .SH EXIT STATUS
 .TP
 .B 0
-The requested operation completed successfully.
+The requested operation completed successfully (or changes were applied / dry run passed).
+.TP
+.B 2
+Pre-commit rejection, syntax error, missing session (BE-NOSESSIONR), wrong token (BE-TOKENR), or missing terminal (BE-NOTTYR).
+.TP
+.B 3
+Interactive surgery declined or aborted by user (BCtrl+CR or B'q'R).
+.TP
+.B 4
+Surgery commit failure.
 .TP
 .B non-zero
-The operation failed, or an executed external command returned a non-zero status.
+General error or external command returned non-zero status.
 .SH SEE ALSO
 .BR bash (1),
 .BR wl-copy (1)
