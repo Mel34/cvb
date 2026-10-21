@@ -944,11 +944,31 @@ fn run_surgery_mode(root: std::path::PathBuf, session_token: String) -> i32 {
                     let _ = std::io::stderr().flush();
                 }
                 ModeAction::Abort { outcome } => {
-                    let _ = control.send(&ControlMessage::SurgeryEnd {
-                        status: 1,
-                        outcome: String::new(),
-                    });
+                    let clipboard_error = control
+                        .send(&ControlMessage::ClipboardWrite {
+                            text: "CVB surgery aborted\n".to_string(),
+                        })
+                        .err();
+                    let end_error = control
+                        .send(&ControlMessage::SurgeryEnd {
+                            status: 1,
+                            outcome: String::new(),
+                        })
+                        .err();
+
                     eprint!("\r\x1b[2K{outcome}");
+                    if let Some(error) = clipboard_error {
+                        eprintln!(
+                            "\r\x1b[2KCVB: control channel failed while reporting surgery abort: {error}"
+                        );
+                        return 2;
+                    }
+                    if let Some(error) = end_error {
+                        eprintln!(
+                            "\r\x1b[2KCVB: control channel failed while ending aborted surgery: {error}"
+                        );
+                        return 2;
+                    }
                     return SurgeryExitStatus::UserDeclined.code();
                 }
             }
