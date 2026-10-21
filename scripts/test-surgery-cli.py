@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Integration tests for the CVB surgery CLI confirmation workflow."""
 
+import atexit
 import errno
 import os
 import pathlib
@@ -839,6 +840,17 @@ def test_missing_control_socket_fails():
 
 
 def main():
+    # Keep surgery integration tests from overwriting the user's clipboard.
+    fake_bin = tempfile.TemporaryDirectory(prefix="cvb-test-bin-")
+    atexit.register(fake_bin.cleanup)
+
+    fake_wl_copy = pathlib.Path(fake_bin.name) / "wl-copy"
+    fake_wl_copy.write_text("#!/bin/sh\nexit 0\n")
+    fake_wl_copy.chmod(0o755)
+
+    os.environ["PATH"] = (
+        f"{fake_bin.name}{os.pathsep}{os.environ.get('PATH', '')}"
+    )
     build = subprocess.run(
         ["cargo", "build", "--quiet", "--bin", "cvb"],
         cwd=REPO,
