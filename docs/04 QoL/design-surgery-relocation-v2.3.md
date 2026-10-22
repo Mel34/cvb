@@ -1,45 +1,60 @@
 # CVB surgery: diff format and anchor relocation, design v2.3
 
-Status: design revision, no implementation. Supersedes v2.2, v2.1, v2 and v1 (`claude/design-surgery-relocation*.md`). This document is complete and self-contained: a reviewer who has not seen earlier versions can use it alone. It is intended to be the last design-only revision unless review finds a genuine contradiction; the handoff is regenerated from it.
+Status: Consolidated design following the milestone 0 source audit. This document supersedes conflicting statements in the original v2.3 design and its two amendments.
 
-Limit: I have not read the CVB source. Anything that depends on how the code is built is listed in section 5 as something to verify before coding, not assumed.
+Precedence applied:
 
-## 0. What changed since v2.2
+1. Amendment 2: reconciliation with the milestone 0 audit.
+2. Insert-anchor amendment: the established single-anchor representation.
+3. Original design v2.3: retained wherever it does not conflict with the above.
 
-| Topic | v2.3 |
-|---|---|
-| Commit lock | The lock must have a stable identity across atomic replacement (a lock on the target's own inode is not enough). Recommended: lock the parent directory. A sidecar lock file is the alternative. Lifecycle and contention rules stated. |
-| Multi-file commit | Reconciled: all hash checks happen before the first rename (two-phase commit). A failure after renames start triggers rollback from retained originals, and that mechanism must be proven by failure injection. |
-| View tag | Defined precisely (full-file hash, even for a range pull) and kept deferred until chooser frequency is measured. |
-| Mapping tests | Boundary and interaction cases added, plus a property test. Final-newline semantics for deleting the last line of an unterminated file flagged for definition. |
-| Diff parser | The unescape parse order is specified. Misplaced no-newline markers are parser errors. |
-| Limitation | Two ops with identical expected blocks, where either needs relocation, remain rejected in v1 as a documented, deliberate limitation, with a test. |
-| Sequencing | A read-only source audit is milestone 0. |
+The original amendments remain useful as historical records, but this document is the current consolidated specification.
+
+Audit limitation: The milestone 0 audit was read-only and source-based. It did not run tests or perform failure injection. Findings about existing source behavior are distinguished below from requirements that still need implementation, testing, or owner approval.
+
+## 0. Consolidation summary
+
+| Topic                 | Consolidated decision                                                                                                                                                                       |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Diff body             | Standard unified-diff gutter; source text begins immediately after the gutter character.                                                                                                    |
+| Diff escaping         | Escape unsafe Unicode characters on transformed lines; double literal backslashes on those lines; identify every transformed line in the notes.                                             |
+| Diff parser           | Parse body lines by hunk counts, not by interpreting their contents. Validate no-newline markers strictly.                                                                                  |
+| Pull output           | Remains raw UTF-8 `path:LINE: text` records. It does not adopt the diff renderer's escaping scheme.                                                                                         |
+| Coordinates           | All operations in an envelope resolve against one original snapshot and form one simultaneous edit set.                                                                                     |
+| Insert representation | One contiguous anchor block, a `before` or `after` placement, and a payload. No second anchor is implied.                                                                                   |
+| Duplicate matches     | A unique exact match is selected automatically. Multiple exact matches require a human choice in v1 because hint freshness is unknown.                                                      |
+| Commit lock           | Use the existing persistent project-wide `project.lock` sidecar and non-blocking exclusive `flock`.                                                                                         |
+| Commit verification   | Check all targets before journaling, retain per-file checks immediately before rename, and add a full all-target hash check after temporary files are prepared and before the first rename. |
+| Recovery              | Preserve the existing journal and its conditional recovery behavior. Do not claim multi-file commits are inherently atomic.                                                                 |
+| Final newline         | Preserve the original file's final-newline state, including when the last line is deleted.                                                                                                  |
+| View tag              | Deferred until chooser frequency and preselection accuracy can be measured.                                                                                                                 |
+| Remaining decisions   | Pull-output delimiter, final symlink/path-component hardening, and the user-facing procedure for clearing an unfinished `Prepared` transaction.                                             |
 
 ## 1. Diff format
 
-### 1.1 Findings
+### 1.1 Findings and principles
 
-- The reported bug: the diff printed marker, separator space, then the source line, so changed lines carried one extra leading space.
-- Commentary interleaved in the diff body is read by an LLM through the same first-column rule as source. An indented diagnostic line looks like a context line. Commentary does not belong in the body.
-- Per-line "leading spaces" notes on every Rust line are noise. Report anomalies only.
+The original rendering defect was an extra separator space between the diff marker and the source text. This made changed source lines appear to have an additional leading space.
+
+Commentary must not be interleaved with the diff body. The parser and an LLM both use the first column to identify source lines, so an indented diagnostic can be mistaken for a context line.
+
+Diagnostics should be conditional and should report meaningful anomalies rather than emit repetitive notes for every ordinary line.
 
 ### 1.2 Format
 
-1. Body is standard unified diff. Column 1 is the gutter: `' '` context, `-` removed, `+` added. Source text starts at column 2 with no separator.
-2. Op and relocation labels sit on the hunk header after the closing `@@`.
-3. A missing final newline uses the standard line `\ No newline at end of file`.
-4. A one-line legend precedes the diff.
-5. Commentary appears only after the diff, in a `=== notes ===` section, present only when there is something to say.
-6. The layout is uniform. Notes are conditional.
+1. The body is standard unified diff.
+2. Column 1 is the gutter:
+   - `' '` for context;
+   - `'-'` for removed text;
+   - `'+'` for added text.
+3. Source text starts in column 2. There is no additional separator space.
+4. Operation and relocation labels appear on the hunk header after the closing `@@`.
+5. An unterminated final line uses the standard marker `\ No newline at end of file`.
+6. A one-line legend precedes the diff.
+7. Commentary appears only after the body in a `=== notes ===` section, and only when there is something to report.
+8. The rendered diff string is shared by the pager and clipboard. The format and escaping must be implemented once, not independently for each output destination.
 
-Before and after (marker is column 1; the source indentation is 4 spaces):
-
-```
-col:     1234567890
-before:  -     if !is_left_pane {     marker, separator space, 4 source spaces
-after:   -    if !is_left_pane {      marker, 4 source spaces
-```
+Example:
 
 ```
 cvb surgery (dry run): 2 ops, 1 file
@@ -58,193 +73,143 @@ op 1 L121 +: indentation contains a tab (0x09); surrounding context uses spaces
 file src/ui.rs: no newline at end of file (preserved)
 ```
 
-### 1.3 Grammar (renderer and parser contract)
+The source line's own leading spaces are preserved exactly. The single gutter character is not part of the source text.
+
+### 1.3 Grammar and parser contract
 
 ```
 output     := banner LF legend LF file+ notes?
 file       := "--- " path LF "+++ " path LF hunk+
 hunk       := "@@ -" range " +" range " @@" label? LF body
-range      := start ("," count)?          ; omitted count means 1
-body       := ( gutterline | nonewline )*
+range      := start ("," count)?
+body       := (gutterline | nonewline)*
 gutterline := (" " | "-" | "+") text LF
-nonewline  := "\" " No newline at end of file" LF   ; qualifies the line before it; not counted
+nonewline  := "\ No newline at end of file" LF
 notes      := LF "=== notes ===" LF note*
 ```
 
-Ranges:
-- An omitted count means 1. `@@ -5 +5 @@` is a valid single-line hunk and equals `@@ -5,1 +5,1 @@`.
-- A count of 0 is allowed; when it is 0, `start` is the line before the empty range, as in standard unified diff.
-- The parser accepts both spellings. The renderer's canonical form omits `,1`, as GNU diff does.
+Range rules:
 
-Counting rule: a consumer reads gutter lines until `oldcount` (lines with `' '` or `-`) and `newcount` (lines with `' '` or `+`) are both exhausted, treating a following `nonewline` line as qualifying the previous line. Nothing in the body is interpreted by its content, only by its position. After the counts are exhausted, the next line must be a `@@` line, a `--- ` line (next file), a blank line followed by the notes header, or end of output.
+- An omitted count means one line. `@@ -5 +5 @@` is valid and equivalent to `@@ -5,1 +5,1 @@`.
+- A count of zero is allowed. Its start value is the line before the empty range, as in standard unified diff.
+- The parser accepts both explicit and omitted counts.
+- The renderer's canonical output omits `,1`.
 
-No-newline marker validity: a marker is valid only immediately after a gutter line of the same hunk, and only when that line is the final line of the side or sides it qualifies, as determined by the counts: after a `-` line when it exhausts `oldcount`, after a `+` line when it exhausts `newcount`, after a context line when it exhausts both. At most one marker follows a given line. A marker at the start of a body, after another marker, or after a line that is not final on its side is a parser error and is never accepted merely because the grammar permits the token.
+Body parsing is count-based. The parser reads gutter lines until the old and new line counts have both been exhausted. A context line consumes one line from each side; a removal consumes one old line; an addition consumes one new line. A no-newline marker qualifies the preceding gutter line and does not consume a line count.
 
-Why content cannot confuse it:
-- Every body line has a gutter character in column 1. A removed source line `-- foo` renders as `--- foo` but is read as body, because the counts say it is.
-- A source line `=== notes ===` renders as `+=== notes ===`, never as the notes header, which begins with `=` in column 1.
-- A source line `+++ b/x` renders as `++++ b/x`, and a source line `@@ -1 +1 @@` as `+@@ -1 +1 @@`, both read as body by count.
-- A source line equal to `\ No newline at end of file` renders as `+\ No newline at end of file`. The real marker has `\` in column 1.
+After the counts are exhausted, the next line must be a hunk header, the next file header, a blank line followed by the notes header, or the end of output.
 
-Paths containing a newline or other control character are rejected in v1, so header lines stay one line each.
+The parser must not infer structure from source text within the body. For example:
 
-### 1.4 Answers to the questions
+- A removed source line `-- foo` renders as `--- foo`.
+- A source line `=== notes ===` renders as `+=== notes ===`.
+- A source line `+++ b/x` renders as `++++ b/x`.
+- A source line `@@ -1 +1 @@` renders as `+@@ -1 +1 @@`.
+- A source line equal to `\ No newline at end of file` renders as `+\ No newline at end of file`.
 
-1. Exact format: 1.2 and 1.3. The payload is the text after column 1, subject to 1.5.
-2. Diagnostics are conditional and only for anomalies.
-3. Tabs and trailing whitespace: raw in the body, flagged in notes. CRLF, control and invisible characters, final newline: see 1.5.
-4. Familiar structure and reliable extraction both hold.
-5. Tests: 4.1.
+Each is body text because the gutter and hunk counts establish its role.
 
-### 1.5 Reconstruction contract
+No-newline marker validation:
 
-The body is byte-exact except where this section says otherwise.
+A marker is valid only immediately after a gutter line of the same hunk and only when that line is the final line of the side or sides it qualifies:
 
-**Source line.** A source line is the bytes between line terminators, excluding the terminator. In a CRLF file the `\r` of a CRLF terminator is part of the terminator, not the line. Mixed line endings in one file remain rejected. The file's ending (LF or CRLF) is stated once per file in the notes when it is CRLF, and is applied by CVB when it writes payload lines, so payloads never contain terminators. A last line without a terminator is marked by `\ No newline at end of file`.
+- After `-` when it exhausts the old count.
+- After `+` when it exhausts the new count.
+- After a context line when it exhausts both counts.
 
-**Transformed lines.** A line is transformed when it contains a character in the escape class. The starting definition of the class is: C0 and C1 control characters other than TAB (including NUL, DEL and a lone `\r` not part of a CRLF terminator), Unicode format characters (category Cf: zero-width characters, bidirectional controls, soft hyphen, byte-order mark), line and paragraph separators (U+2028, U+2029), and space separators other than the plain space (category Zs, such as no-break space). The exact list is data in the implementation and is locked by golden tests.
+At most one marker may follow a given line. A marker at the beginning of a body, after another marker, after a non-final line, or after a line that does not exhaust the relevant count is a parser error.
 
-Transformation rule: on a transformed line, each character in the class is rendered `\u{h}` (lowercase hex, no leading zeros, `0` for NUL), and every literal backslash is rendered `\\`. A line that is not transformed is raw, including any backslashes it contains.
+Paths containing newlines or other control characters are rejected in v1 so that file headers remain unambiguous.
 
-**Naming.** Every transformed line is named in the notes (`op 2 L140 +: shown escaped`, or `file src/x.rs L140 context: shown escaped`). Lines not named are raw. This is the only way a consumer learns that unescaping applies, so a source line that literally contains the text `\u{200b}` and is not named is read as those literal bytes, while a named line containing a real zero-width space is read as that character.
+### 1.4 Reconstruction contract
 
-**Reconstruction.** For a body line `B` (text after column 1):
-- not named in the notes: source text = `B` exactly;
-- named: source text = unescape(`B`), by a single left-to-right pass. At each backslash, the next character decides: `\` yields a literal backslash and both characters are consumed; `u` followed by `{`, one or more hex digits and `}` yields that scalar and the whole sequence is consumed; anything else is a parser error. Consumed characters are never rescanned. For example, the source text `\u{41}` plus a zero-width space renders as `\\u{41}\u{200b}`, and reconstruction consumes `\\` first, then reads `u{41}` as literal text, then the escape.
+The diff body is byte-exact except for the explicit transformation rules below. Target files must be valid UTF-8; invalid-byte escaping is not needed for this v1 contract.
 
-The terminator is never part of `B`. A line's terminator and the file's final-newline state come from the file note and the marker.
+#### Source lines and line endings
 
-Scope: the contract describes the rendering. Envelope payloads and expected text are raw bytes in v1, with no escape syntax. An expected block that contains a transformed line cannot be quoted faithfully by an LLM. In that case the mismatch diagnostic says the text contains characters shown escaped, and the LLM should anchor on neighboring lines. Whether to add an envelope escape syntax is deferred (section 6). Any other LLM-facing rendering of source (pull output) follows the same escaping and naming rule, and what pull does today is a verification item (section 5).
+A source line consists of the bytes between line terminators, excluding the terminator itself.
 
-The design assumes UTF-8 sources. If CVB accepts non-UTF-8 files today, invalid bytes need `\x{XX}` escaping under the same naming rule; verify the current behavior.
+- In a CRLF file, the `\r` that belongs to a CRLF terminator is not part of the source line.
+- Mixed line endings in one file are rejected.
+- CRLF is reported once per file in the notes and is applied by CVB when reconstructing the payload.
+- A final line without a terminator is marked with `\ No newline at end of file`.
+- Line terminators are not included in operation payload text.
 
-## 2. Relocation
+#### Transformed lines
 
-### 2.1 Principle
+A line is transformed if it contains at least one character in the escape class.
 
-Hints locate, exact content verifies. Every tier is a source of candidate locations, and a location is acceptable only if the whole expected block matches there byte for byte. Exact bytes establish that a block is eligible. They do not establish which identical occurrence was intended. So automatic selection among several exact matches requires a defensible indication that the hint is current, and without one a human chooses.
+The escape class is:
 
-### 2.2 Coordinate systems and the same-envelope contract
+- C0 and C1 control characters other than TAB, including DEL and a lone CR that is not part of a CRLF terminator;
+- Unicode format characters, category `Cf`, including zero-width characters, bidi controls, soft hyphen, and byte-order mark;
+- line and paragraph separators U+2028 and U+2029;
+- space separators other than ordinary U+0020, category `Zs`, including no-break space.
 
-- **V (view):** the file version the LLM was last shown, and the numbers it quotes. CVB cannot observe this. The initial baseline is the last pull of the file in this session, recorded by hash. Limitations, documented as such: the LLM may quote an older pull still in its context; the file may have changed between pulls; hints may come from the LLM's memory of earlier output; pulls in other sessions are unknown; a pull of a range does not show the rest of the file.
-- **S (snapshot):** the current file at planning time.
-- **R (result):** the file after a successful apply.
+The exact class is implementation data and must be locked by golden tests.
 
-Invariant to document, test and verify against the existing protocol: every op in one envelope carries hints in the same coordinate system, and all ops are resolved against the same snapshot. There is no sequential adjustment between ops of one envelope. The resolved ops are applied as one simultaneous edit set.
+On a transformed line:
 
-Footprint of an op: replaced or deleted lines, plus, for an insert, its before and after anchor lines (which must remain unmodified in the same envelope). Joint validation rejects:
-- overlapping footprints;
-- an op whose edit range intersects another op's anchor lines (this also covers an insert adjacent to a replaced range);
-- two inserts at the same boundary (identical or overlapping anchor pairs). CVB defines no order for them in v1; the envelope is rejected with a message naming both ops.
+- Each character in the escape class is rendered as `\u{h}`, with lowercase hexadecimal, no leading zeros, and `0` for NUL.
+- Every literal backslash is rendered as `\\`.
+- The entire line is named in the notes as `shown escaped`.
 
-If the existing validator or protocol defines ranges differently, settle this contract before coding.
+A line without characters in the escape class remains raw, including its backslashes.
 
-### 2.3 Edit ledger
+Examples of note entries:
 
-Hash: SHA-256 of the file's raw bytes (line endings and final newline included, no normalization), per file.
+```
+op 2 L140 +: shown escaped
+file src/x.rs L140 context: shown escaped
+```
 
-Hash points:
-- **Pull:** hash of the bytes the pull read. This is `H_view`, recorded whether the pull showed the whole file or a range.
-- **Planning:** hash of the snapshot bytes the plan is built against.
-- **Commit:** see 2.6. The file's hash is re-checked against the planning hash.
-- **After commit:** `post_hash` is the hash of the exact bytes CVB wrote (the reviewed bytes).
+Lines not named in the notes are raw.
 
-State per file: `NoView -> Valid(H_view, steps) -> Broken`.
-- A step is `pre_hash`, `post_hash`, and an edit set. An edit is `(start, old_len, new_len)` in the step's pre-coordinates; an insertion has `old_len = 0` and `start` is the line it is inserted before. Edits within a step are simultaneous. A step is committed only after a successful atomic apply; cancelled or rejected surgeries leave nothing.
-- **Observations.** CVB compares the file's current hash with the hash the ledger expects (`H_view` with zero steps, otherwise the last step's `post_hash`) only at observation points: a pull, planning, and the commit check. It does not watch the file between them.
-- **Broken.** The first observation that finds a mismatch moves the file to `Broken` and frees the steps immediately. A later restoration of the old bytes does not revive the ledger: `Broken` persists, and only a new pull of that file, which records a new `H_view` and zero steps, leaves it. Surgeries on a `Broken` file append nothing.
-- **Change and restore between observations.** If an external change and its exact reversal both happen between two observation points, CVB never sees the mismatch, the hash matches, and the ledger stays `Valid`. That is correct, because identical bytes mean identical coordinates. It is a property of observation, not a gap in the model.
-- CVB does not classify who made a change. A surgery's own write yields a hash the ledger expects. Anything else (editor, `git checkout`, rebase, undo, journal rollback) mismatches when observed.
-- All lookups go through one function that returns nothing unless the state is `Valid` and the observed hash equals the chain end, so a stale mapping cannot be reached.
-- Mapping a line `n` through one step: for each edit with `n >= start + old_len`, add `new_len - old_len`. If `start <= n < start + old_len`, the line is inside an edited region and is unmappable. Steps compose in order.
-- Mapping a block `[a, b]`: map both ends. The block is unmappable if an edit region overlaps it or an insertion falls strictly inside it (`a < start <= b`). An insertion at `start == a` shifts the block. One at `start == b + 1` does not affect it.
-- A same-length replacement maps lines identically but changes their content. A later anchor must quote the new text, and the exact check enforces this.
-- Line numbering is the same whether or not the last line has a terminator: an unterminated last line is still a line.
-- In a multi-file envelope, each file gets its own step, and all steps are recorded only after every file has committed (2.6).
+#### Reconstruction of transformed lines
 
-The ledger is a locator, never proof. The translated block must still match exactly. With the selection rule (2.4) the ledger never selects among duplicates by itself. Its remaining roles are labeling (`shift-tracked`), preselecting in the chooser, and warning: if the hint's region was rewritten by an earlier surgery and the block turns up at a far unique location, the label adds "hint region was modified by an earlier surgery; verify intent." Because a wrong preselection is not harmless when duplicates exist, the mapping rules are covered by the boundary and property tests in 4.3.
+For a body line `B`, meaning the text after the gutter:
 
-### 2.4 Resolution algorithm per op
+- If the line is not named in the notes, reconstruct its source text as `B` exactly.
+- If the line is named, reconstruct it with a single left-to-right unescape pass.
 
-1. Compute `C`: every exact match of the whole expected block (all lines) in the snapshot, no window. Overlapping candidates in a repeated-line block are distinct.
-2. Test whether the stated line `S` is in `C`. If the ledger is `Valid` with at least one step, compute the translated line `T` and test it.
-3. Decide:
+For a named line, the unescape rules are:
 
-| `|C|` | Hint known to be current? | Result |
-|---|---|---|
-| 0 | n/a | Abort with diagnostics (2.7). |
-| 1 | n/a | Use it. Label `exact` if it equals `S`, `shift-tracked` if it equals `T`, otherwise `searched`. Normal confirmation only. |
-| >1 | yes, and `S` in `C` | Use `S`, no extra prompt. |
-| >1 | no or unknown | **Choose-required.** |
+1. `\\` produces one literal backslash.
+2. `\u{` followed by one or more hexadecimal digits and `}` produces the corresponding Unicode scalar value.
+3. Any other backslash sequence is a parser error.
+4. Consumed characters are never rescanned.
 
-"Known to be current" requires positive evidence that the hint was produced from the exact file bytes now on disk. CVB cannot observe what the LLM saw. A fresh ledger, a ledger with zero steps, or a stated line that happens to match is not such evidence. The only mechanism proposed for obtaining it is the optional view tag (2.8), which is deferred. In v1 hint currency is unknown, the middle row is never taken, and every multi-candidate case is choose-required.
+For example, source text containing the literal sequence `\u{41}` followed by a zero-width space renders as:
 
-Choose-required preselects: the candidate equal to `T` if the ledger is valid with steps and `T` is in `C`; otherwise the candidate equal to `S` if present; otherwise nothing. If both `S` and `T` are in `C` and differ, `T` is preselected and `S` is shown labeled as the stated line. Preselection is a convenience for the chooser and is never an automatic decision.
+```
+\\u{41}\u{200b}
+```
 
-4. Joint validation of all resolved ops (2.2), then the normal confirmation. Relocated ops are labeled in the diff (`relocated: hint L120 -> L134 (+14), shift-tracked`, `searched`, or `chosen by user: L134 of {88,134,301}`). Reviewed bytes remain exactly the committed bytes.
+The first `\\` reconstructs as a literal backslash. The subsequent `u{41}` remains literal text, and the final escape reconstructs the zero-width space.
 
-Insert ops: the before and after anchors are one adjacent unit; search for the concatenated block. If the pair no longer adjoins anywhere, abort.
+This rule prevents literal escape-like source text from being mistaken for an encoded character.
 
-Documented v1 limitation: two ops in one envelope with identical expected blocks, where either needs relocation, abort with an explicit error naming both ops, and nothing is written. This is a deliberate restriction. A legitimate envelope that edits two separate occurrences of the same block is rejected until a joint-assignment rule is designed.
+The file's line terminators and final-newline state are reconstructed from the file-ending notes and no-newline marker.
 
-Promotion replay: relocation is disabled when the surgery applier is used mechanically (overlay promotion replaying net per-file changes). Replay is exact or fails.
+#### Payload limitation
 
-### 2.5 Choose-required UX
+Envelope expected text and payloads remain raw UTF-8 text in v1, with no escape syntax. If an expected block contains characters that the diff renderer shows escaped, the mismatch diagnostic must state that the text contains characters shown escaped. The LLM should use neighboring lines as anchors instead of copying the displayed escape notation into the envelope.
 
-Compared with the current review (dry-run diff, Space applies, `q` or Ctrl+C aborts): the chooser is a separate screen before the diff, shown only when choose-required applies. It lists up to 5 candidates, each with line numbers and two lines of context, sorted by distance from the hint, with the preselected one marked. The user selects by pressing the candidate's number or aborts with `q`. Space and Enter do not select, so a reflexive keypress cannot accept a location. After all ops are resolved, the plan is revalidated and the normal diff review follows, where Space applies.
+Adding an envelope escape syntax is deferred.
 
-- Cost: one extra deliberate keypress per ambiguous op. Because v1 has no freshness evidence, this applies to every op whose expected block appears more than once in the file, including a repeated block that matches at the stated line. Unique blocks are unaffected, and multi-line anchors rarely repeat. The preselected candidate makes the common case a single keypress.
-- Benefit: location is a human decision, and the diff review then judges content.
-- Rejected alternative: one screen where Space applies the preselected candidate. It fails the case where the reviewer sees the intended replacement and overlooks other identical occurrences.
-- More than 5 candidates: abort with "anchor too generic: N exact matches; quote more context."
-- `--dry-run` or any non-interactive mode: print the candidates, apply nothing, exit non-zero.
+### 1.5 Diagnostic behavior
 
-Suggested measurement once implemented: count how often the chooser appears and how often the preselected candidate is the one chosen. That data decides whether the view tag (2.8) is worth adding.
+On a mismatch, report:
 
-### 2.6 Commit protocol
+- The original hint.
+- The expected block, displayed safely.
+- The actual text near the hint, including up to two lines of surrounding context.
+- Exact candidate locations elsewhere in the file, where relevant.
+- How each location was derived, such as translated or searched.
+- A warning when the expected text contains characters shown escaped.
+- Any available ledger information indicating that an earlier surgery rewrote the requested region.
 
-#### Guarantees, stated as achievable
-
-- If any hash or stat check fails in the prepare or final-check phases below, CVB aborts and writes nothing, for every file in the envelope.
-- If a failure occurs after the first rename, CVB attempts to restore every already-committed file from retained originals. If restoration succeeds, the result is as if nothing was written. If it fails, CVB stops and reports exactly which files are in which state and where the originals are kept. This rollback must be proven, not assumed (see tests and the source audit).
-- Writers that cooperate (other CVB sessions, including candidate sessions) are excluded for the duration of the commit by the lock below.
-- A writer that does not cooperate, such as an editor, can still change a file after the final re-check and before that file's rename. That window is small but nonzero, and in a multi-file commit it lasts until the file's own rename. It cannot be closed on POSIX without mandatory locking. In that case the other writer's change to that file is lost. CVB narrows the window and does not claim to remove it. The limitation is documented in the CVB manual in plain language.
-
-#### Lock requirement
-
-The lock must keep one stable identity across atomic replacement. A lock held on the target file's own inode does not do this: after a rename replaces the inode, a second session that opens the path locks the new inode while the first still holds the old one, and the two locks do not exclude each other.
-
-Recommended mechanism: an advisory exclusive lock on the target's parent directory, taken through a read-only directory descriptor. The directory's identity does not change when its children are renamed, no lock file has to be created, ignored by version control, or cleaned up, and the lock is released when the process exits or crashes.
-
-Alternative: a sidecar lock file at a consistently derived path. It works but adds a lock file to manage, and its path must not be derived from per-session state locations that candidate sessions override, or the candidate and main sessions would use different locks. A path derived from the target's canonical location, or a shared runtime directory, avoids that.
-
-Rules that apply to either mechanism:
-- Canonicalize the target path first, and verify how the applier treats a symlinked target (whether rename replaces the link or its destination) before relying on a lock identity.
-- For a multi-file envelope, acquire locks for every distinct parent directory (or sidecar) in sorted canonical-path order, to avoid deadlock between sessions.
-- Never hold the lock during interactive review. It is taken at the start of prepare and released after the ledger steps are recorded and directories are synced.
-- Contention: try without blocking, with a short bounded wait (about 5 seconds), then abort with "another cvb commit is in progress," writing nothing.
-
-The choice between directory lock and sidecar is made at the source audit; the stable-identity requirement is mandatory either way.
-
-#### Two-phase commit
-
-A. Prepare. Acquire locks. For each file: read its bytes and verify the hash equals the planning hash, otherwise abort ("file changed during review"); capture inode, size and mtime; build the output; write it to a temp file in the same directory (same filesystem), matching permissions and ownership as far as possible; flush to disk. Retain the original bytes (in memory or the journal) for rollback.
-
-B. Final check. For every file, re-stat (inode, size, mtime must equal the values captured in A) and re-hash. Any difference aborts, removes all temp files, and writes nothing.
-
-C. Commit. Rename each temp over its target in a fixed order, then sync the directories. On a failure partway, roll back as described under Guarantees.
-
-D. Record. Only after every rename succeeded, record one ledger step per file with `post_hash` (the hash of the bytes written).
-
-All per-file checks happen in A and B, before the first rename. Individually atomic renames do not by themselves make an envelope atomic. Envelope atomicity comes from checking everything first and from the rollback mechanism, which integrates with the existing transaction mechanism and whose behavior is a prerequisite of the audit.
-
-Deferred: an extra detect-and-recover measure (hard-linking the original to a backup name before the rename and re-hashing it afterwards) is not part of this design. Whether it is needed depends on what the existing journal and write path already provide, so the decision waits for the source audit.
-
-### 2.7 Diagnostics and reporting
-
-On abort: the original hint; the expected block, displayed safely (same escaping and naming rules); the actual text at the hint plus or minus 2 lines; any exact candidates elsewhere (relevant when relocation was declined, for example under `--dry-run`); how each location was derived (translated or searched); a remark when the expected text contains characters shown escaped; and, if the ledger recorded that an earlier surgery rewrote the requested text, which one.
-
-After a successful apply, print a piecewise line map for each file that moved, in the output the LLM sees:
+After a successful apply, print a piecewise line map for every file whose line positions changed. For example:
 
 ```
 src/pull.rs: line map, original -> current (now 812 lines)
@@ -254,149 +219,716 @@ src/pull.rs: line map, original -> current (now 812 lines)
   303-end    -> 315-end  (+12)
 ```
 
-### 2.8 Optional view tag (deferred)
+### 1.6 Pull output is a separate contract
 
-Definition if adopted. The tag is a short prefix (at least 12 hex digits) of the SHA-256 of the entire raw file bytes at the time of the pull, printed in the pull output for each file even when only a range is displayed. The envelope may echo it per file. CVB compares it as a prefix of the file's current full-file hash.
-- A matching tag is evidence that the quoted line numbers refer to that snapshot. It does not claim the model saw every line, and a partial-range hash would not establish that the whole file is unchanged, which is why the hash covers the full file.
-- An absent or mismatched tag does not establish freshness, so the chooser applies.
+Pull output currently consists of raw UTF-8 `path:LINE: text` records. It does not escape unusual characters or represent line terminators.
+
+Unlike the diff renderer, pull output must remain raw in v1 because LLM-generated envelope text is raw and has no escape syntax. The diff renderer's escaping and naming scheme must not be applied to pull output as part of this work.
+
+The space after the second colon is an open usability question. It may make source-leading spaces ambiguous to an LLM. The owner must decide whether to leave it, add a legend, or remove the space. This is outside milestone 1 unless explicitly approved.
+
+## 2. Relocation
+
+### 2.1 Principle
+
+Hints locate; exact content verifies.
+
+Every tier is a source of candidate locations, and a location is acceptable only if the whole expected block matches there byte for byte. Exact bytes establish eligibility but do not establish which occurrence was intended.
+
+Automatic selection among multiple exact matches therefore requires defensible evidence that the hint is current. Without that evidence, a human chooses.
+
+### 2.2 Coordinate systems and same-envelope contract
+
+Three coordinate systems are relevant:
+
+- V — view: the file version the LLM was last shown, and the line numbers it quotes. CVB cannot observe exactly what the LLM saw. The initial baseline is the last pull of the file in the session, recorded by hash.
+- S — snapshot: the current file at planning time.
+- R — result: the file after a successful apply.
+
+Known limitations include older pulls remaining in model context, files changing between pulls, hints drawn from remembered output, other sessions' pulls being unknown, and range pulls not showing the rest of a file.
+
+Same-snapshot invariant: all operations in one envelope are resolved against the same original snapshot. The protocol's line hints refer to that snapshot. Operations are not sequentially adjusted to account for one another.
+
+After resolution and joint validation, the operations are applied as one simultaneous edit set in descending position order. Operations need not appear in file order in the envelope.
+
+The existing source audit confirmed that the current implementation follows this coordinate and application model.
+
+### 2.3 Insert representation
+
+An insert operation consists of:
+
+- One contiguous anchor block `A` containing one or more lines, verified byte for byte.
+- A placement, either `before` or `after`.
+- The payload to insert.
+
+There is no second anchor. The existing protocol's single contiguous anchor block plus placement is the established v1 contract; relocation must not silently change it.
+
+If anchor block `A` occupies lines `a..b`:
+
+- `before` means insertion boundary `P` lies between lines `a - 1` and `a`.
+- `after` means insertion boundary `P` lies between lines `b` and `b + 1`.
+
+The corresponding ledger edit is:
+
+```
+(start = P's following line, old_len = 0, new_len = payload lines)
+```
+
+The placement remains unchanged when an anchor is relocated.
+
+The diff label identifies the anchor and placement, for example:
+
+```
+relocated: anchor hint L120 -> L134, insert after
+```
+
+#### Resolving an insert
+
+Resolve the contiguous anchor block exactly like any other expected block:
+
+1. Search the whole snapshot for every exact match of the complete anchor block.
+2. Apply the normal resolution decision table in section 2.5.
+3. After selecting the candidate, compute insertion boundary `P` from the candidate and its `before` or `after` placement.
+
+Do not search for a concatenated before/after anchor pair. Do not reject an insert merely because a hypothetical second anchor no longer adjoins the first; there is no second anchor in this representation.
+
+#### Insert footprints and boundary conflicts
+
+The footprint of an insert is its anchor block `a..b`. Its anchor lines are read-only within the envelope: another operation whose replace or delete range intersects those lines is rejected.
+
+Two inserts whose resolved insertion points `P` are the same boundary are rejected, and the diagnostic names both operations. The comparison is made using resolved boundaries, not anchor identities.
+
+For example:
+
+- Insert after line 10 and insert before line 11 resolve to the same boundary and are rejected.
+- Insert before `A` and insert after `A` resolve to different boundaries and are not rejected by the same-boundary rule alone.
+
+An insert adjacent to a replaced or deleted range requires care. For example, insert after line 10 and replace line 11 share a boundary but do not edit the same line. If accepted by the existing validator, inserted text precedes the replacement. Relocation must preserve existing validator behavior and must not silently loosen existing restrictions or introduce new ones beyond the adopted rules.
+
+Overlapping read-only anchors follow the existing validator's behavior. The audit must document which combinations are accepted and rejected.
+
+V1 rejects inserts at the start or end of a file. Preserve this restriction even though the single-anchor representation can express those positions.
+
+#### Weaker property of the existing representation
+
+A two-sided anchor would verify text on both sides of the insertion point. A single anchor verifies only one side.
+
+If an earlier surgery inserts lines immediately after `A`, a later `insert after A` resolves immediately after `A`, before those intervening lines. The text on the far side of the insertion point is not part of the anchor verification. The diff review still shows surrounding context so the reviewer can see what is adjacent.
+
+This limitation is inherent in the established v1 protocol. An optional verified-neighbor anchor could be a future protocol extension, but is not part of this work.
+
+### 2.4 Edit ledger and hash chain
+
+All file hashes are SHA-256 over raw file bytes, including line endings and final-newline state, without normalization.
+
+#### Hash points
+
+- Pull: hash the bytes read by the pull. Record `H_view`, whether the pull displayed the whole file or only a range.
+- Planning: hash the snapshot against which the plan is built.
+- Commit: re-check the planned bytes according to section 3.
+- After commit: `post_hash` is the hash of the exact bytes CVB wrote.
+
+#### Per-file state
+
+The ledger state is:
+
+```
+NoView -> Valid(H_view, steps) -> Broken
+```
+
+Each committed step contains:
+
+- `pre_hash`;
+- `post_hash`;
+- an edit set in the step's pre-coordinates.
+
+An edit is represented as `(start, old_len, new_len)`. For an insert, `old_len = 0` and `start` is the line before which the insertion is recorded.
+
+Edits within a step are simultaneous. A step is recorded only after the transaction journal reaches `Committed`. A cancelled, rejected, failed, or rolled-back surgery records no step.
+
+#### Observation points and invalidation
+
+CVB compares the current file hash against the hash expected by the ledger at observation points: pull, planning, and commit check. It does not watch the file continuously.
+
+- If no surgery has been recorded, the expected hash is `H_view`.
+- Otherwise, the expected hash is the latest step's `post_hash`.
+- On the first observed mismatch, the ledger becomes `Broken` and its steps are immediately freed.
+- `Broken` persists even if the file is later restored to its former bytes. Only a new pull of that file establishes a new `H_view` and resets the ledger to zero steps.
+- Surgeries on a `Broken` file append nothing.
+
+If an external change and exact reversal both occur between observation points, CVB may never observe the mismatch. Matching bytes mean matching coordinates; this is an observation limitation, not a separate mapping rule.
+
+CVB does not identify who changed a file. An editor, `git checkout`, rebase, undo, or journal rollback is an external change if the resulting bytes differ from the ledger's expected hash.
+
+All lookups go through one function that returns no mapping unless the ledger is `Valid` and the observed hash matches the chain end.
+
+#### Mapping rules
+
+To map a line `n` through one step, apply each edit:
+
+- If `n >= start + old_len`, add `new_len - old_len`.
+- If `start <= n < start + old_len`, the line lies inside an edited region and is unmappable.
+- Otherwise, the edit does not affect the line.
+
+Steps compose in order.
+
+To map a block `[a, b]`, map both endpoints. The block is unmappable if an edit region overlaps it or an insertion falls strictly inside it (`a < start <= b`). An insertion at `start == a` shifts the block; an insertion at `start == b + 1` does not affect it.
+
+A same-length replacement leaves line positions unchanged but changes content. A later operation must quote the new text, and exact verification enforces that requirement.
+
+Line numbering treats an unterminated last line as an ordinary line.
+
+For a multi-file envelope, each file gets one ledger step. All steps are recorded only after every file has committed and the journal is `Committed`.
+
+The ledger is a locator, never proof. Mapped blocks still require exact matching. The ledger does not select automatically among duplicates. Its roles are labels such as `shift-tracked`, chooser preselection, and warnings when an earlier surgery rewrote the hinted region.
+
+### 2.5 Resolution algorithm
+
+For each operation:
+
+1. Compute `C`, the set of every exact whole-block match in the snapshot. Do not limit the search to a window. Overlapping candidates in repeated-line blocks are distinct candidates.
+2. Check whether the stated line `S` is in `C`.
+3. If the ledger is `Valid` with at least one step, compute translated line `T` and check whether it is in `C`.
+4. Apply the following decision table.
+
+| Number of exact candidates | Hint known to be current? | Result                           |
+| -------------------------- | ------------------------- | -------------------------------- |
+| `0`                        | Not applicable            | Abort with diagnostics.          |
+| `1`                        | Not applicable            | Use the unique candidate.        |
+| More than `1`              | Yes, and `S` is in `C`    | Use `S` without an extra prompt. |
+| More than `1`              | No or unknown             | Require a human choice.          |
+
+A hint is known to be current only if there is positive evidence it was produced from the exact file bytes now on disk. A fresh ledger, a ledger with zero steps, or a matching stated line does not prove this.
+
+The only proposed freshness mechanism is the optional view tag in section 2.7, which remains deferred. In v1, hint freshness is unknown, so every multi-candidate case requires a human choice.
+
+For a unique candidate, label it:
+
+- `exact` if it matches `S`;
+- `shift-tracked` if it matches `T`;
+- `searched` otherwise.
+
+For multiple candidates, preselect for convenience only:
+
+1. Candidate `T`, if the ledger is valid with steps and `T` is a candidate.
+2. Otherwise candidate `S`, if it is a candidate.
+3. Otherwise no candidate.
+
+If both `S` and `T` are candidates and differ, preselect `T` and identify `S` as the stated line. Preselection is never an automatic decision.
+
+After resolution, jointly validate all operations, then present the normal confirmation diff. The same resolved plan must drive the diff, confirmation, and commit; no second resolution may alter the reviewed bytes.
+
+Relocated operations are labeled in the diff, for example:
+
+```
+relocated: hint L120 -> L134 (+14), shift-tracked
+searched
+chosen by user: L134 of {88,134,301}
+```
+
+#### Identical expected blocks
+
+Two operations in one envelope with identical expected blocks, where either operation requires relocation, are rejected in v1 with an explicit error naming both operations. Nothing is written.
+
+This is a deliberate v1 limitation. A legitimate envelope that intends to edit two separate occurrences of the same block remains unsupported until a joint-assignment rule is designed.
+
+Promotion replay is different: when the surgery applier is used mechanically to replay net per-file changes, relocation is disabled. Replay is exact or fails.
+
+### 2.6 Choose-required user experience
+
+The chooser is a separate screen before the diff review and appears only when an operation has multiple candidates.
+
+It lists up to five candidates, each with line numbers and two lines of context, sorted by distance from the hint. Any preselected candidate is marked.
+
+- Press the candidate's number to choose it.
+- Press `q` to abort.
+- Space and Enter do not select a candidate.
+- No file is written before a choice is made.
+
+Once every operation is resolved, the plan is revalidated and the ordinary diff review follows. Space applies the reviewed plan.
+
+Because v1 has no freshness evidence, the chooser applies to every operation whose expected block appears more than once, even if one occurrence matches the stated line.
+
+If there are more than five candidates, abort with:
+
+```
+anchor too generic: N exact matches; quote more context
+```
+
+In `--dry-run` or other non-interactive mode, print the candidates, apply nothing, and exit non-zero.
+
+The chooser adds one deliberate keypress per ambiguous operation. The preselected candidate is a convenience, not an assertion that it is correct.
+
+Measure chooser frequency and how often the preselected candidate is chosen before deciding whether the optional view tag is worth implementing.
+
+### 2.7 Optional view tag — deferred
+
+If adopted, a view tag is a short prefix of at least 12 hexadecimal digits of the SHA-256 hash of the entire raw file at pull time. Print it for each file even when the pull displays only a range. An envelope may echo the tag per file.
+
+A matching tag is evidence that the quoted line numbers refer to that snapshot, but it does not establish that the LLM saw every line. A range-only hash would not establish that the rest of the file is unchanged, so the hash must cover the entire file.
+
 - A matching tag never replaces exact-content verification.
-- Residual: the tag authenticates the pull it was copied from, not each individual number the model quotes.
+- An absent or mismatched tag does not establish freshness, so the chooser remains required.
+- A matching tag and a stated line that is an exact candidate could allow the stated occurrence to be used without the chooser.
 
-With a matching tag and `S` in `C`, the stated line could be used among duplicates without the chooser. The tag is not implemented in v1. It would reverse the earlier decision to drop revision tags from v1, so it waits for measured chooser frequency (2.5).
+The tag is not implemented in v1. Reconsider only after measuring chooser frequency and preselection accuracy.
 
-## 3. Sequencing
+## 3. Commit protocol, locking, and recovery
 
-0. Read-only source audit (section 5), delivered as a written report. Nothing that depends on current applier, journal, or protocol behavior starts before it. It must settle the lock mechanism and multi-file failure behavior.
-1. Diff contract, grammar, reconstruction contract and tests. Rendering only.
-2. Commit-time verification and locking (2.6), integrated with the existing transaction mechanism. Independent of relocation, since the review delay exists today.
-3. Mismatch diagnostics with a read-only whole-file candidate listing in rejection messages. No behavior change. The search code built here is reused.
-4. Resolver as a pure function, ledger absent: whole-file search, the decision table, chooser, joint validation.
-5. Post-apply line map. It derives from the applied edit set and does not depend on the ledger.
-6. Edit ledger with hash chain. It never makes an automatic choice, so its value is preselection, labels and warnings. It is built after the chooser's real frequency and preselection accuracy are known.
-7. End-to-end tests.
+### 3.1 Existing lock mechanism
 
-Search comes before the ledger because it is stateless and fixes the reported failure whenever the quoted block is unique. Each step is a small, reviewable change with tests.
+Use the existing persistent sidecar lock, `project.lock`, in the project's state directory.
 
-## 4. Test matrix
+The lock is acquired with a non-blocking exclusive `flock` and held for the commit only. It is separate from target files, so replacing a target does not change the lock's identity.
 
-### 4.1 Diff contract
+The earlier proposal to lock the parent directory is withdrawn. A stable sidecar mechanism already exists; replacing it would require a demonstrated reason.
 
-- Changed lines are exactly marker plus source text for non-transformed lines.
-- Hunk headers: `@@ -5 +5 @@` (both counts omitted) parses as one-line hunks; `@@ -5,1 +5,1 @@` is accepted; the renderer emits the canonical form without `,1`; counts of 0 parse with `start` as the line before; a single-line hunk renders and round-trips.
-- Property: for random source lines (leading spaces 0, 1, 4, 8; tabs; trailing whitespace; empty; non-ASCII), a parser that strips column 1 and honors the hunk counts reproduces the source for non-transformed lines.
-- Empty added line renders as `+` alone; empty context line as a single space.
-- Adversarial source lines, each read back by the count-based parser as body: `-- foo` (removed), `=== notes ===`, `+++ b/x`, `--- a/x`, `@@ -1 +1 @@`, `\ No newline at end of file`.
-- Escape contract: a real zero-width space renders as `\u{200b}` and is named in the notes. A raw, unnamed line containing the literal text `\u{200b}` reconstructs literally. A named line whose source has a literal backslash next to escape-like text, such as `\u{41}` plus a zero-width space (rendered `\\u{41}\u{200b}`), reconstructs exactly; also `\\` followed by `u{41}`, a backslash at the end of a transformed line, and two adjacent backslashes. Consumed characters are never rescanned. A raw line containing `\\` stays literal. Coverage of the class: NUL, DEL, a C1 control, a lone CR, no-break space, ZWJ, BOM, U+2028. Any other backslash sequence on a named line is a parser error.
-- No-newline markers: valid after the last `-`, `+`, or context line on its side; rejected at the start of a body, after another marker, after a non-final line, after a line that does not exhaust the relevant count, and twice after the same line. Old side unterminated, new side terminated: `-foo`, marker, `+foo` round-trips.
-- CRLF file: terminators are not in line text; the notes state CRLF once; payload reconstruction applies CRLF; mixed endings rejected. Last line without a terminator: marker present, round-trips.
-- Nothing in the output but headers, gutter lines, `\ No newline` markers and the notes section.
-- Notes only when relevant, after `=== notes ===`, naming op, line and side. Legend present. A path containing a control character is rejected.
-- Renderer-parser round trip on every golden sample.
+The previous proposal to acquire multiple directory locks in sorted order and wait up to five seconds is also withdrawn. There is one project-wide lock, so multi-lock ordering is unnecessary. Existing contention behavior remains immediate failure with `E-LOCK` and a clear message unless usage establishes a need for waiting.
 
-### 4.2 Resolution
+Requirements:
 
-| Case | Expected |
-|---|---|
-| Block at stated line, unique | `exact` |
-| Block repeated; stated line matches; any ledger state (v1, no freshness evidence) | chooser required, stated line preselected |
-| Block repeated; stated line does not match | chooser required, no preselection unless `T` matches |
-| Prior surgery inserted N lines above, block unique | `shift-tracked` or `searched` (same location) |
-| Prior surgery removed lines above | negative shift works |
-| LLM already corrected its numbers, block unique | `exact`, no double shift |
-| Block repeated; stated and translated both match, differ | chooser, translated preselected, stated shown |
-| Block repeated; ledger valid, only translated matches | chooser, translated preselected |
-| Block repeated; ledger `Broken` | chooser; stated line preselected if it matches |
-| Prior edit overlaps the block | translation skipped; search only |
-| Hint far from a unique block | `searched`, no distance limit |
-| Hint region rewritten by earlier surgery, block found far away | label warns to verify intent |
-| 2 to 5 candidates | chooser; Space and Enter do not select; number selects; `q` aborts; nothing written before choice |
-| More than 5 candidates | abort, "too generic" |
-| Block absent | abort, diagnostics show actual text near the hint |
-| Expected text contains a transformed character | diagnostic says so |
-| Overlapping candidates in a repeated-line block | each listed |
-| Insert with multi-line anchors, still adjacent | relocated as a unit |
-| Insert anchors no longer adjoin | rejected |
-| Two ops with overlapping footprints | rejected |
-| Op edit range intersects another insert's anchor | rejected |
-| Two inserts at the same boundary | rejected, both ops named |
-| Mixed envelope, one exact and one relocated | applied together or not at all |
-| Identical expected blocks in two ops, one needs relocation | explicit error naming both ops, nothing written (documented v1 limitation) |
-| `--dry-run` with ambiguity | candidates printed, non-zero exit, nothing written |
-| Promotion replay | relocation disabled; mismatch fails |
-| Cancelled surgery | no ledger step |
-| Pull after surgery | ledger resets to the new `H_view` with zero steps |
-| If a view tag is adopted later: matching tag and stated line is a candidate | stated line used without the chooser; an absent or non-matching tag uses the chooser; exact-content check still applies |
+1. CVB must never remove and recreate the lock file while another process may hold it.
+2. Every session that commits into the project tree must use the same project lock.
+3. The lock location is derived from the state directory (`XDG_STATE_HOME`, otherwise `HOME`).
+4. Candidate sessions may use their own state locations for their own workspaces.
+5. When promotion replays changes into the real project tree, it must acquire the real project's lock.
 
-### 4.3 Ledger, mapping and commit
+The source audit identified these requirements for verification and testing; it did not demonstrate that every case passes.
 
-Ledger and observation:
-- Hash matches after CVB's own write; the chain stays valid across two successive surgeries.
-- External edit observed at planning: mismatch moves the file to `Broken` and frees the steps.
-- Break then restore: the ledger stays `Broken` after the bytes are restored; only a new pull revives it.
-- Change and exact restore between two observation points: the hash matches and the ledger stays `Valid`.
-- `Broken` file: lookup returns nothing; surgery appends nothing.
-- Undo or journal rollback: breaks the chain when observed.
-- Whole-file hash covers CRLF versus LF and final-newline changes.
+### 3.2 Commit sequence
 
-Mapping boundaries (unit tests on the mapping function with synthetic edit sets, plus operation-level tests where the v1 protocol allows the operation):
-- Insertion before the first line (`start = 1`) and after the last line (`start = N + 1`). Both must map correctly in the function even though v1 insert ops cannot produce them, and v1 insert ops at either end are rejected.
-- Deleting the last line; replacing the first line; replacing the whole file excluding the empty-file case.
-- Files with and without a final newline: line numbering is identical; deleting the last line of an unterminated file leaves a result whose end state follows the final-newline rule (section 5, item 8).
-- A replacement and another edit in the same envelope: both recorded in snapshot coordinates in one step; mapping through that step matches the result.
-- Two successive envelopes: mapping composes in order.
-- Multiple non-overlapping edits whose cumulative shifts cancel (for example +3 at line 10 and -3 at line 50): lines between are shifted, lines after map identically, and the line map reports it piecewise.
-- An anchor whose first line is affected by an earlier insertion (`start == a`, shifts), an insertion at `start == b + 1` (no effect), an insertion strictly inside the block (unmappable), and an edit touching but not overlapping the block.
-- Property test: for random files and random non-overlapping edit sets, every line that the mapping reports as mappable must have equal content in the result and the original. Unmappable lines are never reported mappable.
+The existing write path already has a transaction journal that retains original bytes for every file. Preserve it.
 
-Commit:
-- File modified between planning and commit: abort with "file changed during review," nothing written, for the whole envelope.
-- Multi-file: a mismatch on file B found in prepare or final check leaves file A unwritten.
-- Failure injection after the first rename (for example, the rename of file B fails): file A is restored from retained originals; if restoration is made to fail, the report names each file's state and the original's location.
-- File modified between prepare and the final check (simulated with a hook): detected, abort, all temp files removed, nothing written.
-- File modified after the final check and before the rename: not asserted as prevented. The test documents the residual window and its expected consequence.
-- Lock identity across replacement: session 1 commits (replacing the target's inode) while session 2 waits; session 2 proceeds only after session 1 releases and then sees the new bytes. A lock on the target inode alone fails this test.
-- Lock contention: bounded wait, then abort with nothing written. Multi-file lock ordering does not deadlock two sessions committing overlapping file sets in opposite orders.
-- Candidate sessions and the main session contend on the same lock identity for the same target.
-- Symlinked target: behavior matches the documented rule.
-- Same-envelope: all hints refer to the same snapshot; the ledger records one step per file per envelope with edits in snapshot coordinates, recorded only after all files committed.
-- Line endings, final newline and size caps (3 MiB per envelope, 8 MiB per file, 32 MiB aggregate) unchanged.
+The source-audited sequence is:
 
-## 5. Architecture and items to verify in the source
+1. Acquire the project lock.
+2. Hash every planned target and compare it against the planning hash.
+3. Write the `Prepared` journal, including digests and original bytes for every file.
+4. Write and sync temporary files.
+5. Re-check each file's digest immediately before renaming it.
+6. Rename each temporary file over its target.
+7. Perform best-effort directory synchronization.
+8. Verify the written bytes by reading them back.
+9. Mark the transaction `Committed`.
+10. Record ledger steps only after `Committed`.
 
-Advice from first principles:
-- Resolution is a pure function over (snapshot lines, parsed ops with hints, optional ledger view). Its output is resolved ranges with labels, or an ambiguity set, or a mismatch with diagnostics. It is testable without files or a clipboard.
-- It belongs in planning, before the diff is built. The diff, the confirmation and the commit consume the same resolved plan, so "reviewed bytes equal committed bytes" cannot be broken by a second resolution.
-- The applier receives only resolved ranges and knows nothing about hints.
-- The hash chain means the ledger does not need to survive a process restart; in-memory is enough.
+The original v2.3 inode/size/mtime tuple is dropped. Content hashes are the authoritative check; the guarantee concerns bytes.
 
-Verify before coding (milestone 0, a written report):
-1. Envelope coordinate semantics: whether every op's line hints in an envelope refer to one snapshot, and how the existing protocol and validator define ranges and anchors (2.2).
-2. Applier write path: how files are written today (locking, temp file and rename, permissions, fsync), what identity any existing lock has across rename, and whether a re-check of the file just before the write already exists (2.6).
-3. Multi-file commit: how all-or-nothing is achieved today, what happens when a failure occurs after some files are renamed, and whether originals are retained for rollback. The two-phase protocol must integrate with it.
-4. Journal behavior: backups it keeps, how rollback works, and how the journal and undo interact with committed ledger steps and with the file bytes the ledger observes.
-5. Renderer sharing: whether the diff renderer is shared between the screen pager and the clipboard output, so escaping and naming are consistent. What pull output does today with line numbers, gutters and unusual characters.
-6. Insert anchors: how they are represented, and whether ops must be in file order.
-7. Text handling: whether non-UTF-8 files are accepted; how envelope payloads treat backslashes and unusual characters today; how symlinked targets are handled.
-8. Final-newline semantics: the rule that "final-newline state is preserved" must be defined for deleting or replacing the last line of an unterminated file. The proposed definition: the result ends with a terminator if and only if the original did, so deleting the last line of an unterminated file removes the terminator of the new last line.
+#### Required addition: final all-target hash check
 
-## 6. Decisions and deferrals
+After all temporary files are built and before the first rename, re-hash every target.
 
-Decided:
-- Escape control and invisible characters in the diff body, under the reconstruction contract in 1.5.
-- Candidate display limit is 5. More than 5 aborts with "too generic."
-- The indentation-heuristic note is deferred.
-- The initial view baseline is the last pull, with the limitations in 2.2 documented.
-- Same-boundary inserts are rejected in v1.
-- Two ops with identical expected blocks, where either needs relocation, are rejected in v1 as a documented limitation.
-- A unique exact match is automatic. Several exact matches are automatic only with a defensible indication that the hint is current; where freshness is unknown, the chooser is required.
-- The commit lock must have a stable identity across replacement. All checks precede the first rename. The race with non-cooperating writers is narrowed, not closed.
-- Envelope text stays raw bytes in v1, with a diagnostic when a block cannot be quoted.
+If any target's hash differs from the expected planning hash:
 
-Deferred:
-- Optional view tag (2.8), until chooser frequency is measured.
-- Whether and when to build the edit ledger (milestone 6).
-- Hard-link backup in the commit protocol, until the audit shows what the journal and write path provide.
+- Abort the envelope.
+- Remove the temporary files.
+- Write nothing to any target.
+
+Keep the existing per-file digest re-check immediately before each rename. It narrows the race window for each file.
+
+The initial all-files hash check before journaling remains in place. The new full check is an additional check after temporary files have been prepared and before the first rename.
+
+### 3.3 Guarantees and residual race
+
+If a mismatch is found during either all-target check before the first rename, the envelope aborts without writing any target.
+
+The per-file check immediately before each rename also remains mandatory. If a mismatch is discovered on a later file after earlier files have already been renamed, the existing journal recovery mechanism handles the partial state.
+
+A non-cooperating writer, such as an editor, can still change a file after the final all-target check and before that file's rename. In a multi-file commit, this window extends until each file's own rename. POSIX does not provide a general mechanism to eliminate this race with non-cooperating writers.
+
+The design narrows this window but does not claim to close it. The limitation must be documented in the CVB manual in plain language.
+
+### 3.4 Rollback and recovery
+
+Recovery builds on the existing journal and its retained original bytes. It is conditional, not an unconditional overwrite.
+
+Recovery classifies each target as:
+
+- Original: bytes match the original state.
+- Planned: bytes match the intended new state.
+- Other: bytes match neither.
+
+Preserve the existing recovery behavior:
+
+- When files are uniformly in a recognized state, recovery rolls back or forward as appropriate.
+- When files are mixed between planned and original states, planned files are restored from retained originals.
+- Unknown content is not overwritten. Recovery reports a conflict and leaves the transaction in `Prepared`.
+- An unfinished `Prepared` transaction blocks further surgery with `E-RECOVER`.
+
+The source audit found that the journal already retains original bytes, but it did not prove every rollback path by failure injection.
+
+Required tests:
+
+1. Inject an ordinary rename failure after an earlier file has been renamed. Verify rollback succeeds and restores the original state.
+2. Inject a restoration failure. Verify the report accurately identifies each file's state and where the retained original can be found.
+3. Verify that a partial failure followed by recovery does not record ledger steps.
+4. Verify that ledger steps are recorded only after the transaction reaches `Committed`.
+
+Open owner decision: The audit found no user-facing recovery or undo command, while an unfinished `Prepared` transaction blocks further surgery. Confirm the supported manual procedure for clearing or recovering such a transaction. Adding a recovery command is outside this work's scope.
+
+### 3.5 Symlinks and path changes
+
+The loader walks path components using `symlink_metadata` and rejects symlinks and non-regular files.
+
+The applier does not repeat the path-component check immediately before rename. Rename replaces the directory entry rather than writing through a symlink at that entry.
+
+Open owner decision: Approve or decline additional milestone 2 hardening that repeats the path-component check during the final check and rejects a target if a symlink or disallowed path component is found. If adopted, the operation must abort and write nothing.
+
+This additional rejection is recommended but is not treated as an approved requirement until the owner decides.
+
+### 3.6 Lock and transaction tests
+
+The following must be verified or tested:
+
+- Lock identity remains stable across replacement of a target's inode.
+- Two competing processes are mutually excluded by the same project lock.
+- The lock is not removed and recreated while held.
+- Candidate workspaces use their own workspace lock where appropriate, while promotion uses the real project's lock.
+- A mismatch in any target during the initial all-target check leaves all targets unwritten.
+- A mismatch in any target during the final all-target check, after temporary files are prepared but before the first rename, leaves all targets unwritten.
+- A per-file mismatch immediately before rename triggers correct recovery if earlier files have already been renamed.
+- An ordinary rename failure rolls back successfully.
+- A restoration failure produces an accurate per-file report.
+- A change after the final all-target check and before a file's rename is not claimed to be prevented.
+- Symlink/path-component hardening is tested if the owner approves it.
+- The transaction journal reaches `Committed` only after successful write and read-back verification.
+- Ledger steps appear only after `Committed`, never after failure or rollback.
+- Recovery behavior for original, planned, mixed, and unknown file states remains correct.
+
+## 4. Sequencing
+
+The milestone 0 source audit has been completed and its findings are incorporated into this document. The audit was read-only and did not run tests or failure injection.
+
+The implementation sequence is:
+
+### Milestone 1 — Diff contract
+
+Implement the unified-diff format, strict parser grammar, transformed-line escaping, notes, and reconstruction tests.
+
+The pager and clipboard must use the same rendered string. Pull output remains raw as specified in section 1.6.
+
+### Milestone 2 — Commit-time verification and locking
+
+Use the existing project-wide `project.lock` sidecar. Add the full all-target hash check after temporary-file preparation and before the first rename. Preserve the per-file pre-rename check, journal, recovery, and post-commit ledger-recording order.
+
+Add direct failure-injection tests for ordinary rollback and restoration failure.
+
+Obtain the owner's decision on final symlink/path-component hardening before adding that behavior.
+
+### Milestone 3 — Mismatch diagnostics
+
+Add a read-only whole-file candidate listing to rejection messages. This changes diagnostics, not resolution behavior. Reuse the search implementation in the resolver.
+
+### Milestone 4 — Resolver and chooser
+
+Implement the resolver as a pure function over the snapshot, parsed operations, hints, and optional ledger view.
+
+Search the whole snapshot, apply the resolution decision table, display the chooser for ambiguity, and jointly validate all resolved operations.
+
+Use the single contiguous insert anchor and preserve its `before` or `after` placement.
+
+### Milestone 5 — Post-apply line map
+
+Generate a piecewise line map from the applied edit set. This does not depend on the ledger.
+
+### Milestone 6 — Edit ledger
+
+Implement the hash chain and mapping only after the chooser's real frequency and preselection accuracy are known, unless existing implementation constraints require earlier integration.
+
+The ledger never makes an automatic choice. It provides labels, preselection, and warnings.
+
+Record steps only after the transaction journal reaches `Committed`.
+
+### Milestone 7 — End-to-end tests
+
+Exercise the full workflow, including rendering, parsing, relocation, review, commit, journal recovery, and ledger behavior.
+
+Each milestone should remain a small, reviewable change with tests. The stateless whole-file search comes before the ledger because it solves unique-block relocation without introducing persistent mapping state.
+
+## 5. Test matrix
+
+Tests in this section describe required behavior. They are not claims that the tests have already been run or passed.
+
+### 5.1 Diff contract
+
+- Changed lines are exactly the gutter marker plus source text for non-transformed lines.
+- Hunk headers:
+  - `@@ -5 +5 @@` parses as one-line ranges.
+  - `@@ -5,1 +5,1 @@` is accepted.
+  - The renderer emits the canonical form without `,1`.
+  - Zero counts parse with `start` as the line before the empty range.
+  - Single-line hunks render and round-trip.
+- Property test: random non-transformed source lines with leading spaces (0, 1, 4, 8), tabs, trailing whitespace, empty text, and non-ASCII text reconstruct exactly after removing only the gutter and honoring hunk counts.
+- Empty added line renders as `+`; empty context line renders as one space.
+- Adversarial source lines round-trip as body text:
+  - `-- foo` on a removed line.
+  - `=== notes ===`.
+  - `+++ b/x`.
+  - `--- a/x`.
+  - `@@ -1 +1 @@`.
+  - `\ No newline at end of file`.
+- Escape contract:
+  - A real zero-width space renders as `\u{200b}` and the line is named in the notes.
+  - An unnamed line containing literal `\u{200b}` reconstructs literally.
+  - A literal backslash adjacent to escape-like text on a transformed line reconstructs exactly.
+  - Test `\\` followed by `u{41}`, a backslash at the end of a transformed line, and two adjacent backslashes.
+  - Consumed characters are never rescanned.
+  - A raw line containing `\\` remains literal.
+  - Cover NUL, DEL, a C1 control, lone CR where representable in the renderer's unit tests, no-break space, ZWJ, BOM, U+2028, and U+2029.
+  - Any unsupported backslash sequence on a named line is a parser error.
+- No-newline markers:
+  - Valid after the final `-`, `+`, or context line on its side.
+  - Rejected at the beginning of a body.
+  - Rejected after another marker.
+  - Rejected after a non-final line or a line that does not exhaust the relevant count.
+  - Rejected when repeated after the same line.
+  - An unterminated old side and terminated new side round-trip correctly.
+- CRLF:
+  - Terminators are not part of line text.
+  - Notes state CRLF once per file.
+  - Reconstruction applies CRLF.
+  - Mixed endings are rejected.
+- A final line without a terminator has the correct marker and round-trips.
+- Output contains only the defined headers, gutter lines, no-newline markers, and optional notes section.
+- Notes appear only when relevant and identify the operation or file, line, side, and transformation where applicable.
+- Legend is present.
+- Paths containing control characters are rejected.
+- Renderer/parser round-trip covers every golden sample.
+- Pager and clipboard use the same rendered diff string.
+
+### 5.2 Pull output
+
+- Pull output emits raw UTF-8 `path:LINE: text` records.
+- Pull output does not escape characters or represent line terminators.
+- The diff renderer's transformed-line naming rules are not applied to pull output.
+- The delimiter decision remains open: leave the `: ` separator, add a legend, or remove the space. Do not change this behavior without the owner's decision.
+
+### 5.3 Resolution and chooser
+
+| Case                                                                               | Expected behavior                                                                                                                |
+| ---------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| Block at stated line, unique                                                       | `exact`                                                                                                                          |
+| Block repeated; stated line matches; no freshness evidence                         | Chooser required; stated line preselected                                                                                        |
+| Block repeated; stated line does not match                                         | Chooser required; no preselection unless translated candidate matches                                                            |
+| Prior surgery inserted lines above a unique block                                  | `shift-tracked` or `searched`, depending on whether translation is valid                                                         |
+| Prior surgery removed lines above                                                  | Negative shift maps correctly                                                                                                    |
+| LLM already corrected its numbers; unique block                                    | `exact`, no double shift                                                                                                         |
+| Block repeated; stated and translated candidates both match at different locations | Chooser; translated candidate preselected, stated candidate shown                                                                |
+| Block repeated; only translated candidate matches                                  | Chooser; translated candidate preselected                                                                                        |
+| Block repeated; ledger is `Broken`                                                 | Chooser; stated line preselected if it matches                                                                                   |
+| Prior edit overlaps the block                                                      | Translation skipped; whole-file search only                                                                                      |
+| Hint far from a unique block                                                       | `searched`, with no distance limit                                                                                               |
+| Hint region rewritten by an earlier surgery; block found elsewhere                 | Label warns to verify intent                                                                                                     |
+| Two to five candidates                                                             | Chooser; Space and Enter do not select; number selects; `q` aborts; nothing written before choice                                |
+| More than five candidates                                                          | Abort with the "too generic" diagnostic                                                                                          |
+| Block absent                                                                       | Abort; diagnostics show actual text near the hint                                                                                |
+| Expected text contains a transformed character                                     | Diagnostic says the text contains characters shown escaped                                                                       |
+| Overlapping candidates in a repeated-line block                                    | Each is listed                                                                                                                   |
+| Multi-line contiguous insert anchor relocates                                      | Entire anchor block relocates as one block                                                                                       |
+| Insert placement is `before`                                                       | Placement remains `before` after relocation                                                                                      |
+| Insert placement is `after`                                                        | Placement remains `after` after relocation                                                                                       |
+| Repeated insert anchor                                                             | Chooser required; selected candidate plus placement determines `P`                                                               |
+| Insert after line 10 and insert before line 11                                     | Rejected as the same resolved boundary; both operations named                                                                    |
+| Insert before `A` and insert after `A`                                             | Not rejected by the same-boundary rule alone; existing validator still applies                                                   |
+| Insert next to a replaced or deleted range                                         | Matches the existing validator's documented behavior                                                                             |
+| Another edit intersects an insert's anchor                                         | Rejected                                                                                                                         |
+| Insert at start of file                                                            | Existing v1 rejection preserved                                                                                                  |
+| Insert at end of file                                                              | Existing v1 rejection preserved                                                                                                  |
+| Overlapping operation footprints                                                   | Rejected                                                                                                                         |
+| Edit range intersects another insert's anchor                                      | Rejected                                                                                                                         |
+| Two inserts at the same resolved boundary                                          | Rejected, naming both operations                                                                                                 |
+| Mixed envelope with one exact and one relocated operation                          | Applied together or not at all                                                                                                   |
+| Identical expected blocks in two operations, with either requiring relocation      | Explicit error naming both operations; nothing written                                                                           |
+| `--dry-run` with ambiguity                                                         | Candidates printed, non-zero exit, nothing written                                                                               |
+| Promotion replay                                                                   | Relocation disabled; mismatch fails                                                                                              |
+| Cancelled surgery                                                                  | No ledger step                                                                                                                   |
+| Pull after surgery                                                                 | Ledger resets to new `H_view` with zero steps                                                                                    |
+| Optional view tag, if adopted later                                                | Matching tag plus stated candidate can bypass chooser; missing or mismatched tag uses chooser; exact-content check still applies |
+
+### 5.4 Ledger and mapping
+
+#### Ledger state and observations
+
+- Hash matches after CVB's own write; chain remains valid across two successive surgeries.
+- External edit observed at planning moves the file to `Broken` and frees the steps.
+- Break then restore: ledger remains `Broken` after restoration; only a new pull revives it.
+- Change and exact restore between observation points: matching hash leaves ledger `Valid`.
+- A `Broken` file returns no mapping and records no new step.
+- Undo or journal rollback breaks the chain when the mismatch is observed.
+- Whole-file hash distinguishes CRLF from LF and detects final-newline changes.
+- Failed or rolled-back commits record no step.
+- A step is recorded only after the journal reaches `Committed`.
+
+#### Mapping boundaries
+
+Use unit tests on synthetic edit sets and operation-level tests wherever the v1 protocol permits the operation.
+
+- Insertion before the first line (`start = 1`) and after the last line (`start = N + 1`) map correctly in the mapping function even though v1 insert operations reject those positions.
+- Deleting the last line.
+- Replacing the first line.
+- Replacing the whole file, excluding the empty-file case.
+- Files with and without final newlines have identical line-numbering semantics.
+- Deleting the last line of an unterminated file follows the final-newline rule in section 5.5.
+- A replacement and another edit in the same envelope are recorded in snapshot coordinates as one step, and mapping matches the result.
+- Two successive envelopes compose correctly.
+- Multiple non-overlapping edits whose cumulative shifts cancel map intermediate and later lines correctly and produce a correct piecewise line map.
+- An anchor whose first line is affected by an earlier insertion (`start == a`) shifts correctly.
+- An insertion at `start == b + 1` does not affect the block.
+- An insertion strictly inside a block makes it unmappable.
+- An edit touching but not overlapping the block follows the specified mapping rule.
+- Property test: for random files and random non-overlapping edit sets, every line reported as mappable has equal content in the result and original. Unmappable lines are never reported mappable.
+
+### 5.5 Final-newline behavior
+
+The planner already preserves the final-newline state: the result ends with a terminator if and only if the original did. An unterminated last line is an ordinary line, including when that line is deleted.
+
+Tests must cover:
+
+- Files originally ending with a newline.
+- Files originally lacking a final newline.
+- Deleting the last line in both cases.
+- Replacing the last line in both cases.
+- Reconstructing both states through the diff marker and file-ending rules.
+- Ledger hashes that distinguish the two states.
+
+This audit item is closed at the design level; no new final-newline rule is required.
+
+### 5.6 Commit, lock, and recovery
+
+- A file modified between planning and commit causes an abort with `file changed during review`, with nothing written.
+- A mismatch on file B during the initial all-target check leaves file A unwritten.
+- A mismatch on file B during the final all-target check, after temporary files are prepared and before the first rename, leaves file A unwritten.
+- Inject a rename failure after an earlier file has been renamed. Verify retained originals restore the original state.
+- Inject a restoration failure. Verify the report identifies each file's state and where originals are retained.
+- A change after the final all-target check but before a target's rename is not asserted to be prevented. The residual race and expected consequence are documented.
+- Lock identity remains stable when a commit replaces the target's inode.
+- Two competing processes use the same lock and cannot commit concurrently.
+- Candidate sessions and the main session use the correct lock for their respective workspaces; promotion uses the real project's lock.
+- Symlinked target behavior matches the approved path-handling rule.
+- If final symlink/path-component hardening is adopted, a changed path is rejected before writing.
+- All hints refer to the same snapshot.
+- Ledger records one step per file per envelope in snapshot coordinates, only after all files commit and the journal reaches `Committed`.
+- Rollback records no ledger steps.
+- Line endings, final newline, and existing size caps remain unchanged: 3 MiB per envelope, 8 MiB per file, and 32 MiB aggregate.
+
+## 6. Architecture and source-audit findings
+
+### 6.1 Architecture principles
+
+The resolver should be a pure function over:
+
+```
+(snapshot lines, parsed operations with hints, optional ledger view)
+```
+
+Its result is either:
+
+- resolved ranges with labels;
+- a set of candidates requiring a choice; or
+- a mismatch with diagnostics.
+
+It should be testable without files or clipboard access.
+
+Resolution belongs in planning, before the diff is built. The diff, confirmation, and commit must consume the same resolved plan so that reviewed bytes cannot diverge from committed bytes through a second resolution.
+
+The applier receives resolved ranges and does not interpret hints.
+
+The ledger need not survive a process restart; its hash chain can be held in memory.
+
+### 6.2 Confirmed by the milestone 0 audit
+
+The source audit found:
+
+1. All operations for a file are validated against the original snapshot and applied as one simultaneous edit set in descending position order. Operations need not be in file order.
+2. The existing project-wide persistent `project.lock` sidecar is acquired with non-blocking exclusive `flock` and held for commit.
+3. The current write path hashes targets before journaling, writes a `Prepared` journal with digests and original bytes, writes and syncs temporary files, re-checks each target immediately before rename, performs best-effort directory sync and read-back verification, and marks the transaction `Committed`.
+4. A full re-check of every target after temporary files are prepared but before the first rename is missing and must be added.
+5. The existing journal retains original bytes for every file.
+6. Recovery classifies files as original, planned, or other; mixed planned/original states can be restored from retained originals; unknown content is not overwritten and leaves the transaction `Prepared`.
+7. The diff-rendering output string is shared between the pager and clipboard.
+8. Pull output is raw UTF-8 `path:LINE: text` and does not escape characters or represent line terminators.
+9. Insert operations use one contiguous anchor range and a `before` or `after` placement.
+10. Target files must be valid UTF-8. NUL, a leading BOM, lone CR, and mixed line endings are rejected at load.
+11. Envelope payloads are UTF-8 text with literal backslashes and no escape syntax. NUL and CR in payload blocks are rejected.
+12. The planner preserves the original final-newline state.
+
+These are source-audit findings, not proof that the required integration tests pass.
+
+### 6.3 Outstanding verification
+
+The following work remains necessary:
+
+- Direct failure-injection tests for ordinary rename failure and restoration failure.
+- Lock-identity and competing-process tests.
+- Tests for the new full all-target hash check.
+- Verification that no lock-file lifecycle operation can split lock identity across processes.
+- Confirmation of the user-facing recovery procedure for a lingering `Prepared` transaction.
+- Owner decision on repeating symlink/path-component checks immediately before rename.
+- Owner decision on pull-output delimiter handling.
+
+## 7. Decisions and deferrals
+
+### 7.1 Decided
+
+- The diff body uses standard unified-diff gutter rules without a separator space between the gutter and source text.
+- The renderer escapes unsafe Unicode characters on transformed lines, doubles literal backslashes on those lines, and names every transformed line in the notes.
+- The parser uses hunk counts rather than source-text content to identify body lines.
+- The renderer's output string is shared between the pager and clipboard.
+- Pull output remains raw UTF-8 `path:LINE: text`; it does not use diff escaping.
+- Candidate display limit is five. More than five candidates aborts with a "too generic" diagnostic.
+- Unique exact matches are selected automatically.
+- Multiple exact matches require a human choice in v1 because hint freshness is unknown.
+- Same-boundary inserts are rejected in v1 based on resolved insertion points.
+- Insert operations use one contiguous anchor block and a `before` or `after` placement.
+- Insert operations at the start or end of a file remain rejected in v1.
+- Two operations with identical expected blocks, where either needs relocation, are rejected in v1 as a documented limitation.
+- All operations in an envelope resolve against one snapshot and are applied as one simultaneous edit set.
+- The persistent project-wide `project.lock` sidecar remains the commit lock.
+- Commit verification includes a full all-target hash check after temporary-file preparation and before the first rename, as well as the existing per-file pre-rename check.
+- The journal's conditional recovery behavior and retained original bytes remain part of the design.
+- Ledger steps are recorded only after the transaction journal reaches `Committed`.
+- The planner preserves the original final-newline state.
+- Envelope payloads remain raw UTF-8 text with literal backslashes and no escape syntax.
+- The commit race with non-cooperating writers is narrowed, not eliminated.
+
+### 7.2 Deferred
+
+- Optional view tag, until chooser frequency and preselection accuracy are measured.
+- Whether and when to implement the edit ledger, subject to implementation dependencies and measurement.
 - Envelope escape syntax.
-- A defined order for two inserts at the same boundary.
-- A joint-assignment rule for two ops with identical expected blocks.
-- The directory-lock versus sidecar choice, settled at the audit under the stable-identity requirement.
+- A joint-assignment rule for multiple operations with identical expected blocks.
+- A second verified neighboring anchor for insert operations.
+- Pull-output delimiter changes, unless the owner approves them.
+- Final symlink/path-component hardening immediately before rename, pending owner approval.
+- A new user-facing recovery or undo command for unfinished `Prepared` transactions; adding one is outside this work.
+- Any extra hard-link backup mechanism unless later evidence shows the existing journal and write path need it.
+
+### 7.3 Explicitly withdrawn from the original design
+
+- Parent-directory locking as the recommended mechanism: replaced by the existing project-wide `project.lock` sidecar.
+- Sorted acquisition of multiple locks: unnecessary with one project-wide lock.
+- A bounded five-second lock wait: preserve the existing immediate `E-LOCK` behavior.
+- Inode/size/mtime tuple comparison as a commit guarantee: use content hashes as the authoritative check.
+- Two-sided insert anchors and concatenated anchor-pair searching: preserve the existing single-anchor representation.
+- Escaping and naming transformed lines in pull output: pull remains raw.
+- Requiring an insert's second anchor to remain adjacent: no second anchor exists in the established v1 representation.
+
+## 8. Acceptance criteria
+
+The design is ready to serve as the implementation specification when the following are respected:
+
+1. The diff format, parser grammar, transformation rules, and reconstruction contract agree.
+2. Pull output remains a distinct raw-text contract.
+3. The resolver and commit use one immutable resolved plan.
+4. All operations in an envelope use the same snapshot coordinates.
+5. Insert relocation preserves the single contiguous anchor plus placement representation.
+6. The chooser remains mandatory for ambiguous blocks without freshness evidence.
+7. The existing project-wide sidecar lock is used consistently.
+8. The new final all-target hash check occurs after temporary-file preparation and before the first rename.
+9. Existing per-file re-checks and journal recovery remain intact.
+10. Ledger steps are recorded only after the transaction is committed.
+11. Final-newline state is preserved.
+12. Failure-injection and concurrency tests verify behavior rather than assuming it.
+13. Open owner decisions are resolved explicitly instead of being silently converted into implementation requirements.
+
+End of consolidated design.
