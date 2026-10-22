@@ -432,6 +432,20 @@ mod tests {
                 expected,
                 "unexpected escaping for {source:?}"
             );
+
+            if source != "\r" {
+                let new = format!("value = \"{source}\";\n");
+                let diff = render_file_diff(
+                    "test.rs",
+                    b"value = \"safe\";\n",
+                    new.as_bytes(),
+                    RenderOptions::default(),
+                );
+                assert!(
+                    diff.contains(expected),
+                    "expected rendered diff to contain {expected:?} for {source:?}, got:\n{diff}"
+                );
+            }
         }
     }
 
