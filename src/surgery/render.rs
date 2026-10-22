@@ -288,11 +288,24 @@ mod tests {
         let old = b"let x = 1;\n";
         let new = b"let x = 1; \n";
 
-        let diff = render_file_diff("test.rs", old, new, RenderOptions::default());
+        let plan = Plan {
+            token: String::new(),
+            id: String::new(),
+            digest: String::new(),
+            files: vec![crate::surgery::PlannedFile {
+                path: "test.rs".to_owned(),
+                original: String::from_utf8(old.to_vec()).unwrap(),
+                original_digest: String::new(),
+                proposed: String::from_utf8(new.to_vec()).unwrap(),
+                proposed_digest: String::new(),
+                operations: vec![],
+            }],
+        };
+        let diff = render_plan_diff(&plan, RenderOptions::default());
 
         assert!(
             diff.contains(MARKER_TRAILING_WHITESPACE),
-            "adding trailing whitespace must show the {MARKER_TRAILING_WHITESPACE} marker, got:\n{diff}"
+            "adding trailing whitespace must show the {MARKER_TRAILING_WHITESPACE} marker in notes, got:\n{diff}"
         );
     }
 
