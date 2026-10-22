@@ -2,7 +2,7 @@ use std::fmt::Write as _;
 
 use similar::{ChangeTag, TextDiff};
 
-use crate::surgery::{detect_newline, Newline, Plan};
+use crate::surgery::{detect_newline, InsertPosition, Newline, Operation, Plan};
 
 pub(crate) const MARKER_TRAILING_WHITESPACE: &str = "[trailing-whitespace]";
 pub(crate) const MARKER_TAB_INDENT: &str = "[tab-indent]";
@@ -182,6 +182,16 @@ pub(crate) fn render_file_diff(
     new_bytes: &[u8],
     options: RenderOptions,
 ) -> String {
+    render_file_diff_with_operations(path, old_bytes, new_bytes, options, &[])
+}
+
+fn render_file_diff_with_operations(
+    path: &str,
+    old_bytes: &[u8],
+    new_bytes: &[u8],
+    options: RenderOptions,
+    operations: &[Operation],
+) -> String {
     let old_str = String::from_utf8_lossy(old_bytes);
     let new_str = String::from_utf8_lossy(new_bytes);
 
@@ -204,7 +214,40 @@ pub(crate) fn render_file_diff(
     }
 
     for hunk in hunks {
-        let header_str = canonical_hunk_header(&hunk.header().to_string());
+        let mut header_str = canonical_hunk_header(&hunk.header().to_string());
+        let old_indices: Vec<usize> = hunk
+            .iter_changes()
+            .filter_map(|change| change.old_index())
+            .collect();
+        let old_start = old_indices.iter().copied().min().map(|line| line + 1).unwrap_or(1);
+        let old_end = old_indices.iter().copied().max().map(|line| line + 1).unwrap_or(0);
+        let labels: Vec<String> = operations
+            .iter()
+            .enumerate()
+            .filter_map(|(index, operation)| {
+                let (kind, start, end) = match operation {
+                    Operation::Replace { start, end, .. } => ("replace", *start, *end),
+                    Operation::Delete { start, end, .. } => ("delete", *start, *end),
+                    Operation::Insert {
+                        position, start, end, ..
+                    } => (
+                        match position {
+                            InsertPosition::Before => "insert before",
+                            InsertPosition::After => "insert after",
+                        },
+                        *start,
+                        *end,
+                    ),
+                };
+                (start <= old_end && end >= old_start).then(|| {
+                    format!("op {} {kind} [exact @ L{start}]", index + 1)
+                })
+            })
+            .collect();
+        if !labels.is_empty() {
+            let header_end = header_str.trim_end_matches('\n').to_string();
+            header_str = format!("{header_end} {}\n", labels.join("; "));
+        }
         if options.color {
             write!(out, "\x1b[36m{header_str}\x1b[0m").unwrap();
         } else {
@@ -282,7 +325,13 @@ pub(crate) fn render_plan_diff(plan: &Plan, options: RenderOptions) -> String {
     for file in &plan.files {
         let old_bytes = file.original.as_bytes();
         let new_bytes = file.proposed.as_bytes();
-        let file_diff = render_file_diff(&file.path, old_bytes, new_bytes, options);
+        let file_diff = render_file_diff_with_operations(
+            &file.path,
+            old_bytes,
+            new_bytes,
+            options,
+            &file.operations,
+        );
 
         if file_diff.is_empty() {
             continue;
@@ -614,6 +663,37 @@ mod tests {
         assert!(
             diff.contains("file crlf.txt: line endings: old CRLF, new CRLF"),
             "CRLF note missing, got:\n{diff}"
+        );
+    }
+
+    #[test]
+    fn test_review_hunk_header_includes_operation_label() {
+        let plan = Plan {
+            token: String::new(),
+            id: String::new(),
+            digest: String::new(),
+            files: vec![crate::surgery::PlannedFile {
+                path: "example.rs".to_string(),
+                original: "first();\nsecond();\nthird();\n".to_string(),
+                original_digest: String::new(),
+                proposed: "first();\nchanged();\nthird();\n".to_string(),
+                proposed_digest: String::new(),
+                operations: vec![Operation::Replace {
+                    start: 2,
+                    end: 2,
+                    old: vec!["second();".to_string()],
+                    new: vec!["changed();".to_string()],
+                }],
+            }],
+        };
+
+        let diff = render_plan_diff(&plan, RenderOptions::default());
+        assert!(
+            diff.lines().any(|line| {
+                line.starts_with("@@ ")
+                    && line.contains("op 1 replace [exact @ L2]")
+            }),
+            "operation label must appear on its hunk header, got:\n{diff}"
         );
     }
 
