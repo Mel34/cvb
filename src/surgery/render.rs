@@ -38,12 +38,19 @@ pub(crate) fn is_control_char(c: char) -> bool {
 }
 
 fn escape_line_content(s: &str) -> String {
+    let transformed = s.chars().any(|c| {
+        is_bidi_override(c) || is_zero_width(c) || is_control_char(c)
+    });
+    if !transformed {
+        return s.to_owned();
+    }
+
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
-        if is_bidi_override(c) || is_zero_width(c) {
+        if c == '\\' {
+            out.push_str("\\\\");
+        } else if is_bidi_override(c) || is_zero_width(c) || is_control_char(c) {
             write!(out, "\\u{{{:x}}}", c as u32).unwrap();
-        } else if is_control_char(c) {
-            write!(out, "\\x{:02x}", c as u32).unwrap();
         } else {
             out.push(c);
         }
