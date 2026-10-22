@@ -146,6 +146,35 @@ fn detect_file_ending(bytes: &[u8]) -> &'static str {
     }
 }
 
+fn canonical_hunk_header(header: &str) -> String {
+    let Some(rest) = header.strip_prefix("@@ ") else {
+        return header.to_owned();
+    };
+    let Some((ranges, suffix)) = rest.split_once(" @@") else {
+        return header.to_owned();
+    };
+
+    let normalized = ranges
+        .split_whitespace()
+        .map(|range| {
+            let Some((sign, coordinates)) = range.split_at_checked(1) else {
+                return range.to_owned();
+            };
+            let Some((start, count)) = coordinates.split_once(',') else {
+                return range.to_owned();
+            };
+            if count == "1" {
+                format!("{sign}{start}")
+            } else {
+                range.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    format!("@@ {normalized} @@{suffix}")
+}
+
 /// Renders a unified diff for one file purely from its original and planned bytes.
 pub(crate) fn render_file_diff(
     path: &str,
@@ -175,7 +204,7 @@ pub(crate) fn render_file_diff(
     }
 
     for hunk in hunks {
-        let header_str = hunk.header().to_string();
+        let header_str = canonical_hunk_header(&hunk.header().to_string());
         if options.color {
             write!(out, "\x1b[36m{header_str}\x1b[0m").unwrap();
         } else {
@@ -585,6 +614,26 @@ mod tests {
         assert!(
             diff.lines().any(|line| line == "+    new();"),
             "added source must start immediately after the gutter, got:\n{diff}"
+        );
+    }
+
+    #[test]
+    fn test_canonical_hunk_header_counts() {
+        assert_eq!(
+            canonical_hunk_header("@@ -5,1 +5,1 @@\n"),
+            "@@ -5 +5 @@\n"
+        );
+        assert_eq!(
+            canonical_hunk_header("@@ -0,0 +1,1 @@\n"),
+            "@@ -0,0 +1 @@\n"
+        );
+        assert_eq!(
+            canonical_hunk_header("@@ -5,3 +5,2 @@\n"),
+            "@@ -5,3 +5,2 @@\n"
+        );
+        assert_eq!(
+            canonical_hunk_header("@@ -5 +5 @@\n"),
+            "@@ -5 +5 @@\n"
         );
     }
 
