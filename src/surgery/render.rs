@@ -128,18 +128,6 @@ pub(crate) fn render_file_diff(
         return String::new();
     }
 
-    let mut lines_removed = 0usize;
-    let mut lines_added = 0usize;
-    for change in diff.iter_all_changes() {
-        match change.tag() {
-            ChangeTag::Delete => lines_removed += 1,
-            ChangeTag::Insert => lines_added += 1,
-            ChangeTag::Equal => {}
-        }
-    }
-
-    let old_ending = detect_file_ending(old_bytes);
-    let new_ending = detect_file_ending(new_bytes);
 
     let mut out = String::new();
 
