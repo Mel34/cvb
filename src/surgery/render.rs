@@ -345,6 +345,22 @@ mod tests {
     }
 
     #[test]
+    fn test_changed_lines_have_no_separator_after_gutter() {
+        let old = b"    old();\n";
+        let new = b"    new();\n";
+        let diff = render_file_diff("test.rs", old, new, RenderOptions::default());
+
+        assert!(
+            diff.lines().any(|line| line == "-    old();"),
+            "removed source must start immediately after the gutter, got:\n{diff}"
+        );
+        assert!(
+            diff.lines().any(|line| line == "+    new();"),
+            "added source must start immediately after the gutter, got:\n{diff}"
+        );
+    }
+
+    #[test]
     fn test_render_large_inputs() {
         let mut old = String::with_capacity(5000 * 30);
         let mut new = String::with_capacity(5000 * 30);
