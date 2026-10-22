@@ -217,6 +217,11 @@ pub(crate) fn render_file_diff(
 /// Renders a full unified diff for all files in a plan.
 pub(crate) fn render_plan_diff(plan: &Plan, options: RenderOptions) -> String {
     let mut out = String::new();
+    writeln!(
+        out,
+        "Legend: column 1 is the gutter (' ' context, '-' removed, '+' added). Source text starts at column 2. Lines named in the notes as \"shown escaped\" are transformed (see notes). Text after \"=== notes ===\" is commentary, never source."
+    )
+    .unwrap();
     for file in &plan.files {
         let file_diff = render_file_diff(
             &file.path,
