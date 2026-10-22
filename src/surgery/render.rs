@@ -228,6 +228,23 @@ pub(crate) fn render_plan_diff(plan: &Plan, options: RenderOptions) -> String {
             new_bytes.len()
         ));
 
+        for change in diff.iter_all_changes() {
+            let action = match change.tag() {
+                ChangeTag::Delete => "removed",
+                ChangeTag::Insert => "added",
+                ChangeTag::Equal => continue,
+            };
+            let content = change.value().trim_end_matches(['\r', '\n']);
+            let markers = compute_line_markers(content);
+            if !markers.is_empty() {
+                notes.push(format!(
+                    "file {}: {action} line has {}",
+                    file.path,
+                    markers.join(", ")
+                ));
+            }
+        }
+
         let old_ending = detect_file_ending(old_bytes);
         let new_ending = detect_file_ending(new_bytes);
         if old_ending == "CRLF" || new_ending == "CRLF" {
