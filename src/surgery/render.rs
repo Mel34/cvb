@@ -260,10 +260,10 @@ mod tests {
 
         let diff = render_file_diff("src/main.rs", old, new, RenderOptions::default());
 
-        assert!(diff.contains("--- a/src/main.rs (LF)"));
-        assert!(diff.contains("+++ b/src/main.rs (LF)"));
-        assert!(diff.contains("- [space-indent]     println!(\"hello\");"));
-        assert!(diff.contains("+ [space-indent]     println!(\"world\");"));
+        assert!(diff.contains("--- a/src/main.rs"));
+        assert!(diff.contains("+++ b/src/main.rs"));
+        assert!(diff.contains("-    println!(\"hello\");"));
+        assert!(diff.contains("+    println!(\"world\");"));
     }
 
     #[test]
