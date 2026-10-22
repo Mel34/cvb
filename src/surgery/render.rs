@@ -405,14 +405,22 @@ mod tests {
             }
         }
 
-        let diff = render_file_diff(
-            "large.rs",
-            old.as_bytes(),
-            new.as_bytes(),
-            RenderOptions::default(),
-        );
+        let plan = Plan {
+            token: String::new(),
+            id: String::new(),
+            digest: String::new(),
+            files: vec![crate::surgery::PlannedFile {
+                path: "large.rs".to_string(),
+                original: old,
+                original_digest: String::new(),
+                proposed: new,
+                proposed_digest: String::new(),
+                operations: vec![],
+            }],
+        };
+        let diff = render_plan_diff(&plan, RenderOptions::default());
 
-        assert!(diff.contains("Summary: -10 lines, +10 lines"));
+        assert!(diff.contains("file large.rs: Summary: -10 lines, +10 lines"));
         assert!(diff.contains("- line 500 original content"));
         assert!(diff.contains("+ line 500 changed content"));
     }
