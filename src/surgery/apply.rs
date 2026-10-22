@@ -763,6 +763,7 @@ mod tests {
                 original_digest: orig_dig,
                 proposed: prop.to_string(),
                 proposed_digest: prop_dig,
+                operations: Vec::new(),
             });
         }
 

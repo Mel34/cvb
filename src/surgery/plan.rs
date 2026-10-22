@@ -421,6 +421,7 @@ pub(crate) fn plan_envelope(
             original_digest,
             proposed,
             proposed_digest,
+            operations: section.operations.clone(),
         });
     }
 
@@ -524,6 +525,40 @@ mod tests {
         let second = make_plan("second");
 
         assert_ne!(first.digest, second.digest);
+    }
+
+    #[test]
+    fn planned_file_preserves_operation_metadata() {
+        let envelope = make_test_envelope(vec![
+            Operation::Replace {
+                start: 2,
+                end: 2,
+                old: lines(&["old"]),
+                new: lines(&["new"]),
+            },
+            Operation::Delete {
+                start: 4,
+                end: 4,
+                old: lines(&["five"]),
+            },
+        ]);
+
+        let plan = plan_envelope(
+            &envelope,
+            &make_test_originals("one\nold\nthree\nfive\n"),
+        )
+        .unwrap();
+
+        let operations = &plan.files[0].operations;
+        assert_eq!(operations.len(), 2);
+        assert!(matches!(
+            &operations[0],
+            Operation::Replace { start: 2, end: 2, .. }
+        ));
+        assert!(matches!(
+            &operations[1],
+            Operation::Delete { start: 4, end: 4, .. }
+        ));
     }
 
     #[test]

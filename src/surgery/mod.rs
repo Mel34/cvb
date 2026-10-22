@@ -80,7 +80,7 @@ pub(crate) struct FileSection {
     pub operations: Vec<Operation>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Operation {
     Replace {
         start: usize,
@@ -457,6 +457,7 @@ pub(crate) struct PlannedFile {
     pub original_digest: String,
     pub proposed: String,
     pub proposed_digest: String,
+    pub operations: Vec<Operation>,
 }
 
 /// Failures the pure planner can report.
