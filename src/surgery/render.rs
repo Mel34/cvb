@@ -258,6 +258,21 @@ pub(crate) fn render_plan_diff(plan: &Plan, options: RenderOptions) -> String {
     let mut out = String::new();
     let mut notes = Vec::new();
 
+    let operation_count: usize = plan.files.iter().map(|file| file.operations.len()).sum();
+    let changed_file_count = plan
+        .files
+        .iter()
+        .filter(|file| file.original != file.proposed)
+        .count();
+
+    writeln!(
+        out,
+        "cvb surgery (dry run): {operation_count} op{}, {changed_file_count} file{}",
+        if operation_count == 1 { "" } else { "s" },
+        if changed_file_count == 1 { "" } else { "s" }
+    )
+    .unwrap();
+
     writeln!(
         out,
         "Legend: column 1 is the gutter (' ' context, '-' removed, '+' added). Source text starts at column 2. Lines named in the notes as \"shown escaped\" are transformed (see notes). Text after \"=== notes ===\" is commentary, never source."
@@ -589,6 +604,7 @@ mod tests {
 
         let diff = render_plan_diff(&plan, RenderOptions::default());
 
+        assert!(diff.starts_with("cvb surgery (dry run): 0 ops, 1 file\n"));
         assert!(diff.contains("--- a/crlf.txt"));
         assert!(diff.contains("+++ b/crlf.txt"));
         assert!(
