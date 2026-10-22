@@ -203,20 +203,61 @@ pub(crate) fn render_file_diff(
 /// Renders a full unified diff for all files in a plan.
 pub(crate) fn render_plan_diff(plan: &Plan, options: RenderOptions) -> String {
     let mut out = String::new();
+    let mut notes = Vec::new();
+
     writeln!(
         out,
         "Legend: column 1 is the gutter (' ' context, '-' removed, '+' added). Source text starts at column 2. Lines named in the notes as \"shown escaped\" are transformed (see notes). Text after \"=== notes ===\" is commentary, never source."
     )
     .unwrap();
+
     for file in &plan.files {
-        let file_diff = render_file_diff(
-            &file.path,
-            file.original.as_bytes(),
-            file.proposed.as_bytes(),
-            options,
-        );
+        let old_bytes = file.original.as_bytes();
+        let new_bytes = file.proposed.as_bytes();
+        let file_diff = render_file_diff(&file.path, old_bytes, new_bytes, options);
+
+        if file_diff.is_empty() {
+            continue;
+        }
+
         out.push_str(&file_diff);
+
+        let diff = TextDiff::from_lines(&file.original, &file.proposed);
+        let mut lines_removed = 0usize;
+        let mut lines_added = 0usize;
+        for change in diff.iter_all_changes() {
+            match change.tag() {
+                ChangeTag::Delete => lines_removed += 1,
+                ChangeTag::Insert => lines_added += 1,
+                ChangeTag::Equal => {}
+            }
+        }
+
+        notes.push(format!(
+            "file {}: Summary: -{lines_removed} lines, +{lines_added} lines; bytes: {} -> {}",
+            file.path,
+            old_bytes.len(),
+            new_bytes.len()
+        ));
+
+        let old_ending = detect_file_ending(old_bytes);
+        let new_ending = detect_file_ending(new_bytes);
+        if old_ending == "CRLF" || new_ending == "CRLF" {
+            notes.push(format!(
+                "file {}: line endings: old {old_ending}, new {new_ending}",
+                file.path
+            ));
+        }
     }
+
+    if !notes.is_empty() {
+        writeln!(out).unwrap();
+        writeln!(out, "=== notes ===").unwrap();
+        for note in notes {
+            writeln!(out, "{note}").unwrap();
+        }
+    }
+
     out
 }
 
