@@ -421,7 +421,7 @@ mod tests {
         let diff = render_plan_diff(&plan, RenderOptions::default());
 
         assert!(diff.contains("file large.rs: Summary: -10 lines, +10 lines"));
-        assert!(diff.contains("- line 500 original content"));
-        assert!(diff.contains("+ line 500 changed content"));
+        assert!(diff.contains("-line 500 original content"));
+        assert!(diff.contains("+line 500 changed content"));
     }
 }
