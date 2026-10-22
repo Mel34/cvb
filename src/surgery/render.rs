@@ -345,16 +345,33 @@ mod tests {
 
     #[test]
     fn test_review_per_file_header_and_summary() {
-        let old = b"first\r\nsecond\r\n";
-        let new = b"first\r\nthird\r\nfourth\r\n";
+        let old = "first\r\nsecond\r\n";
+        let new = "first\r\nthird\r\nfourth\r\n";
+        let plan = Plan {
+            token: String::new(),
+            id: String::new(),
+            digest: String::new(),
+            files: vec![crate::surgery::PlannedFile {
+                path: "crlf.txt".to_string(),
+                original: old.to_string(),
+                original_digest: String::new(),
+                proposed: new.to_string(),
+                proposed_digest: String::new(),
+                operations: vec![],
+            }],
+        };
 
-        let diff = render_file_diff("crlf.txt", old, new, RenderOptions::default());
+        let diff = render_plan_diff(&plan, RenderOptions::default());
 
-        assert!(diff.contains("--- a/crlf.txt (CRLF)"));
-        assert!(diff.contains("+++ b/crlf.txt (CRLF)"));
+        assert!(diff.contains("--- a/crlf.txt"));
+        assert!(diff.contains("+++ b/crlf.txt"));
         assert!(
-            diff.contains("Summary: -1 lines, +2 lines; bytes: 15 -> 22"),
+            diff.contains("file crlf.txt: Summary: -1 lines, +2 lines; bytes: 15 -> 22"),
             "diff summary mismatch, got:\n{diff}"
+        );
+        assert!(
+            diff.contains("file crlf.txt: line endings: old CRLF, new CRLF"),
+            "CRLF note missing, got:\n{diff}"
         );
     }
 
