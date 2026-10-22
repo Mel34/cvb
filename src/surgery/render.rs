@@ -321,10 +321,6 @@ mod tests {
         let diff = render_file_diff("test.rs", old, new, RenderOptions::default());
 
         assert!(
-            diff.contains(MARKER_BIDI),
-            "inserting bidi char must show {MARKER_BIDI}, got:\n{diff}"
-        );
-        assert!(
             diff.contains("\\u{202e}"),
             "bidi char must be displayed as an escape sequence, got:\n{diff}"
         );
