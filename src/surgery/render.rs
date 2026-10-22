@@ -144,25 +144,11 @@ pub(crate) fn render_file_diff(
     let mut out = String::new();
 
     if options.color {
-        writeln!(out, "\x1b[1m--- a/{path} ({old_ending})\x1b[0m").unwrap();
-        writeln!(out, "\x1b[1m+++ b/{path} ({new_ending})\x1b[0m").unwrap();
-        writeln!(
-            out,
-            "\x1b[1mSummary: -{lines_removed} lines, +{lines_added} lines; bytes: {} -> {}\x1b[0m",
-            old_bytes.len(),
-            new_bytes.len()
-        )
-        .unwrap();
+        writeln!(out, "\x1b[1m--- a/{path}\x1b[0m").unwrap();
+        writeln!(out, "\x1b[1m+++ b/{path}\x1b[0m").unwrap();
     } else {
-        writeln!(out, "--- a/{path} ({old_ending})").unwrap();
-        writeln!(out, "+++ b/{path} ({new_ending})").unwrap();
-        writeln!(
-            out,
-            "Summary: -{lines_removed} lines, +{lines_added} lines; bytes: {} -> {}",
-            old_bytes.len(),
-            new_bytes.len()
-        )
-        .unwrap();
+        writeln!(out, "--- a/{path}").unwrap();
+        writeln!(out, "+++ b/{path}").unwrap();
     }
 
     for hunk in hunks {
