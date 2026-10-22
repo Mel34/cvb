@@ -184,7 +184,6 @@ pub(crate) fn render_file_diff(
                     writeln!(out, " {content}").unwrap();
                 }
                 ChangeTag::Delete | ChangeTag::Insert => {
-                    let markers = compute_line_markers(content);
                     let escaped = escape_line_content(content);
                     if options.color {
                         let color_code = if tag == ChangeTag::Insert {
@@ -192,21 +191,9 @@ pub(crate) fn render_file_diff(
                         } else {
                             "\x1b[31m"
                         };
-                        if markers.is_empty() {
-                            writeln!(out, "{color_code}{sign} {escaped}\x1b[0m").unwrap();
-                        } else {
-                            let marker_str = markers.join(" ");
-                            writeln!(
-                                out,
-                                "{color_code}{sign}\x1b[0m \x1b[33m{marker_str}\x1b[0m {color_code}{escaped}\x1b[0m"
-                            )
-                            .unwrap();
-                        }
-                    } else if markers.is_empty() {
-                        writeln!(out, "{sign} {escaped}").unwrap();
+                        writeln!(out, "{color_code}{sign}{escaped}\x1b[0m").unwrap();
                     } else {
-                        let marker_str = markers.join(" ");
-                        writeln!(out, "{sign} {marker_str} {escaped}").unwrap();
+                        writeln!(out, "{sign}{escaped}").unwrap();
                     }
                 }
             }
