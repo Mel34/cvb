@@ -197,7 +197,8 @@ pub(crate) fn render_file_diff(
 
             match tag {
                 ChangeTag::Equal => {
-                    writeln!(out, " {content}").unwrap();
+                    let escaped = escape_line_content(content);
+                    writeln!(out, " {escaped}").unwrap();
                 }
                 ChangeTag::Delete | ChangeTag::Insert => {
                     let escaped = escape_line_content(content);
@@ -299,6 +300,23 @@ pub(crate) fn render_plan_diff(plan: &Plan, options: RenderOptions) -> String {
                     file.path,
                     markers.join(", ")
                 ));
+            }
+        }
+
+        for hunk in diff.unified_diff().context_radius(3).iter_hunks() {
+            for change in hunk.iter_changes() {
+                if change.tag() != ChangeTag::Equal {
+                    continue;
+                }
+
+                let content = change.value().trim_end_matches(['\r', '\n']);
+                if content.chars().any(is_escape_char) {
+                    let line = change.new_index().unwrap() + 1;
+                    notes.push(format!(
+                        "file {} L{line} context: shown escaped",
+                        file.path
+                    ));
+                }
             }
         }
 
@@ -427,6 +445,40 @@ mod tests {
         assert!(
             diff.contains("file test.rs L1 +: shown escaped"),
             "escaped added line must be identified in notes, got:\n{diff}"
+        );
+    }
+
+    #[test]
+    fn test_review_visibility_escaped_context() {
+        let old = "let hidden = \"a\u{200b}b\";\nlet value = 1;\nlet tail = 0;\n";
+        let new = "let hidden = \"a\u{200b}b\";\nlet value = 2;\nlet tail = 0;\n";
+
+        let plan = Plan {
+            token: String::new(),
+            id: String::new(),
+            digest: String::new(),
+            files: vec![crate::surgery::PlannedFile {
+                path: "test.rs".to_owned(),
+                original: old.to_owned(),
+                original_digest: String::new(),
+                proposed: new.to_owned(),
+                proposed_digest: String::new(),
+                operations: vec![],
+            }],
+        };
+        let diff = render_plan_diff(&plan, RenderOptions::default());
+
+        assert!(
+            !diff.contains("a\u{200b}b"),
+            "raw zero-width context must not appear in rendered source"
+        );
+        assert!(
+            diff.contains("a\\u{200b}b"),
+            "context zero-width char must be displayed as an escape sequence, got:\n{diff}"
+        );
+        assert!(
+            diff.contains("file test.rs L1 context: shown escaped"),
+            "escaped context line must be identified in notes, got:\n{diff}"
         );
     }
 
