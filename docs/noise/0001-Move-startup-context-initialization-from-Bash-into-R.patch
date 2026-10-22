@@ -1,0 +1,446 @@
+From 47d2ea009401de1eee17e738c7dda6bf63cec570 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 19 Oct 2026 20:07:20 +0800
+Subject: [PATCH] Move startup context initialization from Bash into Rust
+
+Rust now reads the external manual.md at runtime and puts it on the
+clipboard in Command::Start (after create_rcfile, before pty::run), so
+startup no longer runs `cvb manual.md` through Bash and leaves no
+history entry. The wrapper keeps all history/state/cleanup logic.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016BRop2mLESfcXeppM2JEsn
+---
+ data/cvb.bash           |  16 --
+ scripts/test-history.sh |   9 ++
+ src/clipboard.rs        |   8 +
+ src/context.rs          | 320 ++++++++++++++++++++++++++++++++++++++++
+ src/main.rs             |   3 +
+ 5 files changed, 340 insertions(+), 16 deletions(-)
+ create mode 100644 src/context.rs
+
+diff --git a/data/cvb.bash b/data/cvb.bash
+index 3ad10a4..7bf4153 100644
+--- a/data/cvb.bash
++++ b/data/cvb.bash
+@@ -11,22 +11,6 @@ cvb() {
+             return 1
+         fi
+ 
+-        local wrapper_dir
+-        wrapper_dir=$(cd -- "$(dirname -- "$CVB_BASH_SOURCE")" && pwd)
+-        local manual_file="$wrapper_dir/manual.md"
+-
+-        if [[ ! -f $manual_file ]]; then
+-            manual_file="$wrapper_dir/../manual.md"
+-        fi
+-
+-        if [[ -f $manual_file ]]; then
+-            command cvb "$manual_file" || {
+-                printf 'CVB: warning: unable to copy manual to clipboard\n' >&2
+-            }
+-        else
+-            printf 'CVB: warning: manual not found: %s\n' "$manual_file" >&2
+-        fi
+-
+         local runtime_dir="${XDG_RUNTIME_DIR:-/tmp}/cvb"
+         local init_file
+         local history_file
+diff --git a/scripts/test-history.sh b/scripts/test-history.sh
+index 76ce9da..6768353 100755
+--- a/scripts/test-history.sh
++++ b/scripts/test-history.sh
+@@ -60,8 +60,11 @@ EOF
+ 
+     # Stand-in for the real Rust cvb executable: generate the real rcfile,
+     # then run the child Bash directly without a PTY proxy.
++    # Every invocation appends its argument count to a log, so tests can verify
++    # the wrapper starts the session once and never runs `cvb <file>` itself.
+     cat >"$work/$name/bin/cvb" <<EOF
+ #!/usr/bin/env bash
++printf '%s\n' "\$#" >>"$work/$name/cvb-calls"
+ exec 3>/dev/null
+ rc=\$("$work/rcgen") || exit 1
+ bash --noprofile --rcfile "\$rc" -i
+@@ -128,6 +131,12 @@ check "round trip (histappend on)" \
+     "$(hist_of roundtrip-on)"
+ check "round trip: temp files removed" "0" "$(leftovers_of roundtrip-on)"
+ 
++# Starting a session invokes cvb exactly once, with no arguments. Context
++# initialization belongs to Rust; the wrapper must not run `cvb manual.md`.
++check "round trip: wrapper starts cvb once, with no arguments" \
++    "0" \
++    "$(paste -sd'|' "$work/roundtrip-on/cvb-calls")"
++
+ # 2. The same with histappend off. The parent's shopt state is replayed into
+ # the child, so the lifecycle must not depend on histappend.
+ run_session roundtrip-off off set "$(
+diff --git a/src/clipboard.rs b/src/clipboard.rs
+index 9df91d0..8d41dca 100644
+--- a/src/clipboard.rs
++++ b/src/clipboard.rs
+@@ -175,6 +175,14 @@ pub(crate) fn process(buffer: &ClipboardBuffer) -> Result<(), String> {
+     )
+ }
+ 
++/// Whether `process` will hand this buffer to the interactive chunk pager
++/// rather than copy it in one piece.
++pub(crate) fn needs_chunking(buffer: &ClipboardBuffer) -> bool {
++    std::str::from_utf8(buffer.as_bytes())
++        .map(|text| text.chars().count() > configured_copy_limit())
++        .unwrap_or(false)
++}
++
+ fn process_with<C, S>(
+     buffer: &ClipboardBuffer,
+     limit: usize,
+diff --git a/src/context.rs b/src/context.rs
+new file mode 100644
+index 0000000..94e531a
+--- /dev/null
++++ b/src/context.rs
+@@ -0,0 +1,320 @@
++//! Startup context initialization.
++//!
++//! When a CVB session starts, the LLM operating manual is placed on the
++//! clipboard so the user can paste it into the LLM to begin. Rust owns this
++//! step: it reads the manual and hands it to the clipboard directly, so no
++//! shell command runs and no shell-history entry is created.
++//!
++//! The manual is an external, editable file read at runtime. It is deliberately
++//! not embedded in the binary.
++
++use std::env;
++use std::fs;
++use std::path::{Path, PathBuf};
++
++use crate::clipboard::{self, ClipboardBuffer};
++
++const MANUAL_FILE: &str = "manual.md";
++
++const READY_MESSAGE: &str =
++    "CVB: initialization context is ready on the clipboard. Paste it into your LLM to begin.";
++
++const NOT_PREPARED_MESSAGE: &str = "CVB: warning: initialization context was not prepared";
++
++#[derive(Debug, PartialEq, Eq)]
++enum Outcome {
++    /// The whole manual is on the clipboard.
++    Ready,
++    /// The manual was larger than the copy limit, so the chunk pager already
++    /// walked the user through pasting each part.
++    SentInParts,
++}
++
++/// Prepares the initialization context for a new session.
++///
++/// Failure is reported but never fatal: the session still starts, and the user
++/// is not told to paste anything that was not prepared.
++pub(crate) fn initialize() {
++    let Some(bash_source) = env::var_os("CVB_BASH_SOURCE") else {
++        eprintln!("{NOT_PREPARED_MESSAGE}: CVB_BASH_SOURCE is not set");
++        return;
++    };
++
++    match prepare_with(
++        Path::new(&bash_source),
++        clipboard::needs_chunking,
++        clipboard::process,
++    ) {
++        Ok(Outcome::Ready) => eprintln!("{READY_MESSAGE}"),
++        Ok(Outcome::SentInParts) => {}
++        Err(error) => eprintln!("{error}\n{NOT_PREPARED_MESSAGE}"),
++    }
++}
++
++fn prepare_with(
++    bash_source: &Path,
++    will_chunk: impl FnOnce(&ClipboardBuffer) -> bool,
++    process: impl FnOnce(&ClipboardBuffer) -> Result<(), String>,
++) -> Result<Outcome, String> {
++    let buffer = load_manual(bash_source)?;
++    let chunked = will_chunk(&buffer);
++
++    process(&buffer)?;
++
++    Ok(if chunked {
++        Outcome::SentInParts
++    } else {
++        Outcome::Ready
++    })
++}
++
++fn load_manual(bash_source: &Path) -> Result<ClipboardBuffer, String> {
++    let path = locate_manual(bash_source)?;
++
++    let contents = fs::read(&path)
++        .map_err(|error| format!("CVB: unable to read manual {}: {error}", path.display()))?;
++
++    if contents.is_empty() {
++        return Err(format!("CVB: manual is empty: {}", path.display()));
++    }
++
++    Ok(ClipboardBuffer::new(contents))
++}
++
++/// Finds `manual.md` next to the loaded `cvb.bash` (installed layout), falling
++/// back to the directory above it (development layout, `data/cvb.bash`).
++fn locate_manual(bash_source: &Path) -> Result<PathBuf, String> {
++    let dir = match bash_source.parent() {
++        Some(dir) if !dir.as_os_str().is_empty() => dir,
++        _ => Path::new("."),
++    };
++
++    let beside = dir.join(MANUAL_FILE);
++    if beside.is_file() {
++        return Ok(beside);
++    }
++
++    let above = dir.join("..").join(MANUAL_FILE);
++    if above.is_file() {
++        return Ok(above);
++    }
++
++    Err(format!(
++        "CVB: manual not found: {} (also looked in {})",
++        beside.display(),
++        above.display()
++    ))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::cell::{Cell, RefCell};
++    use std::sync::atomic::{AtomicUsize, Ordering};
++
++    struct TempDir(PathBuf);
++
++    impl TempDir {
++        fn new(label: &str) -> Self {
++            static NEXT: AtomicUsize = AtomicUsize::new(0);
++
++            let path = env::temp_dir().join(format!(
++                "cvb-context-{label}-{}-{}",
++                std::process::id(),
++                NEXT.fetch_add(1, Ordering::Relaxed)
++            ));
++            fs::create_dir_all(&path).expect("create temp dir");
++            Self(path)
++        }
++
++        fn path(&self) -> &Path {
++            &self.0
++        }
++    }
++
++    impl Drop for TempDir {
++        fn drop(&mut self) {
++            let _ = fs::remove_dir_all(&self.0);
++        }
++    }
++
++    /// Installed layout: cvb.bash and manual.md in one directory.
++    fn installed_layout(root: &Path, manual: &str) -> PathBuf {
++        fs::write(root.join(MANUAL_FILE), manual).unwrap();
++        let bash = root.join("cvb.bash");
++        fs::write(&bash, "# wrapper\n").unwrap();
++        bash
++    }
++
++    /// Development layout: data/cvb.bash with manual.md one level up.
++    fn development_layout(root: &Path, manual: &str) -> PathBuf {
++        fs::create_dir_all(root.join("data")).unwrap();
++        fs::write(root.join(MANUAL_FILE), manual).unwrap();
++        let bash = root.join("data").join("cvb.bash");
++        fs::write(&bash, "# wrapper\n").unwrap();
++        bash
++    }
++
++    #[test]
++    fn locates_manual_beside_the_wrapper() {
++        let dir = TempDir::new("beside");
++        let bash = installed_layout(dir.path(), "manual");
++
++        assert_eq!(
++            locate_manual(&bash).unwrap(),
++            dir.path().join(MANUAL_FILE)
++        );
++    }
++
++    #[test]
++    fn falls_back_to_the_directory_above_the_wrapper() {
++        let dir = TempDir::new("above");
++        let bash = development_layout(dir.path(), "manual");
++
++        let found = locate_manual(&bash).unwrap();
++
++        assert_eq!(fs::read_to_string(found).unwrap(), "manual");
++    }
++
++    #[test]
++    fn manual_beside_the_wrapper_wins_over_the_one_above() {
++        let dir = TempDir::new("prefer");
++        let bash = development_layout(dir.path(), "above");
++        fs::write(dir.path().join("data").join(MANUAL_FILE), "beside").unwrap();
++
++        let found = locate_manual(&bash).unwrap();
++
++        assert_eq!(fs::read_to_string(found).unwrap(), "beside");
++    }
++
++    #[test]
++    fn missing_manual_is_a_clear_error_and_nothing_is_copied() {
++        let dir = TempDir::new("missing");
++        let bash = dir.path().join("cvb.bash");
++        fs::write(&bash, "# wrapper\n").unwrap();
++        let copied = Cell::new(false);
++
++        let error = prepare_with(
++            &bash,
++            |_| false,
++            |_| {
++                copied.set(true);
++                Ok(())
++            },
++        )
++        .unwrap_err();
++
++        assert!(error.contains("manual not found"), "{error}");
++        assert!(!copied.get(), "clipboard must not be touched");
++    }
++
++    #[test]
++    fn empty_manual_is_an_error_and_nothing_is_copied() {
++        let dir = TempDir::new("empty");
++        let bash = installed_layout(dir.path(), "");
++        let copied = Cell::new(false);
++
++        let error = prepare_with(
++            &bash,
++            |_| false,
++            |_| {
++                copied.set(true);
++                Ok(())
++            },
++        )
++        .unwrap_err();
++
++        assert!(error.contains("empty"), "{error}");
++        assert!(!copied.get(), "clipboard must not be touched");
++    }
++
++    #[test]
++    fn copies_the_manual_bytes_exactly() {
++        let dir = TempDir::new("exact");
++        let bash = installed_layout(dir.path(), "# Manual\n\nüñí\n");
++        let seen = RefCell::new(Vec::new());
++
++        let outcome = prepare_with(
++            &bash,
++            |_| false,
++            |buffer| {
++                seen.borrow_mut().extend_from_slice(buffer.as_bytes());
++                Ok(())
++            },
++        )
++        .unwrap();
++
++        assert_eq!(outcome, Outcome::Ready);
++        assert_eq!(seen.into_inner(), "# Manual\n\nüñí\n".as_bytes());
++    }
++
++    #[test]
++    fn manual_is_read_at_run_time_not_embedded() {
++        let dir = TempDir::new("runtime");
++        let bash = installed_layout(dir.path(), "first edition");
++
++        let capture = |expected: &str| {
++            let seen = RefCell::new(Vec::new());
++            prepare_with(
++                &bash,
++                |_| false,
++                |buffer| {
++                    seen.borrow_mut().extend_from_slice(buffer.as_bytes());
++                    Ok(())
++                },
++            )
++            .unwrap();
++            assert_eq!(String::from_utf8(seen.into_inner()).unwrap(), expected);
++        };
++
++        capture("first edition");
++        fs::write(dir.path().join(MANUAL_FILE), "second edition").unwrap();
++        capture("second edition");
++    }
++
++    #[test]
++    fn clipboard_failure_is_propagated() {
++        let dir = TempDir::new("clipfail");
++        let bash = installed_layout(dir.path(), "manual");
++
++        let error = prepare_with(
++            &bash,
++            |_| false,
++            |_| Err("CVB: unable to start wl-copy: not found".to_string()),
++        )
++        .unwrap_err();
++
++        assert!(error.contains("wl-copy"), "{error}");
++    }
++
++    #[test]
++    fn oversized_manual_reports_that_it_was_sent_in_parts() {
++        let dir = TempDir::new("parts");
++        let bash = installed_layout(dir.path(), "manual");
++
++        let outcome = prepare_with(&bash, |_| true, |_| Ok(())).unwrap();
++
++        assert_eq!(outcome, Outcome::SentInParts);
++    }
++
++    #[test]
++    fn paste_instruction_is_only_in_the_success_message() {
++        assert!(READY_MESSAGE.contains("Paste it into your LLM"));
++        assert!(!NOT_PREPARED_MESSAGE.to_lowercase().contains("paste"));
++    }
++
++    #[test]
++    fn bash_wrapper_no_longer_initializes_context() {
++        // Invoking `cvb manual.md` from Bash is what left a history entry.
++        let wrapper = include_str!("../data/cvb.bash");
++
++        assert!(!wrapper.contains("manual"), "wrapper still references the manual");
++
++        for line in wrapper.lines().filter(|line| line.contains("command cvb")) {
++            assert!(
++                line.trim_end().ends_with("command cvb \"$@\""),
++                "wrapper must only forward the user's own arguments: {line}"
++            );
++        }
++    }
++}
+diff --git a/src/main.rs b/src/main.rs
+index e012980..97c5627 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -5,6 +5,7 @@ use std::path::Path;
+ pub(crate) mod cascade;
+ mod cli;
+ pub(crate) mod clipboard;
++mod context;
+ mod control;
+ mod keybind;
+ mod keyboard;
+@@ -32,6 +33,8 @@ fn main() {
+     match cli::parse() {
+         cli::Command::Start => match shell::create_rcfile() {
+             Ok(rcfile) => {
++                context::initialize();
++
+                 let result = pty::run(&rcfile);
+                 let _ = std::fs::remove_file(&rcfile);
+ 
+-- 
+2.43.0
+

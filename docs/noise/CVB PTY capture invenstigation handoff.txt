@@ -1,0 +1,156 @@
+PROJECT
+=======
+CVB (Capture, View, Bridge)
+Repository: ~/Projects/cvb
+Remote: git@github.com:Mel34/cvb.git
+Branch: cvb-0.6.0
+
+CURRENT BASELINE
+================
+Latest commit:
+  4683f63 Wire surgery CLI to apply workflow
+
+Remote branch was verified at the same commit:
+  4683f63dbeeb7ce7fdb492181e7b04e69089acfa
+
+Working tree was clean after the push.
+
+Recent completed work: Step 23, surgery CLI wiring.
+Do not modify or revert that work as part of the PTY investigation.
+
+VERIFICATION BASELINE
+=====================
+Rust unit tests:
+  357 passed, 0 failed
+
+Command lifecycle:
+  34 passed, 0 failed
+
+CLI bridge:
+  11 passed, 0 failed
+
+Surgery CLI:
+  5 passed, 0 failed
+
+PTY capture:
+  51 passed, 4 failed
+
+Diff hygiene:
+  clean
+
+OBJECTIVE
+=========
+Investigate and fix the four known PTY capture failures.
+Keep the work limited to the PTY capture problem. Diagnose the
+actual cause before changing production code.
+
+The PTY failures were already present independently of Step 23.
+Do not assume they were caused by the surgery CLI changes.
+
+FOUR FAILURES
+=============
+
+1. A listed command that fails captures its error output.
+
+   Observed payload:
+     PTY_SKIP_NEXT
+
+   Expected behavior: the failing listed command should be skipped
+   by the capture mechanism rather than captured as ordinary output.
+
+2. A listed command followed by an unlisted command is captured.
+
+   Observed payload:
+     bash: cd: /cvb-no-such-directory: No such file or directory
+
+   Expected behavior: output from the unlisted command should not
+   be captured. The failing `cd` diagnostic is leaking into capture.
+
+3. An unlisted silent command still captures its marker.
+
+   Observed payload:
+     PTY_SKIP_MIXED
+
+   Expected behavior: the unlisted silent command's marker should
+   not enter the capture.
+
+4. File bridge crosses the control channel.
+
+   Observed payload:
+     [NO_VISIBLE_OUTPUT]
+
+   Expected behavior: the file bridge should preserve the intended
+   separation between control-channel traffic and user-visible output.
+
+DIAGNOSTIC CLUES FROM EARLIER WORK
+==================================
+Earlier investigation pointed toward a Bash command lifecycle
+interaction involving:
+  - PS0 marker sequencing
+  - DEBUG trap behavior
+  - the skip marker and its lifecycle
+  - command failures and commands that produce no visible output
+
+These are leads, not a proven root cause. Reproduce and inspect the
+current code before drawing conclusions.
+
+The PTY tests were mostly passing: 51 passed and only these four
+failed in the reported verification run.
+
+WORKFLOW — IMPORTANT
+====================
+The user is not proficient in Rust and prefers careful, incremental
+work.
+
+1. Inspect the current repository and relevant tests before editing.
+2. Read the current implementation of the PTY capture mechanism,
+   especially the Bash integration and marker/trap lifecycle.
+3. Identify the exact test definitions for all four failures.
+4. Explain the suspected cause and proposed next change before
+   applying it, where possible.
+5. Make one atomic change at a time.
+6. Prefer surgical Python heredoc edits with exact anchors and
+   match-count checks. Abort before writing if an expected anchor
+   does not match exactly.
+7. Do not use base64 replacement commands.
+8. Do not run workspace-wide `cargo fmt`; it may touch unrelated files.
+9. After each change, run the most targeted relevant tests first,
+   then broader verification when appropriate.
+10. Inspect the diff and `git diff --check` after modifications.
+11. Do not commit or push until the user explicitly approves.
+
+SCOPE BOUNDARIES
+================
+- Focus on the four PTY capture failures.
+- Do not alter the completed surgery CLI wiring merely to make tests
+  pass.
+- Do not make speculative changes to unrelated command lifecycle,
+  clipboard, bridge, or surgery behavior.
+- Preserve existing passing tests and establish a new verification
+  baseline after changes.
+- If the root cause implicates shared code, explain the connection
+  before expanding the scope.
+
+FIRST ACTIONS
+=============
+From a terminal, begin with inspection:
+
+  cd ~/Projects/cvb
+  git status --short --branch
+  git log -1 --oneline --decorate
+  git diff --check
+
+Then inspect the PTY test harness and the production code that
+implements Bash command tracking, PS0 markers, DEBUG traps, and
+capture skip logic. Use CVB's native workflow first where practical.
+
+Reproduce the four failures and record their exact output before
+editing. Do not start by rewriting the PTY mechanism wholesale.
+
+SUCCESS CRITERIA
+================
+- All four failing PTY tests pass.
+- The other 51 PTY tests remain green.
+- Rust tests and the broader verification suite remain green,
+  subject to clearly documented unrelated known failures.
+- The final diff is narrowly scoped and reviewed before committing.

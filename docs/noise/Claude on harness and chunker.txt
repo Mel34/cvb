@@ -1,0 +1,22 @@
+Pausing surgery to fix bugs makes sense, and the chunker feels like a natural fit with the transcription model. Large pastes are the case where silent truncation or reordering would hurt most. A few things I’d want the chunker to get right, since surgery will eventually depend on the same transport:
+
+Integrity: every chunk should carry a sequence number and a total count, plus a checksum over the reassembled whole. Reassembly should refuse anything incomplete or out of order, which matches your all-or-nothing rule for surgery.
+Boundaries: split on line boundaries, never mid-line, so a chunk never cuts through an operation’s expected text.
+Framing: the chunk markers should be as unmistakably protocol as the surgery markers, and one shared framing layer would serve both features.
+
+A chunked transcript also fits the master plan well. The master could store each transcript as one reassembled, checksummed unit, so the future Tampermonkey button never sees partial content.
+
+Where did the bugs mostly turn up, in the chunker itself or in how the pieces were captured and pasted? That would tell me where the master/client seam is most likely to bite.
+
+we've killed all the bugs and we've been building a testing harness today. as of right now, 190 tests excluding surgery tests (they alone are around 90 tests)
+
+That’s a strong place to be. About 280 tests total, with the surgery suite alone around 90, means the risky parts are well covered. A harness built before the master work also pays off later, because the master introduces timing-dependent behavior that’s hard to debug without one.
+
+Since the harness is fresh, a few kinds of tests are worth making sure it can express:
+
+Round-trip property tests for the chunker. For any input, including empty, a single huge line, no trailing newline, CRLF, and invalid UTF-8 if you accept it, reassemble(chunk(x)) == x. A property-testing crate like proptest finds edge cases hand-written tests miss, and it works well for surgery’s “reject anything ambiguous” rule too.
+Corruption tests. Drop a chunk, duplicate one, reorder two, truncate the last one, flip a byte. The expected result is always a clean rejection and never partial output.
+Fake time and fake transport. For the master later, you’ll want to simulate a client that goes silent or answers a capture request late without real sleeps. If the harness can inject a clock and an in-memory connection now, the heartbeat and stale-request tests become cheap to write.
+A deterministic seed on every randomized test. Print the seed on failure so a flaky case can be replayed exactly.
+
+Are the 190 tests mostly unit-level, or does the harness also drive the real binary end to end, with a PTY and a pasted payload? The end-to-end layer is the one the master work will lean on most.

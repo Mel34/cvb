@@ -1,0 +1,5 @@
+test harness+
+master-slave architecture with token
+systemd service
+work on surgery.rs module
+turn pull into a small reasoning engine+

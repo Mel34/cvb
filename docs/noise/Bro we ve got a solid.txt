@@ -1,0 +1,184 @@
+Bro, we've got a solid direction here. 😎 The key architectural decision is that CVB Master becomes the single authority for hotkeys, session coordination, clipboard publication, and transcript access. Individual CVB sessions become clients, and a future Tampermonkey script becomes another consumer of the master's transcripts.
+
+Here's the consolidated plan I'd use as our project blueprint.
+
+# CVB Master — Architecture & Implementation Plan
+
+## 1. Overall architecture
+
+systemd user service
+
+Starts, supervises, and restarts CVB Master
+
+CVB Master
+
+Hotkey · Session registry · Focus tracking · Heartbeats · Transcript registry · Clipboard · Local API
+
+CVB clients
+
+PTY capture, shell sessions, focus notifications, transcript submission
+
+Tampermonkey
+
+Future ChatGPT button, transcript selection and insertion
+
+Future phase
+
+## 2. Responsibilities
+
+Each component has one clear job.
+
+| Component           | Responsibility                                                 |
+| ------------------- | -------------------------------------------------------------- |
+| CVB Master          | Coordinate sessions and own shared resources                   |
+| CVB client          | Run the shell, maintain the PTY, capture terminal output       |
+| systemd             | Manage the master process lifecycle                            |
+| Tampermonkey script | Present transcripts inside ChatGPT and insert selected content |
+
+The master should coordinate capture, not reimplement the existing PTY capture engine.
+
+## 3. Session management and focus
+
+Every CVB client registers with the master and receives or establishes a unique session ID.
+
+The master maintains:
+
+- Session identity and connection state.
+- Heartbeat and last-seen timestamps.
+- Focus state and the timestamp of the last valid focus event.
+- Capture availability and outstanding requests.
+- Session registration and disconnection state.
+
+Heartbeat proposal: ping clients every 2 seconds, with a 6-second timeout as an initial setting.
+
+A disconnected or stale client becomes ineligible for routing. Reconnecting clients must establish fresh state.
+
+Focus and liveness remain separate: a responsive background terminal is not necessarily the terminal the user wants to capture.
+
+## 4. Global hotkey and clipboard ownership
+
+This is the first major functional goal: eliminate the race between concurrent CVB sessions.
+
+1. Move the global hotkey listener out of each client and into the master.
+2. Track which live session was most recently focused.
+3. When the screenshot hotkey fires, select one eligible session.
+4. Assign a unique capture-request ID and route the request to that client.
+5. Receive the capture result and validate that it matches the outstanding request.
+6. Have the master publish the selected result to the clipboard.
+
+Only the master should publish clipboard results through this workflow.
+
+If the selected session is dead, stale, or unresponsive, fail safely rather than silently choosing an arbitrary terminal. We can decide the exact fallback behavior during implementation.
+
+## 5. Transcript registry
+
+The master must preserve transcripts independently of terminal lifetimes. Closing a terminal must not automatically erase its previously captured output.
+
+Each transcript should have:
+
+- A stable transcript ID.
+- Its originating session ID.
+- Capture-started, capture-completed, and master-received timestamps where available.
+- Content and content type.
+- Capture status and relevant errors.
+
+The master becomes the authoritative source for transcript retrieval.
+
+We should decide whether the initial registry is in-memory or persistent on disk, considering the potentially large outputs CVB captures. Persistence is useful if transcripts must survive a master restart, but it doesn't need to complicate the first working prototype.
+
+## 6. Communication interfaces
+
+Keep two interfaces conceptually separate.
+
+A. Internal client IPC
+
+Unix-domain socket
+
+Session registration, heartbeats, focus updates, capture requests, and transcript submission.
+
+B. Consumer API
+
+Local API — design pending
+
+List recent transcripts and retrieve a selected transcript. This is intended for the future Tampermonkey script.
+
+A localhost HTTP API is a candidate for the consumer interface. Before committing, we should test its security and compatibility with Tampermonkey's request permissions and the browser's cross-origin restrictions.
+
+The API must not expose terminal output indiscriminately to arbitrary websites.
+
+## 7. Future ChatGPT integration
+
+The intended workflow is deliberately simple.
+
+Capture
+
+CVB captures terminal output.
+
+Store
+
+Master registers the transcript.
+
+Select
+
+User clicks a CVB button in ChatGPT and chooses a transcript.
+
+Insert
+
+The script inserts the content into the composer. The user reviews and submits it manually.
+
+The initial API should support listing and retrieving transcripts. Deletion and additional search/filtering can follow when needed.
+
+## 8. Implementation sequence
+
+We'll work incrementally, preserving the existing capture pipeline and running checks after each atomic change.
+
+1. Inspect the current code.
+
+   Map the existing hotkey monitor, session input path, PTY capture handoff, and clipboard writer. Establish exactly where the competing listeners live.
+2. Define the master protocol.
+
+   Specify session IDs, message types, heartbeat behavior, focus updates, capture-request IDs, error handling, and disconnect semantics.
+3. Implement the master process and user service.
+
+   Add the Rust executable, Unix socket, and systemd unit. Test lifecycle and stale-socket handling.
+4. Convert CVB into a client.
+
+   Register sessions and implement heartbeats while retaining the existing PTY and capture implementation.
+5. Move hotkey ownership.
+
+   Establish one global listener, validate focus-aware routing, and eliminate duplicate listeners.
+6. Centralize clipboard publication.
+
+   Route captures through the master and test concurrent sessions, delayed responses, disconnects, and clipboard failures.
+7. Add the transcript registry and consumer API.
+
+   Make transcripts independently retrievable and define retention and persistence behavior.
+8. Build the Tampermonkey prototype.
+
+   Add a ChatGPT composer button, list available transcripts, retrieve the selected content, and insert it without automatically submitting.
+
+## 9. Design constraints we should preserve
+
+- One atomic code change at a time.
+- Inspect existing implementation before editing.
+- Reuse CVB's working capture machinery.
+- Run `cargo check` and relevant tests after changes.
+- Test failure scenarios, not just the happy path.
+- Keep the master small and focused.
+- Keep transcript access local, explicit, and user-controlled.
+- Don't implement future browser functionality prematurely; just provide clean interfaces for it.
+
+## The decisions still open
+
+We don't need to settle everything now, but these four questions should be resolved at the appropriate stage:
+
+1. Transcript retention: memory only, persistent storage, or a configurable combination?
+2. Focus detection: terminal focus-reporting sequences versus another GNOME Wayland-compatible mechanism.
+3. Master startup: start automatically with the graphical user session and recover from crashes.
+4. Consumer API: localhost HTTP versus native messaging for the eventual browser integration.
+
+My recommendation is to defer decisions 1, 2, and 4 until we've inspected the current implementation and can evaluate the trade-offs concretely.
+
+The immediate next step is code inspection, not coding. We'll map the existing hotkey-to-capture-to-clipboard path, identify the smallest seam for master/client communication, and then proceed in controlled steps.
+
+Bro, this is evolving from a terminal capture utility into a genuinely useful local transcript service. The nice part is that we can get there without throwing away the work that already makes CVB valuable.

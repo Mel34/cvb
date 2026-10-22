@@ -1,0 +1,66 @@
+`cargo fmt --check` reported formatting differences across numerous files, not just the new test.
+
+We deliberately did **not** run repository-wide `cargo fmt`, to avoid introducing a large unrelated diff.
+
+Two targeted formatting-only adjustments were made to the new regression test through CVB surgery:
+
+- Wrapped the long temporary-path expression.
+- Wrapped the long `assert_eq!`.
+
+Some formatting differences remain, including a missing blank line before the new test's `#[test]` attribute. These were intentionally left alone to keep the functional change focused.
+
+## First checks next session
+
+Start by verifying the repository state:
+
+```bash
+cd ~/Projects/cvb
+git status --short --branch
+git log -1 --oneline --decorate
+git show --stat --oneline HEAD
+
+
+Expected latest commit:
+d8fc688 Propagate journal directory sync failures
+
+
+If the working tree is clean, continue from the committed state.
+Suggested next investigation
+If continuing journal-sync work, inspect recovery and caller handling for errors returned after a successful rename.
+Questions to investigate:
+1. Does the caller distinguish a failure before rename from a failure after rename?
+2. If directory syncing fails after rename, can recovery reliably inspect the on-disk journal and determine the actual state?
+3. Could retrying the operation after this error accidentally duplicate or conflict with an already-visible transition?
+4. Do existing tests cover the relevant recovery behavior?
+Inspect first, propose one atomic change, then implement and test it. Do not assume further changes are needed without examining the current code.
+CVB project context
+CVB stands for Capture, View, Bridge. It is a human-directed clipboard handoff tool for working with LLMs, implemented in Rust. The project includes a controlled surgery protocol for making source edits.
+The active branch at the end of this session is cvb-0.7.0. Older notes may refer to cvb-0.6.0; trust the actual Git state when resuming.
+Workflow preferences
+- Work one atomic change at a time.
+- Inspect relevant source and context before editing.
+- Explain the proposed change before making it when practical.
+- Prefer CVB-native workflows (cvb pull, cvb surgery --spec) over raw cat or grep, unless CVB itself is the problem.
+- For CVB surgery:
+  1. Obtain a fresh token.
+  2. Submit one complete envelope per invocation.
+  3. Use exact original payload lines and accurate counts.
+  4. Run cvb surgery --dry-run.
+  5. Review the diff.
+  6. Confirm the apply only after reviewing it.
+- Be cautious about clipboard mutation. If an envelope appears to change, recopy the exact envelope immediately before invoking CVB.
+- For manual surgical Python edits, use a heredoc with exact anchors, verify the expected match count, and abort before writing if it does not match.
+- Run tests after changes.
+- Preferred test command:
+  cargo test --locked --quiet
+- If the quiet test command fails, rerun with full output for diagnosis.
+- Avoid repository-wide formatting for a narrowly scoped change unless explicitly agreed.
+- Do not commit or push unless asked. The commit and push in this session were explicitly requested and completed.
+- Prefer ordinary Markdown fenced code blocks for commands and copyable text. Avoid WritingBlock/CodeBlock components that can interfere with terminal pasting.
+- Do not append | wl-copy to commands unless clipboard testing is explicitly requested.
+End-of-session summary
+- Journal directory-sync failures after rename now propagate on Unix.
+- A regression test verifies the error and confirms the journal may already contain the committed state.
+- cargo test --locked --quiet: 380 passed, 0 failed.
+- Commit d8fc688 created and pushed to origin/cvb-0.7.0.
+- Next session: check Git status, then inspect recovery/caller semantics around post-rename sync failures before deciding on another change.

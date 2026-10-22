@@ -20,4 +20,4 @@
 /*.tar.zst
 
 # Local-only working documents
-/docs/
+#/docs/
