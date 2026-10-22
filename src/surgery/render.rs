@@ -263,13 +263,35 @@ pub(crate) fn render_plan_diff(plan: &Plan, options: RenderOptions) -> String {
             new_bytes.len()
         ));
 
+        let mut old_line = 1usize;
+        let mut new_line = 1usize;
         for change in diff.iter_all_changes() {
-            let action = match change.tag() {
-                ChangeTag::Delete => "removed",
-                ChangeTag::Insert => "added",
-                ChangeTag::Equal => continue,
-            };
             let content = change.value().trim_end_matches(['\r', '\n']);
+            let (action, side, line) = match change.tag() {
+                ChangeTag::Delete => {
+                    let line = old_line;
+                    old_line += 1;
+                    ("removed", "-", line)
+                }
+                ChangeTag::Insert => {
+                    let line = new_line;
+                    new_line += 1;
+                    ("added", "+", line)
+                }
+                ChangeTag::Equal => {
+                    old_line += 1;
+                    new_line += 1;
+                    continue;
+                }
+            };
+
+            if content.chars().any(is_escape_char) {
+                notes.push(format!(
+                    "file {} L{} {side}: shown escaped",
+                    file.path, line
+                ));
+            }
+
             let markers = compute_line_markers(content);
             if !markers.is_empty() {
                 notes.push(format!(
@@ -401,6 +423,10 @@ mod tests {
         assert!(
             diff.contains("\\u{200b}"),
             "zero-width char must be displayed as an escape sequence, got:\n{diff}"
+        );
+        assert!(
+            diff.contains("file test.rs L1 +: shown escaped"),
+            "escaped added line must be identified in notes, got:\n{diff}"
         );
     }
 
