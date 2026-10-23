@@ -1873,6 +1873,94 @@ mod tests {
     }
 
     #[test]
+    fn test_ordinary_rename_failure_reports_restore_failure() {
+        let base = std::env::temp_dir().join(format!(
+            "cvb-ordinary-restore-fail-{}",
+            std::process::id()
+        ));
+        let state_dir = base.join("state");
+        let project_dir = base.join("project");
+
+        if base.exists() {
+            let _ = fs::remove_dir_all(&base);
+        }
+        fs::create_dir_all(&project_dir).unwrap();
+
+        let file_a = project_dir.join("a.rs");
+        let file_b = project_dir.join("b.rs");
+        let orig_a = "orig a\n";
+        let orig_b = "orig b\n";
+        fs::write(&file_a, orig_a).unwrap();
+        fs::write(&file_b, orig_b).unwrap();
+
+        let state = init_project_state(&state_dir, &project_dir).unwrap();
+        let plan = make_test_plan(
+            "ordinary-restore-fail",
+            vec![
+                ("a.rs", orig_a, "new a\n"),
+                ("b.rs", orig_b, "new b\n"),
+            ],
+        );
+
+        let res = commit_plan_with_hook(&state, &plan, |point| {
+            if point == CommitCrashPoint::BeforeRename(1) {
+                fs::create_dir(project_dir.join(format!(
+                    ".restore.a.rs.{}.tmp",
+                    std::process::id()
+                )))
+                .unwrap();
+                return Err(ApplyError::Io {
+                    path: Some("b.rs".to_string()),
+                    message: "injected ordinary rename failure".to_string(),
+                });
+            }
+            Ok(())
+        });
+
+        match res {
+            Err(ApplyError::CommitFailed(report)) => {
+                assert!(
+                    report.message.contains("injected ordinary rename failure"),
+                    "expected injected rename failure, got: {}",
+                    report.message
+                );
+                assert_eq!(report.files.len(), 2);
+                for file in &report.files {
+                    assert!(
+                        matches!(
+                            &file.status,
+                            FileRestorationStatus::NotRestorable { reason }
+                                if reason.contains("recovery failed")
+                        ),
+                        "expected restoration failure for {}, got: {:?}",
+                        file.path,
+                        file.status
+                    );
+                }
+            }
+            other => panic!(
+                "expected CommitFailed after restoration failure, got: {other:?}"
+            ),
+        }
+
+        assert_eq!(fs::read_to_string(&file_a).unwrap(), "new a\n");
+        assert_eq!(fs::read_to_string(&file_b).unwrap(), orig_b);
+
+        let journal = crate::surgery::journal::read_journal(
+            &state.dir.join("ordinary-restore-fail.journal"),
+        )
+        .unwrap();
+        assert_eq!(journal.state, JournalState::Prepared);
+        assert_eq!(journal.files.len(), 2);
+        assert_eq!(journal.files[0].original_bytes, orig_a.as_bytes());
+        assert_eq!(journal.files[1].original_bytes, orig_b.as_bytes());
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn test_concurrency_file_modified_before_rename_rolls_back_earlier_renames() {
+    #[test]
     fn test_concurrency_file_modified_before_rename_rolls_back_earlier_renames() {
         let base = std::env::temp_dir().join(format!(
             "cvb-concurrency-rollback-{}",
