@@ -783,6 +783,54 @@ mod tests {
     }
 
     #[test]
+    fn test_rendered_diff_round_trips_escaped_crlf_and_unterminated_eof() {
+        let plan = Plan {
+            token: String::new(),
+            id: String::new(),
+            digest: String::new(),
+            files: vec![crate::surgery::PlannedFile {
+                path: "roundtrip.txt".to_string(),
+                original: "before\r\nold\u{200b}\r\nlast".to_string(),
+                original_digest: String::new(),
+                proposed: "before\r\nnew\u{200b}\r\nlast changed".to_string(),
+                proposed_digest: String::new(),
+                operations: vec![],
+            }],
+        };
+
+        let diff = render_plan_diff(&plan, RenderOptions::default());
+
+        assert!(
+            diff.contains("file roundtrip.txt L2 -: shown escaped"),
+            "removed escaped line must be noted, got:\n{diff}"
+        );
+        assert!(
+            diff.contains("file roundtrip.txt L2 +: shown escaped"),
+            "added escaped line must be noted, got:\n{diff}"
+        );
+        assert!(
+            diff.contains("line endings: old CRLF, new CRLF"),
+            "CRLF line endings must be noted, got:\n{diff}"
+        );
+        assert!(
+            diff.contains(NO_NEWLINE_MARKER),
+            "unterminated EOF must be visible, got:\n{diff}"
+        );
+
+        let parsed = crate::surgery::diff_parse::parse_diff(&diff)
+            .expect("rendered diff must parse successfully");
+        assert_eq!(parsed.len(), 1);
+        assert!(
+            parsed[0]
+                .hunks
+                .iter()
+                .flat_map(|hunk| &hunk.lines)
+                .any(|line| line.text.contains(r"\u{200b}")),
+            "escaped Unicode must survive the render/parse round trip"
+        );
+    }
+
+    #[test]
     fn test_render_large_inputs() {
         let mut old = String::with_capacity(5000 * 30);
         let mut new = String::with_capacity(5000 * 30);

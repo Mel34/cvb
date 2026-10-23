@@ -369,6 +369,17 @@ pub(crate) fn parse_diff(input: &str) -> Result<Vec<DiffFile>, DiffParseError> {
             return Err(error(index + 1, "file has no hunks"));
         }
 
+        if hunks
+            .iter()
+            .take(hunks.len().saturating_sub(1))
+            .any(|hunk| hunk.lines.iter().any(|line| line.no_newline))
+        {
+            return Err(error(
+                index + 1,
+                "no-newline marker cannot precede another hunk",
+            ));
+        }
+
         files.push(DiffFile {
             old_path,
             new_path,
@@ -982,6 +993,27 @@ mod tests {
         let error = parse_diff(input).unwrap_err();
         assert_eq!(error.line, 8);
         assert_eq!(error.message, "duplicate no-newline marker");
+    }
+
+    #[test]
+    fn rejects_no_newline_marker_before_later_hunk() {
+        let input = concat!(
+            "--- a/example.txt\n",
+            "+++ b/example.txt\n",
+            "@@ -1 +1 @@\n",
+            "-old\n",
+            "+new\n",
+            "\\ No newline at end of file\n",
+            "@@ -10 +10 @@\n",
+            "-before\n",
+            "+after\n",
+        );
+
+        let error = parse_diff(input).unwrap_err();
+        assert_eq!(
+            error.message,
+            "no-newline marker cannot precede another hunk"
+        );
     }
 
     #[test]
