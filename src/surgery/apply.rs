@@ -17,6 +17,7 @@ pub(crate) enum CommitCrashPoint {
     JournalPrepared,
     TempWrite(usize),
     Rename(usize),
+    BeforeRename(usize),
     ReadBack,
     Committed,
 }
@@ -391,6 +392,7 @@ where
                 });
             }
 
+            hook(CommitCrashPoint::BeforeRename(i))?;
             fs::rename(temp_path, &target_path).map_err(|e| ApplyError::Io {
                 path: Some(file.path.clone()),
                 message: e.to_string(),
@@ -1798,6 +1800,68 @@ mod tests {
             }
             other => panic!("expected ApplyError::Replay, got: {other:?}"),
         }
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn test_ordinary_rename_failure_rolls_back_earlier_renames() {
+        let base = std::env::temp_dir().join(format!(
+            "cvb-ordinary-rename-fail-{}",
+            std::process::id()
+        ));
+        let state_dir = base.join("state");
+        let project_dir = base.join("project");
+
+        if base.exists() {
+            let _ = fs::remove_dir_all(&base);
+        }
+        fs::create_dir_all(&project_dir).unwrap();
+
+        let file_a = project_dir.join("a.rs");
+        let file_b = project_dir.join("b.rs");
+        let orig_a = "orig a\n";
+        let orig_b = "orig b\n";
+        fs::write(&file_a, orig_a).unwrap();
+        fs::write(&file_b, orig_b).unwrap();
+
+        let state = init_project_state(&state_dir, &project_dir).unwrap();
+        let plan = make_test_plan(
+            "ordinary-rename-fail",
+            vec![
+                ("a.rs", orig_a, "new a\n"),
+                ("b.rs", orig_b, "new b\n"),
+            ],
+        );
+
+        let res = commit_plan_with_hook(&state, &plan, |point| {
+            if point == CommitCrashPoint::BeforeRename(1) {
+                return Err(ApplyError::Io {
+                    path: Some("b.rs".to_string()),
+                    message: "injected ordinary rename failure".to_string(),
+                });
+            }
+            Ok(())
+        });
+
+        match res {
+            Err(ApplyError::CommitFailed(report)) => {
+                assert!(
+                    report.message.contains("injected ordinary rename failure"),
+                    "expected injected rename failure, got: {}",
+                    report.message
+                );
+                assert_eq!(report.files.len(), 2);
+                assert_eq!(report.files[0].path, "a.rs");
+                assert_eq!(report.files[0].status, FileRestorationStatus::Restored);
+                assert_eq!(report.files[1].path, "b.rs");
+                assert_eq!(report.files[1].status, FileRestorationStatus::Restored);
+            }
+            other => panic!("expected CommitFailed after injected rename failure, got: {other:?}"),
+        }
+
+        assert_eq!(fs::read_to_string(&file_a).unwrap(), orig_a);
+        assert_eq!(fs::read_to_string(&file_b).unwrap(), orig_b);
 
         let _ = fs::remove_dir_all(base);
     }
