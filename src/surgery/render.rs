@@ -260,7 +260,9 @@ fn render_file_diff_with_operations(
         for change in hunk.iter_changes() {
             let tag = change.tag();
             let value = change.value();
-            let content = value.trim_end_matches(['\r', '\n']);
+            let content = value.strip_suffix('\n').map_or(value, |line| {
+                line.strip_suffix('\r').unwrap_or(line)
+            });
             let sign = match tag {
                 ChangeTag::Delete => "-",
                 ChangeTag::Insert => "+",
@@ -287,7 +289,19 @@ fn render_file_diff_with_operations(
                 }
             }
 
-            if change.missing_newline() {
+            let old_line_is_unterminated = !old_bytes.ends_with(b"\n")
+                && change
+                    .old_index()
+                    .is_some_and(|index| index + 1 == old_str.lines().count());
+            let new_line_is_unterminated = !new_bytes.ends_with(b"\n")
+                && change
+                    .new_index()
+                    .is_some_and(|index| index + 1 == new_str.lines().count());
+
+            if change.missing_newline()
+                || old_line_is_unterminated
+                || new_line_is_unterminated
+            {
                 writeln!(out, "{NO_NEWLINE_MARKER}").unwrap();
             }
         }
@@ -630,6 +644,22 @@ mod tests {
         assert!(
             diff.contains(NO_NEWLINE_MARKER),
             "missing final newline must show '{NO_NEWLINE_MARKER}', got:\n{diff}"
+        );
+    }
+    #[test]
+    fn test_review_visibility_preserves_lone_cr_at_eof() {
+        let old = b"safe\n";
+        let new = b"unsafe\r";
+
+        let diff = render_file_diff("test.rs", old, new, RenderOptions::default());
+
+        assert!(
+            diff.lines().any(|line| line == "+unsafe\\u{d}"),
+            "a trailing lone CR must be escaped, not discarded, got:\n{diff}"
+        );
+        assert!(
+            diff.contains(NO_NEWLINE_MARKER),
+            "unterminated final line must retain the no-newline marker, got:\n{diff}"
         );
     }
 
