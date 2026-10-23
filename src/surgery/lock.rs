@@ -139,6 +139,52 @@ mod tests {
         fs::remove_dir_all(base).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_lock_identity_stays_stable_when_target_inode_is_replaced() {
+        use std::os::unix::fs::MetadataExt;
+
+        let base = test_dir("stable-target");
+        let target = base.join("target.txt");
+        let replacement = base.join("target.new");
+        fs::write(&target, "original target\n").unwrap();
+
+        let lock = ProjectLock::acquire(&base).unwrap();
+        let lock_path = lock.path().to_path_buf();
+        let lock_before = fs::metadata(&lock_path).unwrap();
+        let lock_identity_before = (lock_before.dev(), lock_before.ino());
+        let target_inode_before = fs::metadata(&target).unwrap().ino();
+
+        fs::write(&replacement, "replacement target\n").unwrap();
+        fs::rename(&replacement, &target).unwrap();
+
+        let target_inode_after = fs::metadata(&target).unwrap().ino();
+        assert_ne!(
+            target_inode_before, target_inode_after,
+            "the test must replace the target with a different inode"
+        );
+
+        let lock_after = fs::metadata(&lock_path).unwrap();
+        assert_eq!(
+            lock_identity_before,
+            (lock_after.dev(), lock_after.ino()),
+            "project.lock identity must remain stable across target replacement"
+        );
+        assert!(
+            matches!(ProjectLock::acquire(&base), Err(LockError::Locked)),
+            "a competing operation must still be excluded while the original lock is held"
+        );
+
+        drop(lock);
+        let lock_after_release = ProjectLock::acquire(&base);
+        assert!(
+            lock_after_release.is_ok(),
+            "the lock must be acquirable after the original holder releases it"
+        );
+        drop(lock_after_release);
+
+        fs::remove_dir_all(base).unwrap();
+    }
     #[test]
     fn test_lock_file_permissions() {
         let base = test_dir("perms");
