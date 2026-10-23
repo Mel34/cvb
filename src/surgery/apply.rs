@@ -1863,6 +1863,12 @@ mod tests {
         assert_eq!(fs::read_to_string(&file_a).unwrap(), orig_a);
         assert_eq!(fs::read_to_string(&file_b).unwrap(), orig_b);
 
+        let journal = crate::surgery::journal::read_journal(
+            &state.dir.join("ordinary-rename-fail.journal"),
+        )
+        .unwrap();
+        assert_eq!(journal.state, JournalState::RolledBack);
+
         let _ = fs::remove_dir_all(base);
     }
 
