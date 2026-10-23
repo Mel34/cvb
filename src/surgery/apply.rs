@@ -350,6 +350,27 @@ where
             hook(CommitCrashPoint::TempWrite(i))?;
         }
 
+        // Recheck every target after preparation and before the first rename.
+        for file in &plan.files {
+            let target_path = project_state.canonical_root.join(&file.path);
+            let current_bytes = fs::read(&target_path).map_err(|e| ApplyError::Io {
+                path: Some(file.path.clone()),
+                message: e.to_string(),
+            })?;
+
+            let mut hasher = Sha256::new();
+            hasher.update(&current_bytes);
+            let current_digest = format!("{:x}", hasher.finalize());
+
+            if current_digest != file.original_digest {
+                return Err(ApplyError::Stale {
+                    path: file.path.clone(),
+                    expected_digest: file.original_digest.clone(),
+                    actual_digest: current_digest,
+                });
+            }
+        }
+
         // Step 3: Per-rename digest recheck and rename
         for (i, (file, temp_path)) in plan.files.iter().zip(&temp_paths).enumerate() {
             let target_path = project_state.canonical_root.join(&file.path);
@@ -1115,6 +1136,72 @@ mod tests {
             }
             other => panic!("expected ApplyError::CommitFailed with Stale, got: {other:?}"),
         }
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn test_commit_plan_rechecks_all_targets_before_first_rename() {
+        let base = std::env::temp_dir().join(format!(
+            "cvb-commit-all-recheck-{}",
+            std::process::id()
+        ));
+        let state_dir = base.join("state");
+        let project_dir = base.join("project");
+
+        if base.exists() {
+            let _ = fs::remove_dir_all(&base);
+        }
+        fs::create_dir_all(&project_dir).unwrap();
+
+        let file_a = project_dir.join("a.rs");
+        let file_b = project_dir.join("b.rs");
+        let orig_a = "orig a\n";
+        let orig_b = "orig b\n";
+        let foreign_b = "foreign edit to b\n";
+        fs::write(&file_a, orig_a).unwrap();
+        fs::write(&file_b, orig_b).unwrap();
+
+        let state = init_project_state(&state_dir, &project_dir).unwrap();
+        let plan = make_test_plan(
+            "all-target-recheck",
+            vec![
+                ("a.rs", orig_a, "new a\n"),
+                ("b.rs", orig_b, "new b\n"),
+            ],
+        );
+
+        let target_b = file_b.clone();
+        let res = commit_plan_with_hook(&state, &plan, move |point| {
+            if point == CommitCrashPoint::TempWrite(1) {
+                fs::write(&target_b, foreign_b).unwrap();
+            }
+            Ok(())
+        });
+
+        match res {
+            Err(ApplyError::CommitFailed(report)) => {
+                assert!(
+                    report.message.contains("E-STALE"),
+                    "expected stale-target failure, got: {}",
+                    report.message
+                );
+            }
+            other => panic!(
+                "expected CommitFailed with stale-target error, got: {other:?}"
+            ),
+        }
+
+        assert_eq!(
+            fs::read_to_string(&file_a).unwrap(),
+            orig_a,
+            "first target must not be renamed before all-target verification"
+        );
+        assert_eq!(
+            fs::read_to_string(&file_b).unwrap(),
+            foreign_b,
+            "foreign content must remain untouched"
+        );
 
         let _ = fs::remove_dir_all(base);
     }
