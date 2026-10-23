@@ -527,6 +527,12 @@ mod tests {
     }
 
     #[test]
+    fn test_literal_backslashes_remain_raw_without_escape_characters() {
+        let source = r"literal \u{41} and \\ and \anything";
+        assert_eq!(escape_line_content(source), source);
+    }
+
+    #[test]
     fn test_review_visibility_zero_width() {
         let old = b"let msg = \"hello\";\n";
         let new = "let msg = \"hello\u{200b}\";\n".as_bytes();
