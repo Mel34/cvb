@@ -761,6 +761,45 @@ mod tests {
             "added source must start immediately after the gutter, got:\n{diff}"
         );
     }
+    #[test]
+    fn test_source_whitespace_and_unicode_round_trip() {
+        let cases = [
+            ("plain", "changed"),
+            (" leading", " changed"),
+            ("    leading", "    changed"),
+            ("        leading", "        changed"),
+            ("\tleading", "\tchanged"),
+            ("trailing ", "changed "),
+            ("trailing\t", "changed\t"),
+            ("", "nonempty"),
+            ("caf\u{00e9} \u{65e5}\u{672c}\u{8a9e}", "na\u{00ef}ve \u{0395}\u{03bb}\u{03bb}\u{03b7}\u{03bd}\u{03b9}\u{03ba}\u{03ac}"),
+        ];
+
+        for (old_line, new_line) in cases {
+            let old = format!("{old_line}\n");
+            let new = format!("{new_line}\n");
+            let diff = render_file_diff(
+                "roundtrip.txt",
+                old.as_bytes(),
+                new.as_bytes(),
+                RenderOptions::default(),
+            );
+            let parsed = crate::surgery::diff_parse::parse_diff(&diff)
+                .expect("rendered whitespace diff must parse");
+
+            let lines: Vec<_> = parsed[0]
+                .hunks
+                .iter()
+                .flat_map(|hunk| &hunk.lines)
+                .collect();
+
+            assert_eq!(lines.len(), 2, "unexpected parsed lines for {diff}");
+            assert_eq!(lines[0].kind, crate::surgery::diff_parse::DiffLineKind::Remove);
+            assert_eq!(lines[0].text, old_line, "removed text changed for {diff}");
+            assert_eq!(lines[1].kind, crate::surgery::diff_parse::DiffLineKind::Add);
+            assert_eq!(lines[1].text, new_line, "added text changed for {diff}");
+        }
+    }
 
     #[test]
     fn test_canonical_hunk_header_counts() {
