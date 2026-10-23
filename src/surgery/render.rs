@@ -654,6 +654,45 @@ mod tests {
     }
 
     #[test]
+    fn test_escape_class_golden_boundaries() {
+        for (source, expected) in [
+            ("\u{0}", "\\u{0}"),
+            ("\u{1}", "\\u{1}"),
+            ("\u{1f}", "\\u{1f}"),
+            ("\t", "\t"),
+            ("\n", "\n"),
+            (" ", " "),
+            ("~", "~"),
+            ("\u{7e}", "~"),
+            ("\u{7f}", "\\u{7f}"),
+            ("\u{80}", "\\u{80}"),
+            ("\u{9f}", "\\u{9f}"),
+            ("\u{a0}", "\\u{a0}"),
+            ("\u{a1}", "\u{a1}"),
+            ("\u{1680}", "\\u{1680}"),
+            ("\u{200a}", "\\u{200a}"),
+            ("\u{200b}", "\\u{200b}"),
+            ("\u{202f}", "\\u{202f}"),
+            ("\u{205f}", "\\u{205f}"),
+            ("\u{3000}", "\\u{3000}"),
+            ("\u{e000}", "\u{e000}"),
+            ("\u{feff}", "\\u{feff}"),
+        ] {
+            assert_eq!(
+                escape_line_content(source),
+                expected,
+                "unexpected escaping for U+{:04X}",
+                source.chars().next().unwrap() as u32
+            );
+        }
+
+        assert_eq!(
+            escape_line_content("literal \\u{41} \u{0}"),
+            "literal \\\\u{41} \\u{0}"
+        );
+    }
+
+    #[test]
     fn test_review_visibility_no_newline_at_eof() {
         let old = b"line 1\nline 2";
         let new = b"line 1\nline 2 modified";
