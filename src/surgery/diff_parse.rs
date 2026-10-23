@@ -426,6 +426,61 @@ fn parse_escape_note(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn parses_escape_notes_for_each_side() {
+        assert_eq!(
+            parse_escape_note("file src/lib.rs L12 +: shown escaped", 1).unwrap(),
+            Some(EscapeNote {
+                path: "src/lib.rs".into(),
+                line: 12,
+                side: EscapeNoteSide::Add,
+            })
+        );
+        assert_eq!(
+            parse_escape_note("file src/lib.rs L7 -: shown escaped", 2).unwrap(),
+            Some(EscapeNote {
+                path: "src/lib.rs".into(),
+                line: 7,
+                side: EscapeNoteSide::Remove,
+            })
+        );
+        assert_eq!(
+            parse_escape_note("file src/my file.rs L3 context: shown escaped", 3).unwrap(),
+            Some(EscapeNote {
+                path: "src/my file.rs".into(),
+                line: 3,
+                side: EscapeNoteSide::Context,
+            })
+        );
+    }
+
+    #[test]
+    fn ignores_notes_that_do_not_describe_escaped_lines() {
+        assert_eq!(
+            parse_escape_note("file src/lib.rs: line endings: old LF, new CRLF", 1).unwrap(),
+            None
+        );
+        assert_eq!(
+            parse_escape_note("op 1 L12 +: trailing spaces", 2).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_escape_notes() {
+        for note in [
+            "file  L1 +: shown escaped",
+            "file src/lib.rs L0 +: shown escaped",
+            "file src/lib.rs Lbad +: shown escaped",
+            "file src/lib.rs L1 bogus: shown escaped",
+            "file src/lib.rs +: shown escaped",
+        ] {
+            assert!(
+                parse_escape_note(note, 9).is_err(),
+                "expected malformed note to be rejected: {note:?}"
+            );
+        }
+    }
 
     #[test]
     fn unescapes_backslashes_unicode_and_adjacent_escapes() {
