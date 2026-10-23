@@ -1960,8 +1960,6 @@ mod tests {
 
     #[test]
     fn test_concurrency_file_modified_before_rename_rolls_back_earlier_renames() {
-    #[test]
-    fn test_concurrency_file_modified_before_rename_rolls_back_earlier_renames() {
         let base = std::env::temp_dir().join(format!(
             "cvb-concurrency-rollback-{}",
             std::process::id()
