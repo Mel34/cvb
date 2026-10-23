@@ -283,6 +283,13 @@ pub(crate) fn parse_diff(input: &str) -> Result<Vec<DiffFile>, DiffParseError> {
                 });
             }
 
+            if lines.get(index).copied() == Some(NO_NEWLINE_MARKER) {
+                return Err(error(
+                    index + 1,
+                    "no-newline marker must immediately follow a qualifying body line",
+                ));
+            }
+
             hunks.push(DiffHunk {
                 old_start,
                 old_count,
@@ -363,6 +370,20 @@ mod tests {
 
         let files = parse_diff(input).unwrap();
         assert!(files[0].hunks[0].lines[0].no_newline);
+    }
+
+    #[test]
+    fn rejects_orphan_marker_after_empty_hunk() {
+        let input = concat!(
+            "cvb surgery (dry run): 1 op, 1 file\n",
+            "Legend: test\n",
+            "--- a/example.txt\n",
+            "+++ b/example.txt\n",
+            "@@ -0,0 +0,0 @@\n",
+            "\\ No newline at end of file\n",
+        );
+
+        assert!(parse_diff(input).is_err());
     }
 
     #[test]
