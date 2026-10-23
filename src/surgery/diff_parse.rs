@@ -701,15 +701,29 @@ mod tests {
             "Legend: test\n",
             "--- a/example.txt\n",
             "+++ b/example.txt\n",
-            "@@ -1 +1 @@\n",
+            "@@ -1,4 +1,4 @@\n",
             "- -- foo\n",
+            "---- a/x\n",
+            "-@@ -1 +1 @@\n",
+            "-\\ No newline at end of file\n",
             "+=== notes ===\n",
+            "++++ b/x\n",
+            "+@@ -1 +1 @@\n",
+            "+\\ No newline at end of file\n",
         );
 
         let files = parse_diff(input).unwrap();
         assert_eq!(files.len(), 1);
-        assert_eq!(files[0].hunks[0].lines[0].text, " -- foo");
-        assert_eq!(files[0].hunks[0].lines[1].text, "=== notes ===");
+        let lines = &files[0].hunks[0].lines;
+        assert_eq!(lines.len(), 8);
+        assert_eq!(lines[0].text, " -- foo");
+        assert_eq!(lines[1].text, "--- a/x");
+        assert_eq!(lines[2].text, "@@ -1 +1 @@");
+        assert_eq!(lines[3].text, "\\ No newline at end of file");
+        assert_eq!(lines[4].text, "=== notes ===");
+        assert_eq!(lines[5].text, "+++ b/x");
+        assert_eq!(lines[6].text, "@@ -1 +1 @@");
+        assert_eq!(lines[7].text, "\\ No newline at end of file");
     }
 
     #[test]
