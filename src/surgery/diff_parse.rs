@@ -943,6 +943,58 @@ mod tests {
     }
 
     #[test]
+    fn rejects_misplaced_no_newline_markers() {
+        let cases = [
+            concat!(
+                "--- a/example.txt\n",
+                "+++ b/example.txt\n",
+                "@@ -1,2 +1 @@\n",
+                "-old\n",
+                "\\ No newline at end of file\n",
+                "+new\n",
+            ),
+            concat!(
+                "--- a/example.txt\n",
+                "+++ b/example.txt\n",
+                "@@ -1 +1,2 @@\n",
+                "-old\n",
+                "+new\n",
+                "\\ No newline at end of file\n",
+            ),
+            concat!(
+                "--- a/example.txt\n",
+                "+++ b/example.txt\n",
+                "@@ -1,2 +1,2 @@\n",
+                " first\n",
+                "\\ No newline at end of file\n",
+                "-old\n",
+                "+new\n",
+            ),
+            concat!(
+                "--- a/example.txt\n",
+                "+++ b/example.txt\n",
+                "@@ -1 +0,0 @@\n",
+                "-old\n",
+                "\\ No newline at end of file\n",
+                "\\ No newline at end of file\n",
+            ),
+            concat!(
+                "--- a/example.txt\n",
+                "+++ b/example.txt\n",
+                "@@ -1 +1 @@\n",
+                "\\ No newline at end of file\n",
+            ),
+        ];
+
+        for input in cases {
+            assert!(
+                parse_diff(input).is_err(),
+                "expected misplaced no-newline marker to be rejected:\n{input}"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_context_line_when_declared_counts_are_inconsistent() {
         let input = concat!(
             "--- a/example.txt\n",
