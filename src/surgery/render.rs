@@ -6,7 +6,6 @@ use crate::surgery::{detect_newline, InsertPosition, Newline, Operation, Plan};
 
 pub(crate) const MARKER_TRAILING_WHITESPACE: &str = "[trailing-whitespace]";
 pub(crate) const MARKER_TAB_INDENT: &str = "[tab-indent]";
-pub(crate) const MARKER_SPACE_INDENT: &str = "[space-indent]";
 pub(crate) const MARKER_ZERO_WIDTH: &str = "[zero-width]";
 pub(crate) const MARKER_BIDI: &str = "[bidi]";
 pub(crate) const MARKER_CONTROL: &str = "[control]";
@@ -109,8 +108,6 @@ fn compute_line_markers(content: &str) -> Vec<&'static str> {
 
     if leading_ws.contains('\t') {
         markers.push(MARKER_TAB_INDENT);
-    } else if leading_ws.contains(' ') {
-        markers.push(MARKER_SPACE_INDENT);
     }
 
     if content.ends_with(' ') || content.ends_with('\t') {
@@ -516,8 +513,8 @@ mod tests {
             "removing tab indent must show {MARKER_TAB_INDENT} in notes, got:\n{diff}"
         );
         assert!(
-            diff.contains(MARKER_SPACE_INDENT),
-            "adding space indent must show {MARKER_SPACE_INDENT} in notes, got:\n{diff}"
+            !diff.contains("[space-indent]"),
+            "ordinary space indentation must not produce a note, got:\n{diff}"
         );
     }
 
