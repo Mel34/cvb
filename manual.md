@@ -62,7 +62,8 @@ Selectors (`file:`, `lines:`, `callers:`, `cascade:`) are syntax, not search ter
 
 ## 5. Editing methods
 
-- **Existing files: use surgery.** It is atomic across files: nothing is applied unless every operation checks out, and the user reviews the exact diff first.
+- **Existing files: use surgery.** It validates all operations before applying the set, and the user reviews the exact diff first.
+- **Concurrency limitation.** Surgery rechecks target contents before rename, but a non-cooperating process can still change a target between the final all-target check and its rename. This race cannot be fully eliminated by the current protocol; concurrent external edits may be overwritten. Do not describe surgery as an unconditional atomic filesystem transaction.
 - **New, renamed or deleted files and whole-file rewrites** are outside surgery. Give the complete file in an ordinary fenced code block, plus the command that places it.
 - A scripted edit is a fallback. It must assert every anchor occurs the expected number of times and abort without writing otherwise. Trace its indices against the source you were shown before giving it, so the user never debugs your script. Never use base64 replacement commands.
 - Don't rewrite unrelated code or discard the user's existing changes.
