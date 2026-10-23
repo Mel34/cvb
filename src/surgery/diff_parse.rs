@@ -743,6 +743,28 @@ mod tests {
     }
 
     #[test]
+    fn accepts_marker_after_final_removed_line_before_additions() {
+        let input = concat!(
+            "cvb surgery (dry run): 1 op, 1 file\n",
+            "Legend: test\n",
+            "--- a/example.txt\n",
+            "+++ b/example.txt\n",
+            "@@ -1 +1 @@\n",
+            "-old\n",
+            "\\ No newline at end of file\n",
+            "+new\n",
+        );
+
+        let files = parse_diff(input).unwrap();
+        let lines = &files[0].hunks[0].lines;
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].kind, DiffLineKind::Remove);
+        assert!(lines[0].no_newline);
+        assert_eq!(lines[1].kind, DiffLineKind::Add);
+        assert!(!lines[1].no_newline);
+    }
+
+    #[test]
     fn accepts_marker_after_final_added_line() {
         let input = concat!(
             "cvb surgery (dry run): 1 op, 1 file\n",
