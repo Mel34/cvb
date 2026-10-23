@@ -519,6 +519,14 @@ mod tests {
     }
 
     #[test]
+    fn test_escape_literal_sequence_alongside_zero_width() {
+        assert_eq!(
+            escape_line_content("literal \\u{41} hidden \u{200b}"),
+            "literal \\\\u{41} hidden \\u{200b}"
+        );
+    }
+
+    #[test]
     fn test_review_visibility_zero_width() {
         let old = b"let msg = \"hello\";\n";
         let new = "let msg = \"hello\u{200b}\";\n".as_bytes();
@@ -583,6 +591,14 @@ mod tests {
         assert!(
             diff.contains("file test.rs L1 context: shown escaped"),
             "escaped context line must be identified in notes, got:\n{diff}"
+        );
+    }
+
+    #[test]
+    fn test_escape_mixed_character_classes_together() {
+        assert_eq!(
+            escape_line_content("literal \\u{41} \u{202e}\u{1}\u{200b}"),
+            "literal \\\\u{41} \\u{202e}\\u{1}\\u{200b}"
         );
     }
 
