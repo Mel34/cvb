@@ -185,6 +185,46 @@ mod tests {
 
         fs::remove_dir_all(base).unwrap();
     }
+    #[cfg(unix)]
+    #[test]
+    fn test_project_lock_rejects_competing_process() {
+        const CHILD_DIR_ENV: &str = "CVB_TEST_PROJECT_LOCK_CHILD_DIR";
+
+        if let Ok(dir) = std::env::var(CHILD_DIR_ENV) {
+            assert!(
+                matches!(ProjectLock::acquire(Path::new(&dir)), Err(LockError::Locked)),
+                "child process must be rejected while the parent holds project.lock"
+            );
+            return;
+        }
+
+        use std::process::Command;
+
+        let base = test_dir("process-contend");
+        let lock = ProjectLock::acquire(&base).unwrap();
+        let test_name = format!(
+            "{}::test_project_lock_rejects_competing_process",
+            module_path!()
+        );
+
+        let output = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(test_name)
+            .arg("--nocapture")
+            .env(CHILD_DIR_ENV, &base)
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "child lock contention test failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        drop(lock);
+        fs::remove_dir_all(base).unwrap();
+    }
     #[test]
     fn test_lock_file_permissions() {
         let base = test_dir("perms");
