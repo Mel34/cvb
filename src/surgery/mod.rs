@@ -10,6 +10,7 @@ pub(crate) mod load;
 pub(crate) mod parse;
 pub(crate) mod plan;
 pub(crate) mod render;
+pub(crate) mod diff_parse;
 pub(crate) mod keys;
 pub(crate) mod mode;
 pub(crate) mod pager;
