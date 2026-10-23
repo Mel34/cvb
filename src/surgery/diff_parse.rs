@@ -168,8 +168,19 @@ pub(crate) fn parse_diff(input: &str) -> Result<Vec<DiffFile>, DiffParseError> {
         }
 
         if !line_text.starts_with("--- ") {
-            index += 1;
-            continue;
+            if files.is_empty() {
+                index += 1;
+                continue;
+            }
+
+            if line_text.is_empty()
+                && lines.get(index + 1).copied() == Some("=== notes ===")
+            {
+                index += 1;
+                continue;
+            }
+
+            return Err(error(index + 1, "unexpected line outside file diff"));
         }
 
         let old_header_line = index + 1;
@@ -370,6 +381,22 @@ mod tests {
 
         let files = parse_diff(input).unwrap();
         assert!(files[0].hunks[0].lines[0].no_newline);
+    }
+
+    #[test]
+    fn rejects_unexpected_text_after_completed_hunk() {
+        let input = concat!(
+            "cvb surgery (dry run): 1 op, 1 file\n",
+            "Legend: test\n",
+            "--- a/example.txt\n",
+            "+++ b/example.txt\n",
+            "@@ -1 +1 @@\n",
+            "-old\n",
+            "+new\n",
+            "unexpected text\n",
+        );
+
+        assert!(parse_diff(input).is_err());
     }
 
     #[test]
