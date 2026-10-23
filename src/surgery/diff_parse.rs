@@ -468,6 +468,76 @@ mod tests {
     }
 
     #[test]
+    fn rejects_missing_new_file_header() {
+        let input = "--- a/example.txt\n";
+
+        let error = parse_diff(input).unwrap_err();
+        assert_eq!(error.line, 2);
+        assert_eq!(error.message, "missing new file header");
+    }
+
+    #[test]
+    fn rejects_malformed_new_file_header() {
+        let input = "--- a/example.txt\nnot a new-file header\n";
+
+        let error = parse_diff(input).unwrap_err();
+        assert_eq!(error.line, 2);
+        assert_eq!(error.message, "invalid file header");
+    }
+
+    #[test]
+    fn rejects_file_diff_without_hunks() {
+        let input = "--- a/example.txt\n+++ b/example.txt\n";
+
+        let error = parse_diff(input).unwrap_err();
+        assert_eq!(error.line, 3);
+        assert_eq!(error.message, "file has no hunks");
+    }
+
+    #[test]
+    fn rejects_truncated_hunk_body() {
+        let input = concat!(
+            "--- a/example.txt\n",
+            "+++ b/example.txt\n",
+            "@@ -1,2 +1,2 @@\n",
+            "-old\n",
+        );
+
+        let error = parse_diff(input).unwrap_err();
+        assert_eq!(error.line, 5);
+        assert_eq!(error.message, "truncated hunk body");
+    }
+
+    #[test]
+    fn rejects_invalid_hunk_body_prefix() {
+        let input = concat!(
+            "--- a/example.txt\n",
+            "+++ b/example.txt\n",
+            "@@ -1 +1 @@\n",
+            "?invalid\n",
+        );
+
+        let error = parse_diff(input).unwrap_err();
+        assert_eq!(error.line, 4);
+        assert_eq!(
+            error.message,
+            "expected a context, removal, or addition line"
+        );
+    }
+
+    #[test]
+    fn rejects_oversized_hunk_range_count() {
+        let too_large = format!(
+            "--- a/example.txt\n+++ b/example.txt\n@@ -1,{} +1 @@\n",
+            format!("{}0", usize::MAX)
+        );
+
+        let error = parse_diff(&too_large).unwrap_err();
+        assert_eq!(error.line, 3);
+        assert_eq!(error.message, "range number is too large");
+    }
+
+    #[test]
     fn rejects_orphan_marker_after_empty_hunk() {
         let input = concat!(
             "cvb surgery (dry run): 1 op, 1 file\n",
