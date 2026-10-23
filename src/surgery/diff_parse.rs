@@ -552,6 +552,20 @@ mod tests {
     }
 
     #[test]
+    fn rejects_context_line_when_declared_counts_are_inconsistent() {
+        let input = concat!(
+            "--- a/example.txt\n",
+            "+++ b/example.txt\n",
+            "@@ -0,0 +1 @@\n",
+            " context\n",
+        );
+
+        let error = parse_diff(input).unwrap_err();
+        assert_eq!(error.line, 4);
+        assert_eq!(error.message, "context line exceeds declared hunk counts");
+    }
+
+    #[test]
     fn rejects_marker_at_body_start() {
         let input = concat!(
             "cvb surgery (dry run): 1 op, 1 file\n",
@@ -562,7 +576,12 @@ mod tests {
             "\\ No newline at end of file\n",
         );
 
-        assert!(parse_diff(input).is_err());
+        let error = parse_diff(input).unwrap_err();
+        assert_eq!(error.line, 6);
+        assert_eq!(
+            error.message,
+            "no-newline marker must immediately follow a qualifying body line"
+        );
     }
 
     #[test]
@@ -594,7 +613,9 @@ mod tests {
             "\\ No newline at end of file\n",
         );
 
-        assert!(parse_diff(input).is_err());
+        let error = parse_diff(input).unwrap_err();
+        assert_eq!(error.line, 8);
+        assert_eq!(error.message, "duplicate no-newline marker");
     }
 
     #[test]
