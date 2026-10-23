@@ -681,6 +681,39 @@ mod tests {
     }
 
     #[test]
+    fn rejects_malformed_escape_note_in_diff() {
+        let input = concat!(
+            "--- a/example.txt\n",
+            "+++ b/example.txt\n",
+            "@@ -1 +1 @@\n",
+            "-old\n",
+            "+new\n",
+            "\n",
+            "=== notes ===\n",
+            "file example.txt Lbad +: shown escaped\n",
+        );
+
+        assert!(parse_diff(input).is_err());
+    }
+
+    #[test]
+    fn accepts_line_ending_and_unrelated_notes_in_diff() {
+        let input = concat!(
+            "--- a/example.txt\n",
+            "+++ b/example.txt\n",
+            "@@ -1 +1 @@\n",
+            "-old\n",
+            "+new\n",
+            "\n",
+            "=== notes ===\n",
+            "file example.txt: line endings: old LF, new CRLF\n",
+            "op 1 L2 +: trailing spaces\n",
+        );
+
+        assert_eq!(parse_diff(input).unwrap().len(), 1);
+    }
+
+    #[test]
     fn rejects_missing_new_file_header() {
         let input = "--- a/example.txt\n";
 
