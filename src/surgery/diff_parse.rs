@@ -384,6 +384,24 @@ mod tests {
     }
 
     #[test]
+    fn accepts_marker_after_final_added_line() {
+        let input = concat!(
+            "cvb surgery (dry run): 1 op, 1 file\n",
+            "Legend: test\n",
+            "--- a/example.txt\n",
+            "+++ b/example.txt\n",
+            "@@ -0,0 +1 @@\n",
+            "+new\n",
+            "\\ No newline at end of file\n",
+        );
+
+        let files = parse_diff(input).unwrap();
+        let line = &files[0].hunks[0].lines[0];
+        assert_eq!(line.kind, DiffLineKind::Add);
+        assert!(line.no_newline);
+    }
+
+    #[test]
     fn rejects_unexpected_text_after_completed_hunk() {
         let input = concat!(
             "cvb surgery (dry run): 1 op, 1 file\n",
