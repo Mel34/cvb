@@ -341,6 +341,38 @@ mod tests {
     }
 
     #[test]
+    fn rejects_malformed_hunk_header_ranges() {
+        for header in [
+            "@@ x1 +1 @@",
+            "@@ - +1 @@",
+            "@@ -1 + @@",
+            "@@ -1 +1",
+            "@@ -1 @@",
+            "@@ -1 +1 +2 @@",
+            "@@ -1, +1 @@",
+            "@@ -1,1,2 +1 @@",
+            "@@ --1 +1 @@",
+            "@@ -0 +1 @@",
+            "@@ -1 +0 @@",
+            "@@ -\u{0661} +1 @@",
+        ] {
+            assert!(
+                parse_hunk_header(header, 7).is_err(),
+                "expected malformed hunk header to be rejected: {header:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_oversized_hunk_range_numbers() {
+        let too_large = format!("@@ -{} +1 @@", format!("{}0", usize::MAX));
+
+        let error = parse_hunk_header(&too_large, 9).unwrap_err();
+        assert_eq!(error.line, 9);
+        assert_eq!(error.message, "range number is too large");
+    }
+
+    #[test]
     fn parses_zero_count_ranges() {
         let (old_start, old_count, new_start, new_count, _) =
             parse_hunk_header("@@ -0,0 +1 @@", 1).unwrap();
