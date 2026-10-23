@@ -205,6 +205,7 @@ pub(crate) fn parse_diff(input: &str) -> Result<Vec<DiffFile>, DiffParseError> {
     let lines: Vec<&str> = input.split('\n').collect();
     let mut index = 0;
     let mut files = Vec::new();
+    let mut escape_notes: Vec<(EscapeNote, usize)> = Vec::new();
 
     let notes_start = lines.iter().position(|line| *line == "=== notes ===");
 
@@ -213,7 +214,9 @@ pub(crate) fn parse_diff(input: &str) -> Result<Vec<DiffFile>, DiffParseError> {
 
         if Some(index) == notes_start {
             for note_index in index + 1..lines.len() {
-                parse_escape_note(lines[note_index], note_index + 1)?;
+                if let Some(note) = parse_escape_note(lines[note_index], note_index + 1)? {
+                    escape_notes.push((note, note_index + 1));
+                }
             }
             break;
         }
@@ -373,7 +376,93 @@ pub(crate) fn parse_diff(input: &str) -> Result<Vec<DiffFile>, DiffParseError> {
         });
     }
 
+    validate_escape_notes(&files, &escape_notes)?;
     Ok(files)
+}
+
+fn validate_escape_notes(
+    files: &[DiffFile],
+    notes: &[(EscapeNote, usize)],
+) -> Result<(), DiffParseError> {
+    let mut matched_targets = Vec::new();
+
+    for (note, input_line) in notes {
+        let mut targets = Vec::new();
+
+        for (file_index, file) in files.iter().enumerate() {
+            let file_path = match note.side {
+                EscapeNoteSide::Remove => {
+                    file.old_path.strip_prefix("a/").unwrap_or(&file.old_path)
+                }
+                EscapeNoteSide::Add | EscapeNoteSide::Context => {
+                    file.new_path.strip_prefix("b/").unwrap_or(&file.new_path)
+                }
+            };
+
+            if file_path != note.path {
+                continue;
+            }
+
+            for (hunk_index, hunk) in file.hunks.iter().enumerate() {
+                let mut old_line = hunk.old_start;
+                let mut new_line = hunk.new_start;
+
+                for (line_index, diff_line) in hunk.lines.iter().enumerate() {
+                    let matches = match note.side {
+                        EscapeNoteSide::Add => {
+                            diff_line.kind == DiffLineKind::Add && new_line == note.line
+                        }
+                        EscapeNoteSide::Remove => {
+                            diff_line.kind == DiffLineKind::Remove && old_line == note.line
+                        }
+                        EscapeNoteSide::Context => {
+                            diff_line.kind == DiffLineKind::Context && new_line == note.line
+                        }
+                    };
+
+                    if matches {
+                        targets.push((file_index, hunk_index, line_index));
+                    }
+
+                    match diff_line.kind {
+                        DiffLineKind::Context => {
+                            old_line = old_line.checked_add(1).ok_or_else(|| {
+                                error(*input_line, "old hunk line coordinate overflow")
+                            })?;
+                            new_line = new_line.checked_add(1).ok_or_else(|| {
+                                error(*input_line, "new hunk line coordinate overflow")
+                            })?;
+                        }
+                        DiffLineKind::Remove => {
+                            old_line = old_line.checked_add(1).ok_or_else(|| {
+                                error(*input_line, "old hunk line coordinate overflow")
+                            })?;
+                        }
+                        DiffLineKind::Add => {
+                            new_line = new_line.checked_add(1).ok_or_else(|| {
+                                error(*input_line, "new hunk line coordinate overflow")
+                            })?;
+                        }
+                    }
+                }
+            }
+        }
+
+        if targets.is_empty() {
+            return Err(error(*input_line, "shown-escaped note does not match a diff line"));
+        }
+        if targets.len() != 1 {
+            return Err(error(*input_line, "shown-escaped note matches multiple diff lines"));
+        }
+
+        let target = targets[0];
+        if matched_targets.contains(&target) {
+            return Err(error(*input_line, "duplicate shown-escaped note target"));
+        }
+        matched_targets.push(target);
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -711,6 +800,37 @@ mod tests {
         );
 
         assert_eq!(parse_diff(input).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn validates_escape_notes_against_diff_lines() {
+        for (notes, expected_ok) in [
+            ("file example.txt L1 +: shown escaped", true),
+            ("file other.txt L1 +: shown escaped", false),
+            ("file example.txt L2 +: shown escaped", false),
+            ("file example.txt L2 -: shown escaped", false),
+            (
+                "file example.txt L1 +: shown escaped\nfile example.txt L1 +: shown escaped",
+                false,
+            ),
+        ] {
+            let input = format!(
+                "--- a/example.txt\n\
+                 +++ b/example.txt\n\
+                 @@ -1 +1 @@\n\
+                 -old\n\
+                 +new\n\
+                 \n\
+                 === notes ===\n\
+                 {notes}\n"
+            );
+
+            assert_eq!(
+                parse_diff(&input).is_ok(),
+                expected_ok,
+                "unexpected result for notes: {notes:?}"
+            );
+        }
     }
 
     #[test]
