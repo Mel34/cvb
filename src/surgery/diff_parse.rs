@@ -53,6 +53,52 @@ fn error(line: usize, message: impl Into<String>) -> DiffParseError {
         message: message.into(),
     }
 }
+fn unescape_line_content(input: &str) -> Result<String, String> {
+    let mut chars = input.chars().peekable();
+    let mut output = String::with_capacity(input.len());
+
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            output.push(ch);
+            continue;
+        }
+
+        match chars.next() {
+            Some('\\') => output.push('\\'),
+            Some('u') => {
+                if chars.next() != Some('{') {
+                    return Err("expected '{' after '\\u'".into());
+                }
+
+                let mut digits = String::new();
+                loop {
+                    match chars.next() {
+                        Some('}') => break,
+                        Some(ch) if ch.is_ascii_hexdigit() => digits.push(ch),
+                        Some(_) => {
+                            return Err("invalid character in Unicode escape".into());
+                        }
+                        None => return Err("unterminated Unicode escape".into()),
+                    }
+                }
+
+                if digits.is_empty() {
+                    return Err("Unicode escape requires at least one hex digit".into());
+                }
+
+                let value = u32::from_str_radix(&digits, 16)
+                    .map_err(|_| "Unicode escape value is out of range".to_string())?;
+                let decoded = char::from_u32(value)
+                    .ok_or_else(|| "Unicode escape is not a valid scalar value".to_string())?;
+                output.push(decoded);
+            }
+            Some(_) => return Err("unsupported escape sequence".into()),
+            None => return Err("trailing backslash in escaped line".into()),
+        }
+    }
+
+    Ok(output)
+}
 
 fn parse_usize(value: &str, line: usize) -> Result<usize, DiffParseError> {
     if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
@@ -325,9 +371,116 @@ pub(crate) fn parse_diff(input: &str) -> Result<Vec<DiffFile>, DiffParseError> {
     Ok(files)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EscapeNoteSide {
+    Add,
+    Remove,
+    Context,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EscapeNote {
+    path: String,
+    line: usize,
+    side: EscapeNoteSide,
+}
+
+fn parse_escape_note(
+    note: &str,
+    input_line: usize,
+) -> Result<Option<EscapeNote>, DiffParseError> {
+    let Some(note) = note.strip_prefix("file ") else {
+        return Ok(None);
+    };
+    let Some(note) = note.strip_suffix(": shown escaped") else {
+        return Ok(None);
+    };
+
+    let (path, location) = note
+        .rsplit_once(" L")
+        .ok_or_else(|| error(input_line, "malformed shown-escaped note"))?;
+    let (line_text, side_text) = location
+        .split_once(' ')
+        .ok_or_else(|| error(input_line, "malformed shown-escaped note"))?;
+
+    validate_path(path, input_line)?;
+    let line = parse_usize(line_text, input_line)?;
+    if line == 0 {
+        return Err(error(input_line, "shown-escaped line number must be positive"));
+    }
+
+    let side = match side_text {
+        "+" => EscapeNoteSide::Add,
+        "-" => EscapeNoteSide::Remove,
+        "context" => EscapeNoteSide::Context,
+        _ => return Err(error(input_line, "invalid shown-escaped note side")),
+    };
+
+    Ok(Some(EscapeNote {
+        path: path.to_owned(),
+        line,
+        side,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unescapes_backslashes_unicode_and_adjacent_escapes() {
+        assert_eq!(unescape_line_content(r"plain text").unwrap(), "plain text");
+        assert_eq!(unescape_line_content(r"\\").unwrap(), "\\");
+        assert_eq!(unescape_line_content(r"\u{41}").unwrap(), "A");
+        assert_eq!(
+            unescape_line_content(r"\\u{41}\u{200b}").unwrap(),
+            "\\u{41}\u{200b}"
+        );
+        assert_eq!(
+            unescape_line_content(r"\u{41}\u{42}").unwrap(),
+            "AB"
+        );
+        assert_eq!(
+            unescape_line_content(r"\u{0}\u{7f}\u{a0}\u{200d}\u{feff}\u{2028}\u{2029}")
+                .unwrap(),
+            "\0\u{7f}\u{a0}\u{200d}\u{feff}\u{2028}\u{2029}"
+        );
+    }
+
+    #[test]
+    fn unescape_does_not_rescan_decoded_characters() {
+        assert_eq!(
+            unescape_line_content(r"\u{5c}u{41}").unwrap(),
+            r"\u{41}"
+        );
+        assert_eq!(
+            unescape_line_content(r"\\\\u{41}").unwrap(),
+            r"\\u{41}"
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_line_escapes() {
+        for input in [
+            r"\",
+            r"\x",
+            r"\u",
+            r"\u41}",
+            r"\u{}",
+            r"\u{g}",
+            r"\u{41",
+            r"\u{110000}",
+            r"\u{d800}",
+            r"\u{12345678901234567890}",
+        ] {
+            assert!(
+                unescape_line_content(input).is_err(),
+                "expected malformed escape to be rejected: {input:?}"
+            );
+        }
+    }
+
+
 
     #[test]
     fn parses_omitted_and_explicit_single_line_counts() {
