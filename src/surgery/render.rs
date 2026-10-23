@@ -690,6 +690,11 @@ mod tests {
             escape_line_content("literal \\u{41} \u{0}"),
             "literal \\\\u{41} \\u{0}"
         );
+
+        assert_eq!(
+            escape_line_content("hidden \u{200b}\\"),
+            "hidden \\u{200b}\\\\"
+        );
     }
 
     #[test]
