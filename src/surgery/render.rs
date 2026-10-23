@@ -800,6 +800,31 @@ mod tests {
             assert_eq!(lines[1].text, new_line, "added text changed for {diff}");
         }
     }
+    #[test]
+    fn test_empty_added_and_context_lines_keep_their_gutter() {
+        let added_empty = render_file_diff(
+            "test.rs",
+            b"before\nold\nlast\n",
+            b"before\n\nlast\n",
+            RenderOptions::default(),
+        );
+        assert!(
+            added_empty.lines().any(|line| line == "+"),
+            "an empty added source line must render as a bare plus, got:\n{added_empty}"
+        );
+
+        let context_empty = render_file_diff(
+            "test.rs",
+            b"before\n\nold\nlast\n",
+            b"before\n\nnew\nlast\n",
+            RenderOptions::default(),
+        );
+        assert!(
+            context_empty.lines().any(|line| line == " "),
+            "an empty context source line must render as one gutter space, got:\n{context_empty}"
+        );
+    }
+
 
     #[test]
     fn test_canonical_hunk_header_counts() {
