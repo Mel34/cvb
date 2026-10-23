@@ -206,10 +206,15 @@ pub(crate) fn parse_diff(input: &str) -> Result<Vec<DiffFile>, DiffParseError> {
     let mut index = 0;
     let mut files = Vec::new();
 
+    let notes_start = lines.iter().position(|line| *line == "=== notes ===");
+
     while index < lines.len() {
         let line_text = lines[index];
 
-        if line_text == "=== notes ===" {
+        if Some(index) == notes_start {
+            for note_index in index + 1..lines.len() {
+                parse_escape_note(lines[note_index], note_index + 1)?;
+            }
             break;
         }
 
