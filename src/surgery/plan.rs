@@ -58,6 +58,7 @@ fn find_differing_position(
 
 fn precondition_detail(
     start: usize,
+    original: &[String],
     original_slice: &[String],
     declared_slice: &[String],
 ) -> PlanDetail {
@@ -93,6 +94,7 @@ fn precondition_detail(
     let only_ws = !exp.is_empty() && !fnd.is_empty() && exp.trim_end() == fnd.trim_end();
     let (column, byte_offset, prefix_ended) =
         find_differing_position(&exp, &fnd);
+    let candidates = find_exact_block_matches(original, declared_slice);
 
     PlanDetail::Precondition {
         line: mismatch_line,
@@ -102,6 +104,7 @@ fn precondition_detail(
         found: fnd,
         prefix_ended,
         only_trailing_whitespace: only_ws,
+        candidates,
     }
 }
 
@@ -144,7 +147,7 @@ pub(crate) fn validate_operation_detail(
             if original[first..last] != old[..] {
                 return Err((
                     PlanError::Precondition,
-                    precondition_detail(*start, &original[first..last], &old[..]),
+                    precondition_detail(*start, original, &original[first..last], &old[..]),
                 ));
             }
             if old == new {
@@ -171,7 +174,7 @@ pub(crate) fn validate_operation_detail(
             if original[first..last] != old[..] {
                 return Err((
                     PlanError::Precondition,
-                    precondition_detail(*start, &original[first..last], &old[..]),
+                    precondition_detail(*start, original, &original[first..last], &old[..]),
                 ));
             }
             if first == 0 && last == original.len() {
@@ -220,7 +223,7 @@ pub(crate) fn validate_operation_detail(
             if original[first..last] != anchor[..] {
                 return Err((
                     PlanError::Precondition,
-                    precondition_detail(*start, &original[first..last], &anchor[..]),
+                    precondition_detail(*start, original, &original[first..last], &anchor[..]),
                 ));
             }
         }

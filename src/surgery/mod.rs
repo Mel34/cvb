@@ -199,6 +199,7 @@ pub(crate) enum PlanDetail {
         found: String,
         prefix_ended: Option<PrefixSide>,
         only_trailing_whitespace: bool,
+        candidates: Vec<usize>,
     },
     EndOfFile {
         suggestion: String,
@@ -280,6 +281,7 @@ impl std::fmt::Display for PlanFailure {
                 found,
                 prefix_ended,
                 only_trailing_whitespace,
+                candidates,
             }) => {
                 write!(
                     f,
@@ -300,6 +302,12 @@ impl std::fmt::Display for PlanFailure {
                 }
                 if *only_trailing_whitespace {
                     write!(f, "\n  note: differs only in trailing whitespace")?;
+                }
+                if !candidates.is_empty() {
+                    write!(f, "\n  exact expected-block matches elsewhere:")?;
+                    for candidate in candidates {
+                        write!(f, " {candidate}")?;
+                    }
                 }
                 Ok(())
             }
