@@ -1489,6 +1489,25 @@ CVB::k7Q2xw9R::END ops=0";
     }
 
     #[test]
+    fn precondition_error_message_reports_exact_candidate_elsewhere() {
+        let envelope = make_envelope(vec![Operation::Replace {
+            start: 2,
+            end: 2,
+            old: vec!["expected".to_owned()],
+            new: vec!["replacement".to_owned()],
+        }]);
+        let original = originals("first\nactual\nthird\nexpected\nfifth\n");
+        let failure = plan_envelope(&envelope, &original).unwrap_err();
+        let message = failure.to_string();
+
+        assert_eq!(failure.kind, PlanError::Precondition);
+        assert!(
+            message.contains("exact expected-block matches elsewhere: 4"),
+            "{message}"
+        );
+    }
+
+    #[test]
     fn precondition_error_message_notes_when_declared_old_is_longer_than_range() {
         let envelope = make_envelope(vec![Operation::Replace {
             start: 1,
