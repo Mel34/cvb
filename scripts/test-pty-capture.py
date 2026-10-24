@@ -967,7 +967,7 @@ CVB::{launch_token}::END ops=1
             diff_payload = surgery_payloads[clipboard_before_surgery]
             check(
                 "surgery diff is dispatched to clipboard while waiting for confirmation",
-                b"- Hello World" in diff_payload and b"+ Hello PTY" in diff_payload,
+                b"-Hello World" in diff_payload and b"+Hello PTY" in diff_payload,
                 diff_payload,
             )
 
