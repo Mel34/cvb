@@ -22,6 +22,62 @@ fn find_exact_block_matches(original: &[String], expected: &[String]) -> Vec<usi
         .collect()
 }
 
+/// Resolves an operation against the original snapshot. A valid hinted range
+/// wins; otherwise, relocate only when the complete expected block is unique.
+fn resolve_unique_match(original: &[String], operation: &Operation) -> Operation {
+    let expected_len_matches_range = match operation {
+        Operation::Replace { start, end, old, .. }
+        | Operation::Delete { start, end, old } => {
+            start <= end && end - start + 1 == old.len()
+        }
+        Operation::Insert { start, end, anchor, .. } => {
+            start <= end && end - start + 1 == anchor.len()
+        }
+    };
+    if !expected_len_matches_range {
+        return operation.clone();
+    }
+    let needs_search = matches!(
+        validate_operation_detail(original, operation),
+        Err((PlanError::Range | PlanError::Precondition, _))
+    );
+    if !needs_search {
+        return operation.clone();
+    }
+
+    let (expected, position) = match operation {
+        Operation::Replace { old, .. } | Operation::Delete { old, .. } => (old, None),
+        Operation::Insert { anchor, position, .. } => (anchor, Some(*position)),
+    };
+    let matches = find_exact_block_matches(original, expected);
+    if matches.len() != 1 {
+        return operation.clone();
+    }
+
+    let start = matches[0];
+    let end = start + expected.len() - 1;
+    match operation {
+        Operation::Replace { new, .. } => Operation::Replace {
+            start,
+            end,
+            old: expected.clone(),
+            new: new.clone(),
+        },
+        Operation::Delete { .. } => Operation::Delete {
+            start,
+            end,
+            old: expected.clone(),
+        },
+        Operation::Insert { new, .. } => Operation::Insert {
+            position: position.unwrap(),
+            start,
+            end,
+            anchor: expected.clone(),
+            new: new.clone(),
+        },
+    }
+}
+
 /// Applies one operation to an original file represented as lines.
 /// All operation ranges are one-based and refer to the original lines.
 pub(crate) fn validate_operation(
@@ -300,9 +356,15 @@ pub(crate) fn plan_envelope(
 
         let original_lines: Vec<String> = content.split(newline).map(str::to_owned).collect();
 
+        let resolved_operations: Vec<Operation> = section
+            .operations
+            .iter()
+            .map(|operation| resolve_unique_match(&original_lines, operation))
+            .collect();
+
         let mut edits: Vec<(usize, usize, &Operation)> = Vec::new();
 
-        for (op_idx, operation) in section.operations.iter().enumerate() {
+        for (op_idx, operation) in resolved_operations.iter().enumerate() {
             let op_number = op_idx + 1;
             validate_operation_detail(&original_lines, operation).map_err(|(k, d)| {
                 PlanFailure {
@@ -446,7 +508,7 @@ pub(crate) fn plan_envelope(
             original_digest,
             proposed,
             proposed_digest,
-            operations: section.operations.clone(),
+            operations: resolved_operations,
         });
     }
 
