@@ -805,6 +805,7 @@ mod tests {
         assert_eq!(failure.kind, PlanError::Precondition);
         assert!(message.contains("expected: \"expected first\""), "{message}");
         assert!(message.contains("expected second"), "{message}");
+        assert!(message.contains("\\u{200b}expected second"), "{message}");
         assert!(message.contains("found: \"actual first\""), "{message}");
         assert!(
             message.contains("note: expected text contains escaped characters"),
