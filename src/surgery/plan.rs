@@ -1527,13 +1527,13 @@ CVB::k7Q2xw9R::END ops=0";
             old: vec!["expected".to_owned()],
             new: vec!["replacement".to_owned()],
         }]);
-        let original = originals("first\nactual\nthird\nexpected\nfifth\n");
+        let original = originals("first\nactual\nthird\nexpected\nfifth\nexpected\nseventh\n");
         let failure = plan_envelope(&envelope, &original).unwrap_err();
         let message = failure.to_string();
 
         assert_eq!(failure.kind, PlanError::Precondition);
         assert!(
-            message.contains("exact expected-block matches elsewhere: 4"),
+            message.contains("exact expected-block matches elsewhere: 4 6"),
             "{message}"
         );
         assert!(message.contains("actual context:"), "{message}");
