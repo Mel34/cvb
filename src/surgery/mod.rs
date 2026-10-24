@@ -200,6 +200,7 @@ pub(crate) enum PlanDetail {
         prefix_ended: Option<PrefixSide>,
         only_trailing_whitespace: bool,
         candidates: Vec<usize>,
+        context: Vec<(usize, String)>,
     },
     EndOfFile {
         suggestion: String,
@@ -282,6 +283,7 @@ impl std::fmt::Display for PlanFailure {
                 prefix_ended,
                 only_trailing_whitespace,
                 candidates,
+                context,
             }) => {
                 write!(
                     f,
@@ -308,6 +310,14 @@ impl std::fmt::Display for PlanFailure {
                     for candidate in candidates {
                         write!(f, " {candidate}")?;
                     }
+                }
+                write!(f, "\n  actual context:")?;
+                for (context_line, content) in context {
+                    write!(
+                        f,
+                        "\n    {context_line}: \"{}\"",
+                        format_visible_line(content)
+                    )?;
                 }
                 Ok(())
             }

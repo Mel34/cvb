@@ -95,6 +95,12 @@ fn precondition_detail(
     let (column, byte_offset, prefix_ended) =
         find_differing_position(&exp, &fnd);
     let candidates = find_exact_block_matches(original, declared_slice);
+    let context_start = start.saturating_sub(2).max(1);
+    let hinted_end = start.saturating_add(original_slice.len().saturating_sub(1));
+    let context_end = hinted_end.saturating_add(2).min(original.len());
+    let context = (context_start..=context_end)
+        .map(|line| (line, original[line - 1].clone()))
+        .collect();
 
     PlanDetail::Precondition {
         line: mismatch_line,
@@ -105,6 +111,7 @@ fn precondition_detail(
         prefix_ended,
         only_trailing_whitespace: only_ws,
         candidates,
+        context,
     }
 }
 
@@ -1505,6 +1512,11 @@ CVB::k7Q2xw9R::END ops=0";
             message.contains("exact expected-block matches elsewhere: 4"),
             "{message}"
         );
+        assert!(message.contains("actual context:"), "{message}");
+        assert!(message.contains("1: \"first\""), "{message}");
+        assert!(message.contains("2: \"actual\""), "{message}");
+        assert!(message.contains("3: \"third\""), "{message}");
+        assert!(message.contains("4: \"expected\""), "{message}");
     }
 
     #[test]
