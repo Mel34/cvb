@@ -1530,9 +1530,20 @@ pub(crate) fn run(
 /// Parses an envelope, reads its target files, and builds an in-memory plan.
 /// This function never writes to disk.
 pub(crate) fn parse_load_plan(root: &Path, input: &str) -> Result<(Envelope, Plan), PipelineError> {
+    parse_load_plan_with_choices(root, input, &std::collections::HashMap::new())
+}
+
+/// Parses an envelope, loads its original files, and builds a plan using explicit candidate choices.
+/// This function never writes to disk.
+pub(crate) fn parse_load_plan_with_choices(
+    root: &Path,
+    input: &str,
+    choices: &std::collections::HashMap<(String, usize), usize>,
+) -> Result<(Envelope, Plan), PipelineError> {
     let envelope = parse_envelope(input).map_err(PipelineError::Parse)?;
     let originals = load_originals(root, &envelope).map_err(PipelineError::Load)?;
-    let plan = plan_envelope(&envelope, &originals).map_err(PipelineError::Plan)?;
+    let plan =
+        plan_envelope_with_choices(&envelope, &originals, choices).map_err(PipelineError::Plan)?;
 
     Ok((envelope, plan))
 }
