@@ -285,17 +285,46 @@ impl std::fmt::Display for PlanFailure {
                 candidates,
                 context,
             }) => {
-                write!(
-                    f,
-                    "CVB: E-PRECOND: {}: operation {}: precondition mismatch at line {}, column {} (byte offset {}):\n  expected: \"{}\"\n     found: \"{}\"",
-                    self.path,
-                    self.op_index,
-                    line,
-                    column,
-                    byte_offset,
-                    format_visible_line(expected),
-                    format_visible_line(found)
-                )?;
+                if expected.contains('\n') {
+                    let mut expected_escaped = false;
+                    let mut expected_lines = expected.split('\n');
+                    let first_expected = expected_lines.next().unwrap_or("");
+                    let escaped_first_expected =
+                        crate::surgery::render::escape_line_content(first_expected);
+                    expected_escaped |= escaped_first_expected != first_expected;
+                    write!(
+                        f,
+                        "CVB: E-PRECOND: {}: operation {}: precondition mismatch at line {}, column {} (byte offset {}):\n  expected: \"{}\"\n     found: \"{}\"",
+                        self.path,
+                        self.op_index,
+                        line,
+                        column,
+                        byte_offset,
+                        escaped_first_expected,
+                        format_visible_line(found)
+                    )?;
+                    for expected_line in expected_lines {
+                        let escaped =
+                            crate::surgery::render::escape_line_content(expected_line);
+                        expected_escaped |= escaped != expected_line;
+                        write!(f, "\n            \"{}\"", escaped)?;
+                    }
+                    if expected_escaped {
+                        write!(f, "\n  note: expected text contains escaped characters")?;
+                    }
+                } else {
+                    write!(
+                        f,
+                        "CVB: E-PRECOND: {}: operation {}: precondition mismatch at line {}, column {} (byte offset {}):\n  expected: \"{}\"\n     found: \"{}\"",
+                        self.path,
+                        self.op_index,
+                        line,
+                        column,
+                        byte_offset,
+                        format_visible_line(expected),
+                        format_visible_line(found)
+                    )?;
+                }
                 if let Some(side) = prefix_ended {
                     match side {
                         PrefixSide::ExpectedEnds => write!(f, "\n  note: expected ends here")?,
