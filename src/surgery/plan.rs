@@ -791,6 +791,24 @@ mod tests {
     }
 
     #[test]
+    fn precondition_error_message_shows_full_multiline_expected_block() {
+        let envelope = make_envelope(vec![Operation::Replace {
+            start: 2,
+            end: 3,
+            old: vec!["expected first".to_owned(), "\t expected second".to_owned()],
+            new: vec!["replacement".to_owned()],
+        }]);
+        let original = originals("line1\nactual first\nactual second\nline4\n");
+        let failure = plan_envelope(&envelope, &original).unwrap_err();
+        let message = failure.to_string();
+
+        assert_eq!(failure.kind, PlanError::Precondition);
+        assert!(message.contains("expected: \"expected first\""), "{message}");
+        assert!(message.contains("expected second"), "{message}");
+        assert!(message.contains("found: \"actual first\""), "{message}");
+    }
+
+    #[test]
     fn precondition_error_message_notes_trailing_whitespace_only() {
         let envelope = make_envelope(vec![Operation::Replace {
             start: 1,
