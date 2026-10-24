@@ -89,7 +89,7 @@ Start: the user runs `cvb surgery` in the project root, which opens surgery mode
 **Writing a good envelope.**
 - Ranges (`lines=`, `after=`, `before=`) refer to the original file as of your pull, 1-based and inclusive, even for one line (`lines=12-12`).
 - `OLD` and `ANCHOR` text must match the file exactly, including indentation and trailing spaces. If it doesn't, you get E-PRECOND with the first difference; re-pull, don't guess another anchor.
-- Don't count lines. Leave out `n=` on `OLD`, `ANCHOR` and `NEW`; a block simply ends at the next control line. Add `n=COUNT` to a block only when its last line is blank, because chat code fences tend to drop trailing blank lines.
+- Don't count lines. Leave `OLD`, `ANCHOR` and `NEW` uncounted; each block ends at the next control line. Blank lines inside a block are preserved as payload.
 - Keep envelopes small and about one purpose. Several files and operations in one envelope are fine, and they apply all or nothing. Separate unrelated changes into separate envelopes with separate ids.
 - Edit only existing, non-empty text files under the project root. Insert needs an existing anchor, never the very start or end of the file; to add at an edge, replace a block that includes the boundary line.
 - The id is yours: 1 to 64 ASCII letters, digits, `.`, `_` or `-`. Use a descriptive, unique id per envelope, such as `fix-cascade-1`.
@@ -119,9 +119,7 @@ ENVELOPE GRAMMAR
   CVB::{TOKEN}::END ops=OPERATION_COUNT
 
   Each operation sits inside a FILE section; repeat FILE and OP blocks as needed.
-  OLD, ANCHOR and NEW accept an optional count (`OLD n=3`). With a count the
-  block is exactly that many lines. Without one, it ends at the next control line.
-  Every control line starts at column 1 and uses the session token.
+  Each OLD, ANCHOR or NEW block ends at the next control line.
   Payload lines are literal file content. A payload line must not start with
   `CVB::{TOKEN}::`. Payload must not contain NUL or carriage-return bytes.
   Between BEGIN and END nothing may appear except the grammar: no commentary
@@ -153,13 +151,13 @@ EXAMPLE: DELETE
   CVB::{TOKEN}::ENDOP
   CVB::{TOKEN}::END ops=1
 
-EXAMPLE: INSERT (the NEW block ends in a blank line, so it carries a count)
+EXAMPLE: INSERT (the NEW block ends in a blank line)
   CVB::{TOKEN}::BEGIN v=1 id=example-insert
   CVB::{TOKEN}::FILE path=src/example.rs
   CVB::{TOKEN}::OP insert after=2-2
   CVB::{TOKEN}::ANCHOR
   let answer = 42;
-  CVB::{TOKEN}::NEW n=2
+  CVB::{TOKEN}::NEW
   println!("{answer}");
 
   CVB::{TOKEN}::ENDOP
@@ -184,7 +182,7 @@ ERRORS (the message names the file, operation and line)
   E-NOENV     no envelope found.      E-MULTI    more than one envelope.
   E-SYNTAX    malformed control line, wrong token or indentation.
   E-STRAY     stray text inside the envelope.  E-TRUNC  input ends early.
-  E-COUNT     block shorter or longer than its n=.
+  E-COUNT     block line count mismatch.
   E-COLLISION payload line starts with the token prefix.
   E-BYTES     NUL or carriage return in payload.   E-VERSION  unknown v=.
   E-PATH      unsafe or invalid path.  E-DUPFILE  file named twice.
