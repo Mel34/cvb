@@ -795,7 +795,7 @@ mod tests {
         let envelope = make_envelope(vec![Operation::Replace {
             start: 2,
             end: 3,
-            old: vec!["expected first".to_owned(), "\t expected second".to_owned()],
+            old: vec!["expected first".to_owned(), "\u{200b}expected second".to_owned()],
             new: vec!["replacement".to_owned()],
         }]);
         let original = originals("line1\nactual first\nactual second\nline4\n");
@@ -806,6 +806,10 @@ mod tests {
         assert!(message.contains("expected: \"expected first\""), "{message}");
         assert!(message.contains("expected second"), "{message}");
         assert!(message.contains("found: \"actual first\""), "{message}");
+        assert!(
+            message.contains("note: expected text contains escaped characters"),
+            "{message}"
+        );
     }
 
     #[test]
