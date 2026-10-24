@@ -8,6 +8,20 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// Returns every one-based starting line where `expected` occurs as an exact,
+/// contiguous block in `original`. Overlapping matches are included.
+fn find_exact_block_matches(original: &[String], expected: &[String]) -> Vec<usize> {
+    if expected.is_empty() || expected.len() > original.len() {
+        return Vec::new();
+    }
+
+    original
+        .windows(expected.len())
+        .enumerate()
+        .filter_map(|(index, lines)| (lines == expected).then_some(index + 1))
+        .collect()
+}
+
 /// Applies one operation to an original file represented as lines.
 /// All operation ranges are one-based and refer to the original lines.
 pub(crate) fn validate_operation(
@@ -1487,5 +1501,51 @@ CVB::k7Q2xw9R::END ops=0";
         assert!(message.starts_with("CVB: E-PRECOND:"), "{message}");
         assert!(message.contains("line 2"), "{message}");
         assert!(message.contains("note: found ends here"), "{message}");
+    }
+    #[test]
+    fn exact_block_search_finds_unique_match() {
+        let original = vec!["one".into(), "two".into(), "three".into()];
+        let expected = vec!["two".into()];
+
+        assert_eq!(find_exact_block_matches(&original, &expected), vec![2]);
+    }
+
+    #[test]
+    fn exact_block_search_finds_multiple_matches() {
+        let original = vec!["a".into(), "b".into(), "a".into(), "b".into()];
+        let expected = vec!["a".into(), "b".into()];
+
+        assert_eq!(find_exact_block_matches(&original, &expected), vec![1, 3]);
+    }
+
+    #[test]
+    fn exact_block_search_includes_overlapping_matches() {
+        let original = vec!["a".into(), "a".into(), "a".into()];
+        let expected = vec!["a".into(), "a".into()];
+
+        assert_eq!(find_exact_block_matches(&original, &expected), vec![1, 2]);
+    }
+
+    #[test]
+    fn exact_block_search_returns_no_match_when_absent() {
+        let original = vec!["one".into(), "two".into()];
+        let expected = vec!["three".into()];
+
+        assert!(find_exact_block_matches(&original, &expected).is_empty());
+    }
+
+    #[test]
+    fn exact_block_search_returns_no_match_for_empty_block() {
+        let original = vec!["one".into(), "two".into()];
+
+        assert!(find_exact_block_matches(&original, &[]).is_empty());
+    }
+
+    #[test]
+    fn exact_block_search_returns_no_match_when_block_is_too_long() {
+        let original = vec!["one".into()];
+        let expected = vec!["one".into(), "two".into()];
+
+        assert!(find_exact_block_matches(&original, &expected).is_empty());
     }
 }
