@@ -28,8 +28,47 @@ enum OperationResolution {
 }
 
 /// Resolves an operation against the original snapshot. Ambiguous exact matches
-/// are surfaced explicitly; a valid hint does not prove the snapshot is fresh.
-fn resolve_operation(original: &[String], operation: &Operation) -> OperationResolution {
+/// require an explicit choice; a valid hint does not prove the snapshot is fresh.
+fn resolve_operation(
+    original: &[String],
+    operation: &Operation,
+    choice: Option<usize>,
+) -> OperationResolution {
+    let (expected, hint) = match operation {
+        Operation::Replace { start, old, .. } | Operation::Delete { start, old, .. } => {
+            (old, *start)
+        }
+        Operation::Insert { start, anchor, .. } => (anchor, *start),
+    };
+    let matches = find_exact_block_matches(original, expected);
+
+    if let Some(start) = choice {
+        let end = start + expected.len() - 1;
+        let resolved = match operation {
+            Operation::Replace { new, .. } => Operation::Replace {
+                start,
+                end,
+                old: expected.clone(),
+                new: new.clone(),
+            },
+            Operation::Delete { .. } => Operation::Delete {
+                start,
+                end,
+                old: expected.clone(),
+            },
+            Operation::Insert {
+                position, new, ..
+            } => Operation::Insert {
+                position: *position,
+                start,
+                end,
+                anchor: expected.clone(),
+                new: new.clone(),
+            },
+        };
+        return OperationResolution::Resolved(resolved);
+    }
+
     let expected_len_matches_range = match operation {
         Operation::Replace { start, end, old, .. }
         | Operation::Delete { start, end, old } => {
@@ -56,14 +95,6 @@ fn resolve_operation(original: &[String], operation: &Operation) -> OperationRes
     if forbidden_boundary_with_matching_anchor {
         return OperationResolution::Resolved(operation.clone());
     }
-
-    let (expected, position, hint) = match operation {
-        Operation::Replace { start, old, .. } | Operation::Delete { start, old, .. } => {
-            (old, None, *start)
-        }
-        Operation::Insert { start, anchor, position, .. } => (anchor, Some(*position), *start),
-    };
-    let matches = find_exact_block_matches(original, expected);
 
     if matches.len() > 1 {
         return OperationResolution::ChooseRequired {
@@ -103,8 +134,8 @@ fn resolve_operation(original: &[String], operation: &Operation) -> OperationRes
             end,
             old: expected.clone(),
         },
-        Operation::Insert { new, .. } => Operation::Insert {
-            position: position.unwrap(),
+        Operation::Insert { new, position, .. } => Operation::Insert {
+            position: *position,
             start,
             end,
             anchor: expected.clone(),
@@ -332,12 +363,24 @@ pub(crate) fn validate_operation_detail(
     Ok(())
 }
 
-/// Builds a complete in-memory plan without writing to disk.
+/// Builds a complete in-memory plan without explicit candidate choices.
 /// All operation ranges refer to the original contents of each file.
 pub(crate) fn plan_envelope(
     envelope: &Envelope,
     originals: &HashMap<String, String>,
 ) -> Result<Plan, PlanFailure> {
+    plan_envelope_with_choices(envelope, originals, &HashMap::new())
+}
+
+/// Builds a complete in-memory plan with explicit candidate choices.
+/// Choice keys are (file path, one-based operation number); values are
+/// one-based candidate start lines.
+pub(crate) fn plan_envelope_with_choices(
+    envelope: &Envelope,
+    originals: &HashMap<String, String>,
+    choices: &HashMap<(String, usize), usize>,
+) -> Result<Plan, PlanFailure> {
+    let mut used_choices = HashSet::new();
     let mut seen = HashSet::new();
     let mut planned_files = Vec::with_capacity(envelope.files.len());
 
@@ -394,13 +437,41 @@ pub(crate) fn plan_envelope(
 
         let mut resolved_operations = Vec::with_capacity(section.operations.len());
         for (op_idx, operation) in section.operations.iter().enumerate() {
-            match resolve_operation(&original_lines, operation) {
+            let op_number = op_idx + 1;
+            let choice_key = (section.path.clone(), op_number);
+            let choice = choices.get(&choice_key).copied();
+
+            if let Some(chosen) = choice {
+                let expected = match operation {
+                    Operation::Replace { old, .. } | Operation::Delete { old, .. } => old,
+                    Operation::Insert { anchor, .. } => anchor,
+                };
+                let candidates = find_exact_block_matches(&original_lines, expected);
+                if !candidates.contains(&chosen) {
+                    let valid_candidates = candidates
+                        .iter()
+                        .map(usize::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(PlanFailure {
+                        kind: PlanError::InvalidChoice,
+                        path: section.path.clone(),
+                        op_index: op_number,
+                        detail: Some(PlanDetail::Other(format!(
+                            "selected line {chosen} is not a candidate start line; valid candidates: {valid_candidates}"
+                        ))),
+                    });
+                }
+                used_choices.insert(choice_key);
+            }
+
+            match resolve_operation(&original_lines, operation, choice) {
                 OperationResolution::Resolved(resolved) => resolved_operations.push(resolved),
                 OperationResolution::ChooseRequired { hint, candidates } => {
                     return Err(PlanFailure {
                         kind: PlanError::AmbiguousMatches,
                         path: section.path.clone(),
-                        op_index: op_idx + 1,
+                        op_index: op_number,
                         detail: Some(PlanDetail::AmbiguousMatches { hint, candidates }),
                     });
                 }
@@ -557,6 +628,19 @@ pub(crate) fn plan_envelope(
         });
     }
 
+    for ((path, op_number), _) in choices {
+        if !used_choices.contains(&(path.clone(), *op_number)) {
+            return Err(PlanFailure {
+                kind: PlanError::InvalidChoice,
+                path: path.clone(),
+                op_index: *op_number,
+                detail: Some(PlanDetail::Other(
+                    "choice refers to no operation in this envelope".into(),
+                )),
+            });
+        }
+    }
+
     let mut plan_hasher = Sha256::new();
     plan_hasher.update(envelope.id.as_bytes());
     plan_hasher.update(b"\0");
@@ -603,6 +687,79 @@ mod tests {
         [("example.txt".to_owned(), contents.to_owned())]
             .into_iter()
             .collect()
+    }
+
+    #[test]
+    fn explicit_choice_selects_the_requested_candidate() {
+        let envelope = make_test_envelope(vec![Operation::Replace {
+            start: 2,
+            end: 2,
+            old: lines(&["repeat"]),
+            new: lines(&["changed"]),
+        }]);
+        let originals = make_test_originals("one\nrepeat\nthree\nrepeat\nfive\n");
+        let choices = [((String::from("example.txt"), 1), 4usize)]
+            .into_iter()
+            .collect();
+
+        let plan = plan_envelope_with_choices(&envelope, &originals, &choices).unwrap();
+        assert_eq!(plan.files[0].proposed, "one\nrepeat\nthree\nchanged\nfive\n");
+    }
+
+    #[test]
+    fn explicit_choice_selects_the_requested_insert_anchor() {
+        let envelope = make_test_envelope(vec![Operation::Insert {
+            position: InsertPosition::After,
+            start: 2,
+            end: 2,
+            anchor: lines(&["anchor"]),
+            new: lines(&["inserted"]),
+        }]);
+        let originals = make_test_originals("one\nanchor\nthree\nanchor\nfive\n");
+        let choices = [((String::from("example.txt"), 1), 4usize)]
+            .into_iter()
+            .collect();
+
+        let plan = plan_envelope_with_choices(&envelope, &originals, &choices).unwrap();
+        assert_eq!(
+            plan.files[0].proposed,
+            "one\nanchor\nthree\nanchor\ninserted\nfive\n"
+        );
+    }
+
+    #[test]
+    fn invalid_explicit_choice_is_rejected() {
+        let envelope = make_test_envelope(vec![Operation::Replace {
+            start: 2,
+            end: 2,
+            old: lines(&["repeat"]),
+            new: lines(&["changed"]),
+        }]);
+        let originals = make_test_originals("one\nrepeat\nthree\nrepeat\nfive\n");
+        let choices = [((String::from("example.txt"), 1), 3usize)]
+            .into_iter()
+            .collect();
+
+        let error = plan_envelope_with_choices(&envelope, &originals, &choices).unwrap_err();
+        assert_eq!(error.kind, PlanError::InvalidChoice);
+        assert!(matches!(error.detail, Some(PlanDetail::Other(_))));
+    }
+
+    #[test]
+    fn choice_for_unknown_operation_is_rejected() {
+        let envelope = make_test_envelope(vec![Operation::Replace {
+            start: 2,
+            end: 2,
+            old: lines(&["old"]),
+            new: lines(&["new"]),
+        }]);
+        let originals = make_test_originals("one\nold\nthree\n");
+        let choices = [((String::from("example.txt"), 2), 2usize)]
+            .into_iter()
+            .collect();
+
+        let error = plan_envelope_with_choices(&envelope, &originals, &choices).unwrap_err();
+        assert_eq!(error.kind, PlanError::InvalidChoice);
     }
 
     #[test]

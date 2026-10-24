@@ -535,6 +535,7 @@ pub(crate) enum PlanError {
     Overlap,
     EndOfFile,
     AmbiguousMatches,
+    InvalidChoice,
     NoOp,
 }
 
@@ -546,6 +547,7 @@ impl PlanError {
             PlanError::Overlap => "E-OVERLAP",
             PlanError::Range => "E-RANGE",
             PlanError::AmbiguousMatches => "E-AMBIGUOUS",
+            PlanError::InvalidChoice => "E-INVALID-CHOICE",
             PlanError::NoOp => "E-NOOP",
             PlanError::InvalidFile | PlanError::MissingFile => "E-FILE",
             PlanError::InvalidPath => "E-PATH",
