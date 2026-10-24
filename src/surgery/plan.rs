@@ -22,9 +22,14 @@ fn find_exact_block_matches(original: &[String], expected: &[String]) -> Vec<usi
         .collect()
 }
 
-/// Resolves an operation against the original snapshot. A valid hinted range
-/// wins; otherwise, relocate only when the complete expected block is unique.
-fn resolve_unique_match(original: &[String], operation: &Operation) -> Operation {
+enum OperationResolution {
+    Resolved(Operation),
+    ChooseRequired { hint: usize, candidates: Vec<usize> },
+}
+
+/// Resolves an operation against the original snapshot. Ambiguous exact matches
+/// are surfaced explicitly; a valid hint does not prove the snapshot is fresh.
+fn resolve_operation(original: &[String], operation: &Operation) -> OperationResolution {
     let expected_len_matches_range = match operation {
         Operation::Replace { start, end, old, .. }
         | Operation::Delete { start, end, old } => {
@@ -35,34 +40,58 @@ fn resolve_unique_match(original: &[String], operation: &Operation) -> Operation
         }
     };
     if !expected_len_matches_range {
-        return operation.clone();
-    }
-    let needs_search = match validate_operation_detail(original, operation) {
-        Err((PlanError::Range | PlanError::Precondition, _)) => true,
-        Err((PlanError::EndOfFile, _)) => match operation {
-            Operation::Insert { start, end, anchor, .. } => original
-                .get(start.saturating_sub(1)..*end)
-                .is_some_and(|lines| lines != anchor.as_slice()),
-            _ => false,
-        },
-        _ => false,
-    };
-    if !needs_search {
-        return operation.clone();
+        return OperationResolution::Resolved(operation.clone());
     }
 
-    let (expected, position) = match operation {
-        Operation::Replace { old, .. } | Operation::Delete { old, .. } => (old, None),
-        Operation::Insert { anchor, position, .. } => (anchor, Some(*position)),
+    let validation = validate_operation_detail(original, operation);
+    let forbidden_boundary_with_matching_anchor = match (&validation, operation) {
+        (
+            Err((PlanError::EndOfFile, _)),
+            Operation::Insert { start, end, anchor, .. },
+        ) => original
+            .get(start.saturating_sub(1)..*end)
+            .is_some_and(|lines| lines == anchor.as_slice()),
+        _ => false,
+    };
+    if forbidden_boundary_with_matching_anchor {
+        return OperationResolution::Resolved(operation.clone());
+    }
+
+    let (expected, position, hint) = match operation {
+        Operation::Replace { start, old, .. } | Operation::Delete { start, old, .. } => {
+            (old, None, *start)
+        }
+        Operation::Insert { start, anchor, position, .. } => (anchor, Some(*position), *start),
     };
     let matches = find_exact_block_matches(original, expected);
-    if matches.len() != 1 {
-        return operation.clone();
+
+    if matches.len() > 1 {
+        return OperationResolution::ChooseRequired {
+            hint,
+            candidates: matches,
+        };
+    }
+
+    let needs_search = matches!(
+        &validation,
+        Err((PlanError::Range | PlanError::Precondition, _))
+    ) || matches!(
+        (&validation, operation),
+        (
+            Err((PlanError::EndOfFile, _)),
+            Operation::Insert { start, end, anchor, .. }
+        ) if original
+            .get(start.saturating_sub(1)..*end)
+            .is_some_and(|lines| lines != anchor.as_slice())
+    );
+
+    if !needs_search || matches.len() != 1 {
+        return OperationResolution::Resolved(operation.clone());
     }
 
     let start = matches[0];
     let end = start + expected.len() - 1;
-    match operation {
+    let resolved = match operation {
         Operation::Replace { new, .. } => Operation::Replace {
             start,
             end,
@@ -81,7 +110,8 @@ fn resolve_unique_match(original: &[String], operation: &Operation) -> Operation
             anchor: expected.clone(),
             new: new.clone(),
         },
-    }
+    };
+    OperationResolution::Resolved(resolved)
 }
 
 /// Applies one operation to an original file represented as lines.
@@ -362,11 +392,20 @@ pub(crate) fn plan_envelope(
 
         let original_lines: Vec<String> = content.split(newline).map(str::to_owned).collect();
 
-        let resolved_operations: Vec<Operation> = section
-            .operations
-            .iter()
-            .map(|operation| resolve_unique_match(&original_lines, operation))
-            .collect();
+        let mut resolved_operations = Vec::with_capacity(section.operations.len());
+        for (op_idx, operation) in section.operations.iter().enumerate() {
+            match resolve_operation(&original_lines, operation) {
+                OperationResolution::Resolved(resolved) => resolved_operations.push(resolved),
+                OperationResolution::ChooseRequired { hint, candidates } => {
+                    return Err(PlanFailure {
+                        kind: PlanError::AmbiguousMatches,
+                        path: section.path.clone(),
+                        op_index: op_idx + 1,
+                        detail: Some(PlanDetail::AmbiguousMatches { hint, candidates }),
+                    });
+                }
+            }
+        }
 
         let mut edits: Vec<(usize, usize, &Operation)> = Vec::new();
 
@@ -1599,16 +1638,15 @@ CVB::k7Q2xw9R::END ops=0";
         let failure = plan_envelope(&envelope, &original).unwrap_err();
         let message = failure.to_string();
 
-        assert_eq!(failure.kind, PlanError::Precondition);
-        assert!(
-            message.contains("exact expected-block matches elsewhere: 4 6"),
-            "{message}"
+        assert_eq!(failure.kind, PlanError::AmbiguousMatches);
+        assert_eq!(
+            failure.detail,
+            Some(PlanDetail::AmbiguousMatches {
+                hint: 2,
+                candidates: vec![4, 6],
+            })
         );
-        assert!(message.contains("actual context:"), "{message}");
-        assert!(message.contains("1: \"first\""), "{message}");
-        assert!(message.contains("2: \"actual\""), "{message}");
-        assert!(message.contains("3: \"third\""), "{message}");
-        assert!(message.contains("4: \"expected\""), "{message}");
+        assert!(message.starts_with("CVB: E-AMBIGUOUS:"), "{message}");
     }
 
     #[test]
@@ -1710,6 +1748,78 @@ CVB::k7Q2xw9R::END ops=0";
         }]);
     }
 
+    #[test]
+    fn ambiguous_replace_requires_choice_even_when_hint_matches() {
+        let envelope = make_envelope(vec![Operation::Replace {
+            start: 2,
+            end: 2,
+            old: vec!["target".to_owned()],
+            new: vec!["REPLACED".to_owned()],
+        }]);
+        let failure = plan_envelope(
+            &envelope,
+            &originals("first\ntarget\nmiddle\ntarget\nlast\n"),
+        )
+        .unwrap_err();
+
+        assert_eq!(failure.kind, PlanError::AmbiguousMatches);
+        assert_eq!(
+            failure.detail,
+            Some(PlanDetail::AmbiguousMatches {
+                hint: 2,
+                candidates: vec![2, 4],
+            })
+        );
+        assert!(failure.to_string().starts_with("CVB: E-AMBIGUOUS:"));
+    }
+
+    #[test]
+    fn ambiguous_delete_requires_choice_even_when_hint_matches() {
+        let envelope = make_envelope(vec![Operation::Delete {
+            start: 2,
+            end: 2,
+            old: vec!["target".to_owned()],
+        }]);
+        let failure = plan_envelope(
+            &envelope,
+            &originals("first\ntarget\nmiddle\ntarget\nlast\n"),
+        )
+        .unwrap_err();
+
+        assert_eq!(failure.kind, PlanError::AmbiguousMatches);
+        assert_eq!(
+            failure.detail,
+            Some(PlanDetail::AmbiguousMatches {
+                hint: 2,
+                candidates: vec![2, 4],
+            })
+        );
+    }
+
+    #[test]
+    fn ambiguous_insert_requires_choice_even_when_hint_matches() {
+        let envelope = make_envelope(vec![Operation::Insert {
+            position: InsertPosition::After,
+            start: 2,
+            end: 2,
+            anchor: vec!["target".to_owned()],
+            new: vec!["inserted".to_owned()],
+        }]);
+        let failure = plan_envelope(
+            &envelope,
+            &originals("first\ntarget\nmiddle\ntarget\nlast\n"),
+        )
+        .unwrap_err();
+
+        assert_eq!(failure.kind, PlanError::AmbiguousMatches);
+        assert_eq!(
+            failure.detail,
+            Some(PlanDetail::AmbiguousMatches {
+                hint: 2,
+                candidates: vec![2, 4],
+            })
+        );
+    }
     #[test]
     fn exact_block_search_finds_unique_match() {
         let original = vec!["one".into(), "two".into(), "three".into()];

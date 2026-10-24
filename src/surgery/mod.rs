@@ -211,6 +211,10 @@ pub(crate) enum PlanDetail {
     Range {
         file_lines: usize,
     },
+    AmbiguousMatches {
+        hint: usize,
+        candidates: Vec<usize>,
+    },
     Other(String),
 }
 
@@ -371,6 +375,17 @@ impl std::fmt::Display for PlanFailure {
                     self.path, self.op_index
                 )
             }
+            Some(PlanDetail::AmbiguousMatches { hint, candidates }) => {
+                write!(
+                    f,
+                    "CVB: E-AMBIGUOUS: {}: operation {}: expected block at hinted line {} matches multiple locations:",
+                    self.path, self.op_index, hint
+                )?;
+                for candidate in candidates {
+                    write!(f, " {candidate}")?;
+                }
+                Ok(())
+            }
             Some(PlanDetail::Other(msg)) => {
                 if self.op_index > 0 {
                     write!(
@@ -519,6 +534,7 @@ pub(crate) enum PlanError {
     Precondition,
     Overlap,
     EndOfFile,
+    AmbiguousMatches,
     NoOp,
 }
 
@@ -529,6 +545,7 @@ impl PlanError {
             PlanError::EndOfFile => "E-EOF",
             PlanError::Overlap => "E-OVERLAP",
             PlanError::Range => "E-RANGE",
+            PlanError::AmbiguousMatches => "E-AMBIGUOUS",
             PlanError::NoOp => "E-NOOP",
             PlanError::InvalidFile | PlanError::MissingFile => "E-FILE",
             PlanError::InvalidPath => "E-PATH",
