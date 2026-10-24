@@ -74,7 +74,7 @@ fn is_escape_char(c: char) -> bool {
     is_format_char(c) || is_space_separator(c) || is_zero_width(c) || is_control_char(c)
 }
 
-fn escape_line_content(s: &str) -> String {
+pub(crate) fn escape_line_content(s: &str) -> String {
     if !s.chars().any(is_escape_char) {
         return s.to_owned();
     }
