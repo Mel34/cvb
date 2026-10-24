@@ -37,10 +37,16 @@ fn resolve_unique_match(original: &[String], operation: &Operation) -> Operation
     if !expected_len_matches_range {
         return operation.clone();
     }
-    let needs_search = matches!(
-        validate_operation_detail(original, operation),
-        Err((PlanError::Range | PlanError::Precondition, _))
-    );
+    let needs_search = match validate_operation_detail(original, operation) {
+        Err((PlanError::Range | PlanError::Precondition, _)) => true,
+        Err((PlanError::EndOfFile, _)) => match operation {
+            Operation::Insert { start, end, anchor, .. } => original
+                .get(start.saturating_sub(1)..*end)
+                .is_some_and(|lines| lines != anchor.as_slice()),
+            _ => false,
+        },
+        _ => false,
+    };
     if !needs_search {
         return operation.clone();
     }
@@ -1622,6 +1628,88 @@ CVB::k7Q2xw9R::END ops=0";
         assert!(message.contains("line 2"), "{message}");
         assert!(message.contains("note: found ends here"), "{message}");
     }
+    #[test]
+    fn relocates_replace_to_unique_exact_match() {
+        let envelope = make_envelope(vec![Operation::Replace {
+            start: 1,
+            end: 1,
+            old: vec!["target".to_owned()],
+            new: vec!["REPLACED".to_owned()],
+        }]);
+
+        let plan = plan_envelope(&envelope, &originals("first\ntarget\nlast\n")).unwrap();
+
+        assert_eq!(plan.files[0].proposed, "first\nREPLACED\nlast\n");
+        assert_eq!(plan.files[0].operations, vec![Operation::Replace {
+            start: 2,
+            end: 2,
+            old: vec!["target".to_owned()],
+            new: vec!["REPLACED".to_owned()],
+        }]);
+    }
+
+    #[test]
+    fn relocates_delete_to_unique_exact_match() {
+        let envelope = make_envelope(vec![Operation::Delete {
+            start: 1,
+            end: 1,
+            old: vec!["target".to_owned()],
+        }]);
+
+        let plan = plan_envelope(&envelope, &originals("first\ntarget\nlast\n")).unwrap();
+
+        assert_eq!(plan.files[0].proposed, "first\nlast\n");
+        assert_eq!(plan.files[0].operations, vec![Operation::Delete {
+            start: 2,
+            end: 2,
+            old: vec!["target".to_owned()],
+        }]);
+    }
+
+    #[test]
+    fn relocates_insert_before_unique_exact_match() {
+        let envelope = make_envelope(vec![Operation::Insert {
+            position: InsertPosition::Before,
+            start: 1,
+            end: 1,
+            anchor: vec!["target".to_owned()],
+            new: vec!["inserted".to_owned()],
+        }]);
+
+        let plan = plan_envelope(&envelope, &originals("first\ntarget\nlast\n")).unwrap();
+
+        assert_eq!(plan.files[0].proposed, "first\ninserted\ntarget\nlast\n");
+        assert_eq!(plan.files[0].operations, vec![Operation::Insert {
+            position: InsertPosition::Before,
+            start: 2,
+            end: 2,
+            anchor: vec!["target".to_owned()],
+            new: vec!["inserted".to_owned()],
+        }]);
+    }
+
+    #[test]
+    fn relocates_insert_after_unique_exact_match() {
+        let envelope = make_envelope(vec![Operation::Insert {
+            position: InsertPosition::After,
+            start: 1,
+            end: 1,
+            anchor: vec!["target".to_owned()],
+            new: vec!["inserted".to_owned()],
+        }]);
+
+        let plan = plan_envelope(&envelope, &originals("first\ntarget\nlast\n")).unwrap();
+
+        assert_eq!(plan.files[0].proposed, "first\ntarget\ninserted\nlast\n");
+        assert_eq!(plan.files[0].operations, vec![Operation::Insert {
+            position: InsertPosition::After,
+            start: 2,
+            end: 2,
+            anchor: vec!["target".to_owned()],
+            new: vec!["inserted".to_owned()],
+        }]);
+    }
+
     #[test]
     fn exact_block_search_finds_unique_match() {
         let original = vec!["one".into(), "two".into(), "three".into()];
