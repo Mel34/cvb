@@ -94,6 +94,7 @@ fn precondition_detail(
     let only_ws = !exp.is_empty() && !fnd.is_empty() && exp.trim_end() == fnd.trim_end();
     let (column, byte_offset, prefix_ended) =
         find_differing_position(&exp, &fnd);
+    let expected = declared_slice.join("\n");
     let candidates = find_exact_block_matches(original, declared_slice);
     let context_start = start.saturating_sub(2).max(1);
     let hinted_end = start.saturating_add(original_slice.len().saturating_sub(1));
@@ -106,7 +107,7 @@ fn precondition_detail(
         line: mismatch_line,
         column,
         byte_offset,
-        expected: exp,
+        expected,
         found: fnd,
         prefix_ended,
         only_trailing_whitespace: only_ws,
