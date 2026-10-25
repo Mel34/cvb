@@ -683,6 +683,49 @@ mod tests {
     }
 
     #[test]
+    fn test_review_visibility_inserted_line_attribution() {
+        let plan = Plan {
+            token: String::new(),
+            id: String::new(),
+            digest: String::new(),
+            files: vec![crate::surgery::PlannedFile {
+                path: "test.rs".to_owned(),
+                original: "one\ntwo\nthree\n".to_owned(),
+                original_digest: String::new(),
+                proposed: "one\ninserted after\ntwo\ninserted \u{200b}before\nthree\n".to_owned(),
+                proposed_digest: String::new(),
+                operations: vec![
+                    Operation::Insert {
+                        position: InsertPosition::After,
+                        start: 1,
+                        end: 1,
+                        anchor: vec!["one".to_owned()],
+                        new: vec!["inserted after".to_owned()],
+                    },
+                    Operation::Insert {
+                        position: InsertPosition::Before,
+                        start: 3,
+                        end: 3,
+                        anchor: vec!["three".to_owned()],
+                        new: vec!["inserted \u{200b}before".to_owned()],
+                    },
+                ],
+            }],
+        };
+
+        let diff = render_plan_diff(&plan, RenderOptions::default());
+
+        assert!(
+            diff.contains("inserted \\u{200b}before"),
+            "inserted zero-width character must be escaped in the diff, got:\n{diff}"
+        );
+        assert!(
+            diff.contains("op 2 L4 +: shown escaped"),
+            "escaped inserted line must be attributed to operation 2 at proposed line 4, got:\n{diff}"
+        );
+    }
+
+    #[test]
     fn test_review_visibility_escaped_context() {
         let old = "let hidden = \"a\u{200b}b\";\nlet value = 1;\nlet tail = 0;\n";
         let new = "let hidden = \"a\u{200b}b\";\nlet value = 2;\nlet tail = 0;\n";
