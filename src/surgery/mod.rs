@@ -1877,6 +1877,86 @@ mod tests {
     }
 
     #[test]
+    fn ambiguity_chooser_copies_report_and_aborts_without_modifying_file() {
+        use std::collections::HashMap;
+        use std::io::Cursor;
+
+        let base = std::env::temp_dir().join(format!(
+            "cvb-ambiguity-clipboard-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let root = base.join("project");
+        fs::create_dir_all(&root).unwrap();
+
+        let original = concat!(
+            "fn first() {\n",
+            "    let marker = \"ambiguous-anchor\";\n",
+            "    println!(\"first\");\n",
+            "}\n",
+            "fn second() {\n",
+            "    let marker = \"ambiguous-anchor\";\n",
+            "    println!(\"second\");\n",
+            "}\n",
+        );
+        let target = root.join("ambiguous.rs");
+        fs::write(&target, original).unwrap();
+
+        let envelope = Envelope {
+            token: "testtoken123".into(),
+            id: "ambiguity-clipboard-test".into(),
+            files: vec![FileSection {
+                path: "ambiguous.rs".into(),
+                operations: vec![Operation::Replace {
+                    start: 2,
+                    end: 2,
+                    old: vec!["    let marker = \"ambiguous-anchor\";".into()],
+                    new: vec!["    let marker = \"changed-anchor\";".into()],
+                }],
+            }],
+        };
+        let originals = HashMap::from([(
+            "ambiguous.rs".to_string(),
+            original.to_string(),
+        )]);
+        let failure = plan_envelope(&envelope, &originals)
+            .expect_err("duplicate anchor must require an explicit choice");
+
+        assert!(matches!(
+            &failure.detail,
+            Some(PlanDetail::AmbiguousMatches { hint: 2, candidates })
+                if candidates == &[2, 6]
+        ));
+
+        let (control, mut peer) = control_pair();
+        let mut reader = EventReader::new(Cursor::new(b"q".to_vec()));
+
+        let result = choose_ambiguous_match(&root, &mut reader, &failure, &control)
+            .expect("chooser should handle an abort event");
+        assert_eq!(result, None);
+
+        let messages = peer.receive().unwrap();
+        assert_eq!(messages.len(), 1);
+        let report = match &messages[0] {
+            ControlMessage::ClipboardWrite { text } => text,
+            other => panic!("expected ClipboardWrite, got {other:?}"),
+        };
+
+        assert!(report.contains("CVB ambiguity report"));
+        assert!(report.contains("Operation: 1"));
+        assert!(report.contains("Hint line: 2"));
+        assert!(report.contains("1. Line 2"));
+        assert!(report.contains(">     2 |     let marker = \"ambiguous-anchor\";"));
+        assert!(report.contains("2. Line 6"));
+        assert!(report.contains(">     6 |     let marker = \"ambiguous-anchor\";"));
+        assert_eq!(fs::read_to_string(&target).unwrap(), original);
+
+        drop(control);
+        drop(peer);
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
     fn check_input_size_accepts_within_cap() {
         assert!(check_input_size(MAX_INPUT_BYTES).is_ok());
         assert!(check_input_size(100).is_ok());
