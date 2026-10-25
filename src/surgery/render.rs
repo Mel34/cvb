@@ -648,6 +648,41 @@ mod tests {
             "escaped added line must be attributed to its operation, got:\n{diff}"
         );
     }
+    #[test]
+    fn test_review_visibility_control_character() {
+        let old = "let value = \"safe\";\n";
+        let new = "let value = \"hidden\u{0085}\";\n";
+
+        let plan = Plan {
+            token: String::new(),
+            id: String::new(),
+            digest: String::new(),
+            files: vec![crate::surgery::PlannedFile {
+                path: "test.rs".to_owned(),
+                original: old.to_owned(),
+                original_digest: String::new(),
+                proposed: new.to_owned(),
+                proposed_digest: String::new(),
+                operations: vec![Operation::Replace {
+                    start: 1,
+                    end: 1,
+                    old: vec!["let value = \"safe\";".to_owned()],
+                    new: vec!["let value = \"hidden\u{0085}\";".to_owned()],
+                }],
+            }],
+        };
+        let diff = render_plan_diff(&plan, RenderOptions::default());
+
+        assert!(
+            diff.contains(MARKER_CONTROL),
+            "adding U+0085 must show {MARKER_CONTROL} in review notes, got:\n{diff}"
+        );
+        assert!(
+            diff.contains("\\u{85}"),
+            "U+0085 must be displayed as an escape sequence, got:\n{diff}"
+        );
+    }
+
 
     #[test]
     fn test_operation_numbers_for_insert_before_and_after() {
