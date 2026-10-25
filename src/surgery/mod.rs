@@ -758,6 +758,90 @@ fn start_surgery(
     Ok((guard, tty))
 }
 
+fn choose_ambiguous_match<R: std::io::Read>(
+    root: &Path,
+    reader: &mut crate::surgery::keys::EventReader<R>,
+    failure: &PlanFailure,
+) -> Result<Option<usize>, String> {
+    use crate::surgery::mode::{ChooserState, ChooserTransition};
+    use std::io::Write as _;
+
+    let (hint, candidates) = match &failure.detail {
+        Some(PlanDetail::AmbiguousMatches { hint, candidates }) => (*hint, candidates.clone()),
+        _ => return Err("CVB: chooser called without ambiguous-match details".into()),
+    };
+
+    let contents = std::fs::read_to_string(root.join(&failure.path))
+        .map_err(|error| format!("CVB: unable to read chooser context for {}: {error}", failure.path))?;
+    let lines: Vec<&str> = contents.lines().collect();
+    if lines.is_empty() {
+        return Err(format!("CVB: chooser target is empty: {}", failure.path));
+    }
+
+    let suggested_index = candidates.iter().position(|line| *line == hint).unwrap_or(0);
+    let mut chooser = ChooserState::new(candidates, suggested_index)
+        .ok_or_else(|| "CVB: chooser requires between 2 and 5 valid candidates".to_string())?;
+    chooser.set_context_line_count(lines.len());
+    let selected_line = chooser.selected_line();
+    chooser.focus_line(selected_line);
+
+    loop {
+        let selected_line = chooser.selected_line();
+        let suggested_line = chooser.suggested_line();
+        let offset = chooser.scroll_offset();
+        let end = offset.saturating_add(15).min(lines.len());
+
+        eprint!(
+            "\r\x1b[2J\x1b[H[CVB chooser] file={} op={}  Left/Right select  Up/Down scroll  PgUp/PgDn  Home/End  Enter accept  Esc/q cancel\r\n",
+            failure.path, failure.op_index
+        );
+        eprint!("Candidates: ");
+        for line in chooser.candidate_lines() {
+            let selected = if *line == selected_line { ">" } else { " " };
+            let suggested = if *line == suggested_line { "*" } else { " " };
+            eprint!("{selected}{suggested}L{line} ");
+        }
+        eprint!("\r\nContext lines {}-{} of {}\r\n", offset + 1, end, lines.len());
+
+        for (index, line) in lines.iter().enumerate().take(end).skip(offset) {
+            let number = index + 1;
+            let marker = if number == selected_line {
+                '>'
+            } else if number == suggested_line {
+                '*'
+            } else {
+                ' '
+            };
+            eprint!("{marker} {number:>5} | {line}\r\n");
+        }
+        std::io::stderr()
+            .flush()
+            .map_err(|error| format!("CVB: failed to display ambiguity chooser: {error}"))?;
+
+        let event = reader
+            .next_event()
+            .map_err(|error| format!("CVB: failed to read chooser input: {error}"))?;
+        let previous_line = chooser.selected_line();
+        let transition = chooser.step(event);
+        let current_line = chooser.selected_line();
+        if current_line != previous_line {
+            chooser.focus_line(current_line);
+        }
+
+        match transition {
+            ChooserTransition::Selected(line) => {
+                eprint!("\r\x1b[2J\x1b[H");
+                return Ok(Some(line));
+            }
+            ChooserTransition::Aborted => {
+                eprint!("\r\x1b[2J\x1b[H");
+                return Ok(None);
+            }
+            ChooserTransition::Changed | ChooserTransition::Ignored => {}
+        }
+    }
+}
+
 fn run_surgery_mode(root: std::path::PathBuf, session_token: String) -> i32 {
     use std::io::Write as _;
     use crate::surgery::keys::{Event, EventReader, SurgeryTerminalGuard};
@@ -886,7 +970,40 @@ fn run_surgery_mode(root: std::path::PathBuf, session_token: String) -> i32 {
                     held_plan = None;
                     held_envelope = None;
 
-                    match parse_load_plan(&root, &payload) {
+                    let planning_result: Result<(Envelope, Plan), String> = {
+                        let mut choices = std::collections::HashMap::new();
+                        loop {
+                            match parse_load_plan_with_choices(&root, &payload, &choices) {
+                                Ok(result) => break Ok(result),
+                                Err(PipelineError::Plan(failure)) => {
+                                    if matches!(
+                                        &failure.detail,
+                                        Some(PlanDetail::AmbiguousMatches { .. })
+                                    ) {
+                                        match choose_ambiguous_match(&root, &mut reader, &failure) {
+                                            Ok(Some(line)) => {
+                                                choices.insert(
+                                                    (failure.path.clone(), failure.op_index),
+                                                    line,
+                                                );
+                                            }
+                                            Ok(None) => {
+                                                break Err(
+                                                    "CVB: chooser aborted; no changes applied".into()
+                                                );
+                                            }
+                                            Err(error) => break Err(error),
+                                        }
+                                    } else {
+                                        break Err(failure.to_string());
+                                    }
+                                }
+                                Err(error) => break Err(error.to_string()),
+                            }
+                        }
+                    };
+
+                    match planning_result {
                         Ok((envelope, plan)) => {
                             let diff = render_plan_diff(&plan, RenderOptions { color: false });
                             let full_diff = format!(
@@ -922,7 +1039,7 @@ fn run_surgery_mode(root: std::path::PathBuf, session_token: String) -> i32 {
                         }
                         Err(err) => {
                             eprintln!("\r\x1b[2K{err}");
-                            let (s, acts) = step_dry_run_result(Err(err.to_string()));
+                            let (s, acts) = step_dry_run_result(Err(err));
                             state = s;
                             pending_actions.extend(acts);
                         }

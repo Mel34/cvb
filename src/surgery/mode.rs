@@ -79,6 +79,11 @@ impl ChooserState {
         self.scroll_offset
     }
 
+    pub(crate) fn focus_line(&mut self, line: usize) {
+        let offset = line.saturating_sub(8);
+        self.scroll_to(offset);
+    }
+
     fn scroll_to(&mut self, offset: usize) -> ChooserTransition {
         let next = offset.min(self.context_line_count.saturating_sub(1));
         if next == self.scroll_offset {
