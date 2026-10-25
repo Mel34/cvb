@@ -785,7 +785,7 @@ fn format_ambiguity_report(
 }
 
 fn choose_ambiguous_match<R: std::io::Read>(
-    root: &Path,
+    originals: &std::collections::HashMap<String, String>,
     reader: &mut crate::surgery::keys::EventReader<R>,
     failure: &PlanFailure,
     control: &crate::control::ControlChannel,
@@ -804,8 +804,9 @@ fn choose_ambiguous_match<R: std::io::Read>(
         ));
     }
 
-    let contents = std::fs::read_to_string(root.join(&failure.path))
-        .map_err(|error| format!("CVB: unable to read chooser context for {}: {error}", failure.path))?;
+    let contents = originals
+        .get(&failure.path)
+        .ok_or_else(|| format!("CVB: chooser snapshot is missing {}", failure.path))?;
     let lines: Vec<&str> = contents.lines().collect();
     if lines.is_empty() {
         return Err(format!("CVB: chooser target is empty: {}", failure.path));
@@ -1008,17 +1009,27 @@ fn run_surgery_mode(root: std::path::PathBuf, session_token: String) -> i32 {
                     held_plan = None;
                     held_envelope = None;
 
-                    let planning_result: Result<(Envelope, Plan), String> = {
+                    let planning_result: Result<(Envelope, Plan), String> = (|| {
+                        let envelope =
+                            parse_envelope(&payload).map_err(|error| error.to_string())?;
+                        let originals =
+                            load_originals(&root, &envelope).map_err(|error| error.to_string())?;
                         let mut choices = std::collections::HashMap::new();
+
                         loop {
-                            match parse_load_plan_with_choices(&root, &payload, &choices) {
-                                Ok(result) => break Ok(result),
-                                Err(PipelineError::Plan(failure)) => {
+                            match plan_envelope_with_choices(&envelope, &originals, &choices) {
+                                Ok(plan) => break Ok((envelope, plan)),
+                                Err(failure) => {
                                     if matches!(
                                         &failure.detail,
                                         Some(PlanDetail::AmbiguousMatches { .. })
                                     ) {
-                                        match choose_ambiguous_match(&root, &mut reader, &failure, &control) {
+                                        match choose_ambiguous_match(
+                                            &originals,
+                                            &mut reader,
+                                            &failure,
+                                            &control,
+                                        ) {
                                             Ok(Some(line)) => {
                                                 choices.insert(
                                                     (failure.path.clone(), failure.op_index),
@@ -1036,10 +1047,9 @@ fn run_surgery_mode(root: std::path::PathBuf, session_token: String) -> i32 {
                                         break Err(failure.to_string());
                                     }
                                 }
-                                Err(error) => break Err(error.to_string()),
                             }
                         }
-                    };
+                    })();
 
                     match planning_result {
                         Ok((envelope, plan)) => {
@@ -1899,7 +1909,7 @@ mod tests {
         );
 
         let error = choose_ambiguous_match(
-            std::path::Path::new("."),
+            &std::collections::HashMap::new(),
             &mut reader,
             &failure,
             &control,
@@ -1956,6 +1966,8 @@ mod tests {
         )]);
         let failure = plan_envelope(&envelope, &originals)
             .expect_err("duplicate anchor must require an explicit choice");
+        let drifted = "disk changed after snapshot\n";
+        fs::write(&target, drifted).unwrap();
 
         assert!(matches!(
             &failure.detail,
@@ -1966,7 +1978,7 @@ mod tests {
         let (control, mut peer) = control_pair();
         let mut reader = EventReader::new(Cursor::new(b"q".to_vec()));
 
-        let result = choose_ambiguous_match(&root, &mut reader, &failure, &control)
+        let result = choose_ambiguous_match(&originals, &mut reader, &failure, &control)
             .expect("chooser should handle an abort event");
         assert_eq!(result, None);
 
@@ -1984,7 +1996,8 @@ mod tests {
         assert!(report.contains(">     2 |     let marker = \"ambiguous-anchor\";"));
         assert!(report.contains("2. Line 6"));
         assert!(report.contains(">     6 |     let marker = \"ambiguous-anchor\";"));
-        assert_eq!(fs::read_to_string(&target).unwrap(), original);
+        assert!(!report.contains("disk changed after snapshot"));
+        assert_eq!(fs::read_to_string(&target).unwrap(), drifted);
 
         drop(control);
         drop(peer);
