@@ -14,6 +14,54 @@ pub(crate) struct CandidateData {
     pub pager: DiffPager,
 }
 
+const MIN_CHOOSER_CANDIDATES: usize = 2;
+const MAX_CHOOSER_CANDIDATES: usize = 5;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ChooserState {
+    candidate_lines: Vec<usize>,
+    selected_index: usize,
+    suggested_index: usize,
+}
+
+impl ChooserState {
+    pub(crate) fn new(
+        candidate_lines: Vec<usize>,
+        suggested_index: usize,
+    ) -> Option<Self> {
+        if !(MIN_CHOOSER_CANDIDATES..=MAX_CHOOSER_CANDIDATES)
+            .contains(&candidate_lines.len())
+            || candidate_lines.contains(&0)
+            || suggested_index >= candidate_lines.len()
+        {
+            return None;
+        }
+
+        Some(Self {
+            candidate_lines,
+            selected_index: suggested_index,
+            suggested_index,
+        })
+    }
+
+    pub(crate) fn selected_line(&self) -> usize {
+        self.candidate_lines[self.selected_index]
+    }
+
+    pub(crate) fn suggested_line(&self) -> usize {
+        self.candidate_lines[self.suggested_index]
+    }
+
+    pub(crate) fn move_left(&mut self) {
+        self.selected_index = self.selected_index.saturating_sub(1);
+    }
+
+    pub(crate) fn move_right(&mut self) {
+        self.selected_index =
+            (self.selected_index + 1).min(self.candidate_lines.len() - 1);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ModeState {
     Idle,
@@ -264,6 +312,45 @@ pub(crate) fn step_dry_run_result(
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn chooser_accepts_two_through_five_candidates() {
+        for count in MIN_CHOOSER_CANDIDATES..=MAX_CHOOSER_CANDIDATES {
+            let lines: Vec<usize> = (1..=count).map(|line| line * 10).collect();
+            assert!(ChooserState::new(lines, 0).is_some());
+        }
+    }
+
+    #[test]
+    fn chooser_rejects_invalid_candidate_counts_and_indices() {
+        assert!(ChooserState::new(vec![10], 0).is_none());
+        assert!(ChooserState::new(vec![10, 20, 30, 40, 50, 60], 0).is_none());
+        assert!(ChooserState::new(vec![0, 20], 0).is_none());
+        assert!(ChooserState::new(vec![10, 20], 2).is_none());
+    }
+
+    #[test]
+    fn chooser_navigation_keeps_suggestion_marker_fixed() {
+        let mut chooser = ChooserState::new(vec![10, 20, 30], 1).unwrap();
+
+        assert_eq!(chooser.selected_line(), 20);
+        assert_eq!(chooser.suggested_line(), 20);
+
+        chooser.move_right();
+        assert_eq!(chooser.selected_line(), 30);
+        assert_eq!(chooser.suggested_line(), 20);
+
+        chooser.move_right();
+        assert_eq!(chooser.selected_line(), 30);
+        chooser.move_left();
+        assert_eq!(chooser.selected_line(), 20);
+        chooser.move_left();
+        assert_eq!(chooser.selected_line(), 10);
+        chooser.move_left();
+        assert_eq!(chooser.selected_line(), 10);
+
+        assert_eq!(chooser.suggested_line(), 20);
+    }
 
     fn sample_candidate(id: &str) -> CandidateData {
         let diff = format!("diff for {id}\n");
