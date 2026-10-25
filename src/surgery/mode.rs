@@ -22,6 +22,8 @@ pub(crate) struct ChooserState {
     candidate_lines: Vec<usize>,
     selected_index: usize,
     suggested_index: usize,
+    context_line_count: usize,
+    scroll_offset: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +51,8 @@ impl ChooserState {
             candidate_lines,
             selected_index: suggested_index,
             suggested_index,
+            context_line_count: 1,
+            scroll_offset: 0,
         })
     }
 
@@ -62,6 +66,27 @@ impl ChooserState {
 
     pub(crate) fn candidate_lines(&self) -> &[usize] {
         &self.candidate_lines
+    }
+
+    pub(crate) fn set_context_line_count(&mut self, line_count: usize) {
+        self.context_line_count = line_count.max(1);
+        self.scroll_offset = self
+            .scroll_offset
+            .min(self.context_line_count.saturating_sub(1));
+    }
+
+    pub(crate) fn scroll_offset(&self) -> usize {
+        self.scroll_offset
+    }
+
+    fn scroll_to(&mut self, offset: usize) -> ChooserTransition {
+        let next = offset.min(self.context_line_count.saturating_sub(1));
+        if next == self.scroll_offset {
+            ChooserTransition::Ignored
+        } else {
+            self.scroll_offset = next;
+            ChooserTransition::Changed
+        }
     }
 
     pub(crate) fn step(&mut self, event: Event) -> ChooserTransition {
@@ -84,6 +109,12 @@ impl ChooserState {
                     ChooserTransition::Ignored
                 }
             }
+            Event::Up => self.scroll_to(self.scroll_offset.saturating_sub(1)),
+            Event::Down => self.scroll_to(self.scroll_offset.saturating_add(1)),
+            Event::PageUp => self.scroll_to(self.scroll_offset.saturating_sub(15)),
+            Event::PageDown => self.scroll_to(self.scroll_offset.saturating_add(15)),
+            Event::Home => self.scroll_to(0),
+            Event::End => self.scroll_to(self.context_line_count.saturating_sub(1)),
             Event::Enter => ChooserTransition::Selected(self.selected_line()),
             Event::Abort | Event::Eof => ChooserTransition::Aborted,
             _ => ChooserTransition::Ignored,
@@ -422,6 +453,28 @@ mod tests {
         assert_eq!(chooser.candidate_lines(), &[10, 20]);
         assert_eq!(chooser.suggested_line(), 10);
     }
+    #[test]
+    fn chooser_context_navigation_scrolls_and_clamps() {
+        let mut chooser = ChooserState::new(vec![10, 20], 0).unwrap();
+        chooser.set_context_line_count(40);
+
+        assert_eq!(chooser.scroll_offset(), 0);
+        assert_eq!(chooser.step(Event::Up), ChooserTransition::Ignored);
+        assert_eq!(chooser.step(Event::Down), ChooserTransition::Changed);
+        assert_eq!(chooser.scroll_offset(), 1);
+        assert_eq!(chooser.step(Event::PageDown), ChooserTransition::Changed);
+        assert_eq!(chooser.scroll_offset(), 16);
+        assert_eq!(chooser.step(Event::PageUp), ChooserTransition::Changed);
+        assert_eq!(chooser.scroll_offset(), 1);
+        assert_eq!(chooser.step(Event::Home), ChooserTransition::Changed);
+        assert_eq!(chooser.scroll_offset(), 0);
+        assert_eq!(chooser.step(Event::End), ChooserTransition::Changed);
+        assert_eq!(chooser.scroll_offset(), 39);
+        assert_eq!(chooser.step(Event::Down), ChooserTransition::Ignored);
+        assert_eq!(chooser.suggested_line(), 10);
+        assert_eq!(chooser.selected_line(), 10);
+    }
+
     fn sample_candidate(id: &str) -> CandidateData {
         let diff = format!("diff for {id}\n");
         let pager = DiffPager::new(&diff, 300).unwrap();
