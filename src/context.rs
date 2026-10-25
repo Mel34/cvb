@@ -63,22 +63,6 @@ pub(crate) fn initialize() {
     }
 }
 
-fn prepare_with(
-    bash_source: &Path,
-    will_chunk: impl FnOnce(&ClipboardBuffer) -> bool,
-    process: impl FnOnce(
-        &ClipboardBuffer,
-    ) -> Result<clipboard::ChunkSequenceOutcome, String>,
-) -> Result<Outcome, String> {
-    let buffer = load_manual(bash_source)?;
-    let chunked = will_chunk(&buffer);
-
-    match process(&buffer)? {
-        clipboard::ChunkSequenceOutcome::Completed if chunked => Ok(Outcome::SentInParts),
-        clipboard::ChunkSequenceOutcome::Completed => Ok(Outcome::Ready),
-        clipboard::ChunkSequenceOutcome::Cancelled => Ok(Outcome::Cancelled),
-    }
-}
 
 fn prepare_context_with(
     bash_source: &Path,
@@ -200,10 +184,6 @@ pub(crate) fn print_spec() -> ! {
     }
 }
 
-fn load_manual(bash_source: &Path) -> Result<ClipboardBuffer, String> {
-    let text = load_manual_text(Some(bash_source))?;
-    Ok(ClipboardBuffer::new(text.into_bytes()))
-}
 
 /// Finds `manual.md` next to the loaded `cvb.bash` (installed layout), falling
 /// back to the directory above it (development layout, `data/cvb.bash`).
