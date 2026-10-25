@@ -10,6 +10,81 @@ pub(crate) const MARKER_ZERO_WIDTH: &str = "[zero-width]";
 pub(crate) const MARKER_BIDI: &str = "[bidi]";
 pub(crate) const MARKER_CONTROL: &str = "[control]";
 pub(crate) const NO_NEWLINE_MARKER: &str = "\\ No newline at end of file";
+fn operation_for_original_line(operations: &[Operation], line: usize) -> Option<usize> {
+    operations
+        .iter()
+        .enumerate()
+        .find_map(|(index, operation)| {
+            let (start, end) = match operation {
+                Operation::Replace { start, end, .. }
+                | Operation::Delete { start, end, .. } => (*start, *end),
+                Operation::Insert { .. } => return None,
+            };
+            (start <= line && line <= end).then_some(index + 1)
+        })
+}
+
+fn operation_numbers_for_proposed_lines(
+    file: &crate::surgery::PlannedFile,
+) -> Vec<Option<usize>> {
+    let mut owners = vec![None; file.original.lines().count()];
+    let mut edits: Vec<(usize, usize, usize, &Operation)> = file
+        .operations
+        .iter()
+        .enumerate()
+        .map(|(index, operation)| {
+            let (start, end) = match operation {
+                Operation::Replace { start, end, .. }
+                | Operation::Delete { start, end, .. } => (*start - 1, *end),
+                Operation::Insert {
+                    position: InsertPosition::Before,
+                    start,
+                    ..
+                } => (*start - 1, *start - 1),
+                Operation::Insert {
+                    position: InsertPosition::After,
+                    end,
+                    ..
+                } => (*end, *end),
+            };
+            (start, end, index + 1, operation)
+        })
+        .collect();
+
+    edits.sort_by(|a, b| {
+        b.0.cmp(&a.0).then_with(|| {
+            let a_insert = a.0 == a.1;
+            let b_insert = b.0 == b.1;
+            a_insert.cmp(&b_insert)
+        })
+    });
+
+    for (_, _, number, operation) in edits {
+        match operation {
+            Operation::Replace { start, end, new, .. } => {
+                drop(owners.splice(start - 1..*end, vec![Some(number); new.len()]));
+            }
+            Operation::Delete { start, end, .. } => {
+                drop(owners.drain(start - 1..*end));
+            }
+            Operation::Insert {
+                position,
+                start,
+                end,
+                new,
+                ..
+            } => {
+                let index = match position {
+                    InsertPosition::Before => start - 1,
+                    InsertPosition::After => *end,
+                };
+                drop(owners.splice(index..index, vec![Some(number); new.len()]));
+            }
+        }
+    }
+
+    owners
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct RenderOptions {
@@ -368,33 +443,36 @@ pub(crate) fn render_plan_diff(plan: &Plan, options: RenderOptions) -> String {
             new_bytes.len()
         ));
 
-        let mut old_line = 1usize;
-        let mut new_line = 1usize;
+        let proposed_owners = operation_numbers_for_proposed_lines(file);
         for change in diff.iter_all_changes() {
             let content = change.value().trim_end_matches(['\r', '\n']);
-            let (action, side, line) = match change.tag() {
+            let (action, side, line, operation_number) = match change.tag() {
                 ChangeTag::Delete => {
-                    let line = old_line;
-                    old_line += 1;
-                    ("removed", "-", line)
+                    let line = change.old_index().unwrap() + 1;
+                    (
+                        "removed",
+                        "-",
+                        line,
+                        operation_for_original_line(&file.operations, line),
+                    )
                 }
                 ChangeTag::Insert => {
-                    let line = new_line;
-                    new_line += 1;
-                    ("added", "+", line)
+                    let line = change.new_index().unwrap() + 1;
+                    let operation_number = proposed_owners.get(line - 1).copied().flatten();
+                    ("added", "+", line, operation_number)
                 }
-                ChangeTag::Equal => {
-                    old_line += 1;
-                    new_line += 1;
-                    continue;
-                }
+                ChangeTag::Equal => continue,
             };
 
             if content.chars().any(is_escape_char) {
-                notes.push(format!(
-                    "file {} L{} {side}: shown escaped",
-                    file.path, line
-                ));
+                if let Some(number) = operation_number {
+                    notes.push(format!("op {number} L{line} {side}: shown escaped"));
+                } else {
+                    notes.push(format!(
+                        "file {} L{line} {side}: shown escaped",
+                        file.path
+                    ));
+                }
             }
 
             let markers = compute_line_markers(content);
@@ -547,7 +625,12 @@ mod tests {
                 original_digest: String::new(),
                 proposed: String::from_utf8(new.to_vec()).unwrap(),
                 proposed_digest: String::new(),
-                operations: vec![],
+                operations: vec![crate::surgery::Operation::Replace {
+                    start: 1,
+                    end: 1,
+                    old: vec!["let msg = \"hello\";".to_owned()],
+                    new: vec!["let msg = \"hello\u{200b}\";".to_owned()],
+                }],
             }],
         };
         let diff = render_plan_diff(&plan, RenderOptions::default());
@@ -561,8 +644,8 @@ mod tests {
             "zero-width char must be displayed as an escape sequence, got:\n{diff}"
         );
         assert!(
-            diff.contains("file test.rs L1 +: shown escaped"),
-            "escaped added line must be identified in notes, got:\n{diff}"
+            diff.contains("op 1 L1 +: shown escaped"),
+            "escaped added line must be attributed to its operation, got:\n{diff}"
         );
     }
 
@@ -902,19 +985,32 @@ mod tests {
                 original_digest: String::new(),
                 proposed: "before\r\nnew\u{200b}\r\nlast changed".to_string(),
                 proposed_digest: String::new(),
-                operations: vec![],
+                operations: vec![
+                    crate::surgery::Operation::Replace {
+                        start: 2,
+                        end: 2,
+                        old: vec!["old\u{200b}".to_owned()],
+                        new: vec!["new\u{200b}".to_owned()],
+                    },
+                    crate::surgery::Operation::Replace {
+                        start: 3,
+                        end: 3,
+                        old: vec!["last".to_owned()],
+                        new: vec!["last changed".to_owned()],
+                    },
+                ],
             }],
         };
 
         let diff = render_plan_diff(&plan, RenderOptions::default());
 
         assert!(
-            diff.contains("file roundtrip.txt L2 -: shown escaped"),
-            "removed escaped line must be noted, got:\n{diff}"
+            diff.contains("op 1 L2 -: shown escaped"),
+            "removed escaped line must be attributed to its operation, got:\n{diff}"
         );
         assert!(
-            diff.contains("file roundtrip.txt L2 +: shown escaped"),
-            "added escaped line must be noted, got:\n{diff}"
+            diff.contains("op 1 L2 +: shown escaped"),
+            "added escaped line must be attributed to its operation, got:\n{diff}"
         );
         assert!(
             diff.contains("line endings: old CRLF, new CRLF"),
