@@ -874,6 +874,14 @@ mod tests {
             "added line must be attributed to operation 1 at proposed line 1, got:\n{diff}"
         );
         assert!(
+            diff.contains("file test.rs: removed line has [zero-width]"),
+            "removed zero-width marker must be reported, got:\n{diff}"
+        );
+        assert!(
+            diff.contains("file test.rs: added line has [zero-width]"),
+            "added zero-width marker must be reported, got:\n{diff}"
+        );
+        assert!(
             !diff.contains("a\u{200b}b"),
             "raw zero-width character must not appear in the rendered diff"
         );
@@ -927,6 +935,14 @@ mod tests {
             "second removed line must be attributed to operation 1 at original line 2, got:\n{diff}"
         );
         assert!(
+            diff.contains("file test.rs: removed line has [zero-width]"),
+            "removed zero-width marker must be reported, got:\n{diff}"
+        );
+        assert!(
+            diff.contains("file test.rs: removed line has [bidi]"),
+            "removed bidi marker must be reported, got:\n{diff}"
+        );
+        assert!(
             !diff.contains("first \u{200b}"),
             "raw zero-width character must not appear in the rendered diff"
         );
@@ -969,6 +985,14 @@ mod tests {
         assert!(
             diff.contains("op 1 L2 +: shown escaped"),
             "inserted line must be attributed to operation 1 at proposed line 2, got:\n{diff}"
+        );
+        assert!(
+            diff.contains("file test.rs: added line has [zero-width]"),
+            "inserted zero-width marker must be reported, got:\n{diff}"
+        );
+        assert!(
+            diff.contains("file test.rs: added line has [zero-width], [bidi]"),
+            "inserted bidi marker must be reported, got:\n{diff}"
         );
         assert!(
             !diff.contains("inserted \u{200b}\u{202e}line"),
