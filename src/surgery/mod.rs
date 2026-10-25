@@ -1857,6 +1857,12 @@ mod tests {
 
         assert!(first_candidate < second_candidate);
 
+        assert!(report.contains("File: src/example.rs"));
+        assert!(report.contains("Operation: 7"));
+        assert!(report.contains("Hint line: 5"));
+        assert!(report.contains(">     1 | line 1"));
+        assert!(report.contains("      2 | line 2"));
+
         let first_context = &report[first_candidate..second_candidate];
         let second_context = &report[second_candidate..];
 
