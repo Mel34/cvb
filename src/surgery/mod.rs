@@ -786,7 +786,7 @@ fn run_surgery_mode(root: std::path::PathBuf, session_token: String) -> i32 {
         }
     };
 
-    let mut reader = EventReader::new(tty);
+    let mut reader = EventReader::new_terminal(tty, _guard.raw_fd());
     let mut state = ModeState::Idle;
     let mut held_plan: Option<Plan> = None;
     let mut held_envelope: Option<Envelope> = None;

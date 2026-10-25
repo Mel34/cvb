@@ -116,6 +116,7 @@ impl ArmingState {
 pub(crate) struct EventReader<R> {
     reader: R,
     buf: Vec<u8>,
+    terminal_fd: Option<RawFd>,
 }
 
 impl<R: Read> EventReader<R> {
@@ -123,6 +124,43 @@ impl<R: Read> EventReader<R> {
         Self {
             reader,
             buf: Vec::new(),
+            terminal_fd: None,
+        }
+    }
+
+    pub(crate) fn new_terminal(reader: R, terminal_fd: RawFd) -> Self {
+        Self {
+            reader,
+            buf: Vec::new(),
+            terminal_fd: Some(terminal_fd),
+        }
+    }
+
+    fn read_escape_continuation(
+        &mut self,
+        chunk: &mut [u8],
+    ) -> Result<usize, std::io::Error> {
+        let Some(fd) = self.terminal_fd else {
+            return self.reader.read(chunk);
+        };
+
+        loop {
+            let mut descriptor = nix::libc::pollfd {
+                fd,
+                events: nix::libc::POLLIN,
+                revents: 0,
+            };
+            let result = unsafe { nix::libc::poll(&mut descriptor, 1, 50) };
+            if result > 0 {
+                return self.reader.read(chunk);
+            }
+            if result == 0 {
+                return Ok(0);
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(error);
+            }
         }
     }
 
@@ -159,7 +197,21 @@ impl<R: Read> EventReader<R> {
                     const START_MARKER: &[u8] = b"\x1b[200~";
 
                     while self.buf.len() < START_MARKER.len() {
-                        let n = self.reader.read(&mut chunk)?;
+                        if self.buf.starts_with(b"\x1b[D")
+                            || self.buf.starts_with(b"\x1bOD")
+                            || self.buf.starts_with(b"\x1b[C")
+                            || self.buf.starts_with(b"\x1bOC")
+                        {
+                            break;
+                        }
+                        if self.buf.len() >= 3
+                            && (self.buf[1] == b'[' || self.buf[1] == b'O')
+                            && !START_MARKER.starts_with(&self.buf)
+                        {
+                            break;
+                        }
+
+                        let n = self.read_escape_continuation(&mut chunk)?;
                         if n == 0 {
                             break;
                         }
@@ -181,6 +233,16 @@ impl<R: Read> EventReader<R> {
                         return Ok(Event::Right);
                     }
 
+                    if self.buf.len() == 1 {
+                        self.buf.remove(0);
+                        return Ok(Event::Abort);
+                    }
+
+                    if START_MARKER.starts_with(&self.buf) {
+                        self.buf.clear();
+                        return Ok(Event::Other);
+                    }
+
                     if self.buf.len() >= 2 && (self.buf[1] == b'[' || self.buf[1] == b'O') {
                         if self.buf.len() >= 3 {
                             self.buf.drain(..3);
@@ -191,7 +253,7 @@ impl<R: Read> EventReader<R> {
                     }
 
                     self.buf.remove(0);
-                    return Ok(Event::Other);
+                    return Ok(Event::Abort);
                 }
                 _ => {
                     self.buf.remove(0);
