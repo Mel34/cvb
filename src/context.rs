@@ -446,8 +446,9 @@ mod tests {
 
         let capture = |expected: &str| {
             let seen = RefCell::new(Vec::new());
-            prepare_with(
+            prepare_context_with(
                 &bash,
+                "ContextToken1234",
                 |_| false,
                 |buffer| {
                     seen.borrow_mut().extend_from_slice(buffer.as_bytes());
