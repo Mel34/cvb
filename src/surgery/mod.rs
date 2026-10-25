@@ -805,7 +805,7 @@ fn choose_ambiguous_match<R: std::io::Read>(
                 eprint!("{:<12}", "");
             }
         }
-        eprint!("\u{2190}/\u{2192} or 1\u{2013}5 select  Enter confirm  Esc/q cancel  \u{2191}/\u{2193} scroll\r\n");
+        eprint!("\u{2190}/\u{2192} or 1\u{2013}5 select  Enter confirm  Esc/q cancel  \u{2191}/\u{2193} PgUp/PgDn Home/End scroll\r\n");
         eprint!("Context lines {}-{} of {}\r\n", offset + 1, end, lines.len());
 
         for (index, line) in lines.iter().enumerate().take(end).skip(offset) {
