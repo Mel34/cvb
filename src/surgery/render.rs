@@ -683,6 +683,43 @@ mod tests {
     }
 
     #[test]
+    fn test_operation_numbers_for_replace_delete_and_insert() {
+        let file = crate::surgery::PlannedFile {
+            path: "test.rs".to_owned(),
+            original: "one\ntwo\nthree\nfour\n".to_owned(),
+            original_digest: String::new(),
+            proposed: "one\ntwo-a\ntwo-b\nfour\nafter four\n".to_owned(),
+            proposed_digest: String::new(),
+            operations: vec![
+                Operation::Replace {
+                    start: 2,
+                    end: 2,
+                    old: vec!["two".to_owned()],
+                    new: vec!["two-a".to_owned(), "two-b".to_owned()],
+                },
+                Operation::Delete {
+                    start: 3,
+                    end: 3,
+                    old: vec!["three".to_owned()],
+                },
+                Operation::Insert {
+                    position: InsertPosition::After,
+                    start: 4,
+                    end: 4,
+                    anchor: vec!["four".to_owned()],
+                    new: vec!["after four".to_owned()],
+                },
+            ],
+        };
+
+        assert_eq!(
+            operation_numbers_for_proposed_lines(&file),
+            vec![None, Some(1), Some(1), None, Some(3)],
+            "replacement lines and later insertions must retain their operation numbers after mixed edits"
+        );
+    }
+
+    #[test]
     fn test_review_visibility_inserted_line_attribution() {
         let plan = Plan {
             token: String::new(),
