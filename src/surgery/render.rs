@@ -1635,6 +1635,14 @@ mod tests {
     }
 
     #[test]
+    fn test_review_markers_detect_tab_after_leading_spaces() {
+        assert_eq!(
+            compute_line_markers(" \tvalue"),
+            vec![MARKER_TAB_INDENT]
+        );
+    }
+
+    #[test]
     fn test_review_markers_accumulate_on_one_line() {
         let markers = compute_line_markers("\tvalue\u{200b}\u{202e}\u{1} ");
 
