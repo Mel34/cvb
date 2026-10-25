@@ -683,6 +683,38 @@ mod tests {
     }
 
     #[test]
+    fn test_operation_for_original_line_attributes_replace_and_delete() {
+        let operations = vec![
+            Operation::Insert {
+                position: InsertPosition::After,
+                start: 1,
+                end: 1,
+                anchor: vec!["one".to_owned()],
+                new: vec!["inserted".to_owned()],
+            },
+            Operation::Replace {
+                start: 2,
+                end: 3,
+                old: vec!["two".to_owned(), "three".to_owned()],
+                new: vec!["replacement".to_owned()],
+            },
+            Operation::Delete {
+                start: 5,
+                end: 6,
+                old: vec!["five".to_owned(), "six".to_owned()],
+            },
+        ];
+
+        assert_eq!(operation_for_original_line(&operations, 1), None);
+        assert_eq!(operation_for_original_line(&operations, 2), Some(2));
+        assert_eq!(operation_for_original_line(&operations, 3), Some(2));
+        assert_eq!(operation_for_original_line(&operations, 4), None);
+        assert_eq!(operation_for_original_line(&operations, 5), Some(3));
+        assert_eq!(operation_for_original_line(&operations, 6), Some(3));
+        assert_eq!(operation_for_original_line(&operations, 7), None);
+    }
+
+    #[test]
     fn test_operation_numbers_for_replace_delete_and_insert() {
         let file = crate::surgery::PlannedFile {
             path: "test.rs".to_owned(),
