@@ -833,6 +833,150 @@ mod tests {
     }
 
     #[test]
+    fn test_review_visibility_replaced_zero_width_attribution() {
+        let old = "let hidden = \"a\u{200b}b\";\n";
+        let new = "let changed = \"c\u{200b}d\";\n";
+
+        let plan = Plan {
+            token: String::new(),
+            id: String::new(),
+            digest: String::new(),
+            files: vec![crate::surgery::PlannedFile {
+                path: "test.rs".to_owned(),
+                original: old.to_owned(),
+                original_digest: String::new(),
+                proposed: new.to_owned(),
+                proposed_digest: String::new(),
+                operations: vec![Operation::Replace {
+                    start: 1,
+                    end: 1,
+                    old: vec!["let hidden = \"a\u{200b}b\";".to_owned()],
+                    new: vec!["let changed = \"c\u{200b}d\";".to_owned()],
+                }],
+            }],
+        };
+        let diff = render_plan_diff(&plan, RenderOptions::default());
+
+        assert!(
+            diff.contains("let hidden = \"a\\u{200b}b\";"),
+            "removed zero-width character must be escaped, got:\n{diff}"
+        );
+        assert!(
+            diff.contains("let changed = \"c\\u{200b}d\";"),
+            "added zero-width character must be escaped, got:\n{diff}"
+        );
+        assert!(
+            diff.contains("op 1 L1 -: shown escaped"),
+            "removed line must be attributed to operation 1 at original line 1, got:\n{diff}"
+        );
+        assert!(
+            diff.contains("op 1 L1 +: shown escaped"),
+            "added line must be attributed to operation 1 at proposed line 1, got:\n{diff}"
+        );
+        assert!(
+            !diff.contains("a\u{200b}b"),
+            "raw zero-width character must not appear in the rendered diff"
+        );
+        assert!(
+            !diff.contains("c\u{200b}d"),
+            "raw zero-width character must not appear in the rendered diff"
+        );
+    }
+
+    #[test]
+    fn test_review_visibility_multiline_delete_attribution() {
+        let old = "first \u{200b}\nsecond \u{202e}\nkeep\n";
+        let new = "keep\n";
+
+        let plan = Plan {
+            token: String::new(),
+            id: String::new(),
+            digest: String::new(),
+            files: vec![crate::surgery::PlannedFile {
+                path: "test.rs".to_owned(),
+                original: old.to_owned(),
+                original_digest: String::new(),
+                proposed: new.to_owned(),
+                proposed_digest: String::new(),
+                operations: vec![Operation::Delete {
+                    start: 1,
+                    end: 2,
+                    old: vec![
+                        "first \u{200b}".to_owned(),
+                        "second \u{202e}".to_owned(),
+                    ],
+                }],
+            }],
+        };
+        let diff = render_plan_diff(&plan, RenderOptions::default());
+
+        assert!(
+            diff.contains("-first \\u{200b}"),
+            "first removed line must be escaped, got:\n{diff}"
+        );
+        assert!(
+            diff.contains("-second \\u{202e}"),
+            "second removed line must be escaped, got:\n{diff}"
+        );
+        assert!(
+            diff.contains("op 1 L1 -: shown escaped"),
+            "first removed line must be attributed to operation 1 at original line 1, got:\n{diff}"
+        );
+        assert!(
+            diff.contains("op 1 L2 -: shown escaped"),
+            "second removed line must be attributed to operation 1 at original line 2, got:\n{diff}"
+        );
+        assert!(
+            !diff.contains("first \u{200b}"),
+            "raw zero-width character must not appear in the rendered diff"
+        );
+        assert!(
+            !diff.contains("second \u{202e}"),
+            "raw bidi control must not appear in the rendered diff"
+        );
+    }
+
+    #[test]
+    fn test_review_visibility_inserted_mixed_invisible_attribution() {
+        let old = "first\nkeep\n";
+        let new = "first\ninserted \u{200b}\u{202e}line\nkeep\n";
+
+        let plan = Plan {
+            token: String::new(),
+            id: String::new(),
+            digest: String::new(),
+            files: vec![crate::surgery::PlannedFile {
+                path: "test.rs".to_owned(),
+                original: old.to_owned(),
+                original_digest: String::new(),
+                proposed: new.to_owned(),
+                proposed_digest: String::new(),
+                operations: vec![Operation::Insert {
+                    position: InsertPosition::Before,
+                    start: 2,
+                    end: 2,
+                    anchor: vec!["keep".to_owned()],
+                    new: vec!["inserted \u{200b}\u{202e}line".to_owned()],
+                }],
+            }],
+        };
+        let diff = render_plan_diff(&plan, RenderOptions::default());
+
+        assert!(
+            diff.contains("inserted \\u{200b}\\u{202e}line"),
+            "both invisible characters must be escaped, got:\n{diff}"
+        );
+        assert!(
+            diff.contains("op 1 L2 +: shown escaped"),
+            "inserted line must be attributed to operation 1 at proposed line 2, got:\n{diff}"
+        );
+        assert!(
+            !diff.contains("inserted \u{200b}\u{202e}line"),
+            "raw invisible characters must not appear in the rendered diff"
+        );
+    }
+
+    #[test]
     fn test_review_visibility_escaped_context() {
         let old = "let hidden = \"a\u{200b}b\";\nlet value = 1;\nlet tail = 0;\n";
         let new = "let hidden = \"a\u{200b}b\";\nlet value = 2;\nlet tail = 0;\n";
