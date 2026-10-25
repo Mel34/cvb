@@ -499,7 +499,7 @@ mod tests {
         let dir = TempDir::new("parts");
         let bash = installed_layout(dir.path(), "manual");
 
-        let outcome = prepare_with(&bash, |_| true, |_| Ok(clipboard::ChunkSequenceOutcome::Completed)).unwrap();
+        let outcome = prepare_context_with(&bash, "ContextToken1234", |_| true, |_| Ok(clipboard::ChunkSequenceOutcome::Completed)).unwrap();
 
         assert_eq!(outcome, Outcome::SentInParts);
     }
