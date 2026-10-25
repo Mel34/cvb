@@ -114,6 +114,16 @@ impl ChooserState {
                     ChooserTransition::Ignored
                 }
             }
+            Event::ChooseCandidate(index) if index < self.candidate_lines.len() => {
+                let previous = self.selected_index;
+                self.selected_index = index;
+                if self.selected_index == previous {
+                    ChooserTransition::Ignored
+                } else {
+                    ChooserTransition::Changed
+                }
+            }
+            Event::ChooseCandidate(_) => ChooserTransition::Ignored,
             Event::Up => self.scroll_to(self.scroll_offset.saturating_sub(1)),
             Event::Down => self.scroll_to(self.scroll_offset.saturating_add(1)),
             Event::PageUp => self.scroll_to(self.scroll_offset.saturating_sub(15)),
@@ -435,6 +445,32 @@ mod tests {
 
         chooser.step(Event::Right);
         assert_eq!(chooser.step(Event::Enter), ChooserTransition::Selected(30));
+        assert_eq!(chooser.suggested_line(), 20);
+    }
+
+    #[test]
+    fn chooser_number_keys_select_candidates_without_moving_suggestion() {
+        let mut chooser = ChooserState::new(vec![10, 20, 30], 1).unwrap();
+
+        assert_eq!(
+            chooser.step(Event::ChooseCandidate(2)),
+            ChooserTransition::Changed
+        );
+        assert_eq!(chooser.selected_line(), 30);
+        assert_eq!(chooser.suggested_line(), 20);
+
+        assert_eq!(
+            chooser.step(Event::ChooseCandidate(0)),
+            ChooserTransition::Changed
+        );
+        assert_eq!(chooser.selected_line(), 10);
+        assert_eq!(chooser.suggested_line(), 20);
+
+        assert_eq!(
+            chooser.step(Event::ChooseCandidate(4)),
+            ChooserTransition::Ignored
+        );
+        assert_eq!(chooser.selected_line(), 10);
         assert_eq!(chooser.suggested_line(), 20);
     }
 

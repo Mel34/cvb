@@ -792,14 +792,18 @@ fn choose_ambiguous_match<R: std::io::Read>(
         let end = offset.saturating_add(15).min(lines.len());
 
         eprint!(
-            "\r\x1b[2J\x1b[H[CVB chooser] file={} op={}  Left/Right select  Up/Down scroll  PgUp/PgDn  Home/End  Enter accept  Esc/q cancel\r\n",
+            "\r\x1b[2J\x1b[H[CVB chooser] file={} op={}\r\n",
             failure.path, failure.op_index
         );
-        eprint!("Candidates: ");
-        for line in chooser.candidate_lines() {
-            let selected = if *line == selected_line { ">" } else { " " };
-            let suggested = if *line == suggested_line { "*" } else { " " };
-            eprint!("{selected}{suggested}L{line} ");
+        for index in 0..5 {
+            if let Some(line) = chooser.candidate_lines().get(index) {
+                let selected = if *line == selected_line { ">" } else { " " };
+                let suggested = if *line == suggested_line { "*" } else { " " };
+                let slot = format!("{selected}{suggested}{}:L{line}", index + 1);
+                eprint!("{slot:<12}");
+            } else {
+                eprint!("{:<12}", "");
+            }
         }
         eprint!("\r\nContext lines {}-{} of {}\r\n", offset + 1, end, lines.len());
 

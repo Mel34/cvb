@@ -27,6 +27,7 @@ pub(crate) enum Event {
     PageDown,
     Home,
     End,
+    ChooseCandidate(usize),
     Other,
     PasteError(String),
     Eof,
@@ -284,6 +285,10 @@ impl<R: Read> EventReader<R> {
                 0x0d | 0x0a => {
                     self.buf.remove(0);
                     return Ok(Event::Enter);
+                }
+                b'1'..=b'5' => {
+                    self.buf.remove(0);
+                    return Ok(Event::ChooseCandidate((first - b'1') as usize));
                 }
                 _ => {
                     self.buf.remove(0);
@@ -629,6 +634,11 @@ mod tests {
             0x1b, b'[', b'8', b'~', // End
             0x1b, b'[', b'5', b'~', // PageUp
             0x1b, b'[', b'6', b'~', // PageDown
+            b'1',                 // Candidate 1
+            b'2',                 // Candidate 2
+            b'3',                 // Candidate 3
+            b'4',                 // Candidate 4
+            b'5',                 // Candidate 5
             b'z',                 // Other
         ];
 
@@ -658,6 +668,11 @@ mod tests {
         assert_eq!(reader.next_event().unwrap(), Event::End);
         assert_eq!(reader.next_event().unwrap(), Event::PageUp);
         assert_eq!(reader.next_event().unwrap(), Event::PageDown);
+        assert_eq!(reader.next_event().unwrap(), Event::ChooseCandidate(0));
+        assert_eq!(reader.next_event().unwrap(), Event::ChooseCandidate(1));
+        assert_eq!(reader.next_event().unwrap(), Event::ChooseCandidate(2));
+        assert_eq!(reader.next_event().unwrap(), Event::ChooseCandidate(3));
+        assert_eq!(reader.next_event().unwrap(), Event::ChooseCandidate(4));
         assert_eq!(reader.next_event().unwrap(), Event::Other);
         assert_eq!(reader.next_event().unwrap(), Event::Eof);
     }
