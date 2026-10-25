@@ -10,6 +10,241 @@ pub(crate) const MARKER_ZERO_WIDTH: &str = "[zero-width]";
 pub(crate) const MARKER_BIDI: &str = "[bidi]";
 pub(crate) const MARKER_CONTROL: &str = "[control]";
 pub(crate) const NO_NEWLINE_MARKER: &str = "\\ No newline at end of file";
+
+#[derive(Debug, Clone)]
+struct LineMapEvent {
+    position: usize,
+    end: usize,
+    old_len: usize,
+    new_len: usize,
+    insertion: bool,
+}
+
+#[derive(Debug, Clone)]
+struct LineMapSegment {
+    original_start: usize,
+    original_end: usize,
+    current_start: Option<usize>,
+    current_end: Option<usize>,
+    changed: Option<(usize, usize)>,
+}
+
+fn line_map_line_count(contents: &str) -> usize {
+    let newline = detect_newline(contents).unwrap_or(Newline::Lf).as_str();
+    contents
+        .strip_suffix(newline)
+        .unwrap_or(contents)
+        .split(newline)
+        .count()
+}
+
+fn push_line_map_segment(segments: &mut Vec<LineMapSegment>, segment: LineMapSegment) {
+    if segment.changed.is_none() {
+        if let Some(previous) = segments.last_mut() {
+            if previous.changed.is_none()
+                && previous.original_end + 1 == segment.original_start
+                && previous.current_end.is_some()
+                && previous.current_end.unwrap() + 1 == segment.current_start.unwrap()
+                && previous.current_start.unwrap() as isize
+                    - previous.original_start as isize
+                    == segment.current_start.unwrap() as isize
+                        - segment.original_start as isize
+            {
+                previous.original_end = segment.original_end;
+                previous.current_end = segment.current_end;
+                return;
+            }
+        }
+    }
+
+    segments.push(segment);
+}
+
+fn line_map_range(start: usize, end: usize, use_end: bool) -> String {
+    if use_end {
+        format!("{start}-end")
+    } else if start == end {
+        start.to_string()
+    } else {
+        format!("{start}-{end}")
+    }
+}
+
+/// Formats an original-to-current line map from the resolved operations.
+/// Returns None when no operation changes line positions.
+pub(crate) fn render_line_map(file: &crate::surgery::PlannedFile) -> Option<String> {
+    let original_count = line_map_line_count(&file.original);
+    let current_count = line_map_line_count(&file.proposed);
+    let mut events = Vec::with_capacity(file.operations.len());
+
+    for operation in &file.operations {
+        match operation {
+            Operation::Replace {
+                start, end, new, ..
+            } => events.push(LineMapEvent {
+                position: *start,
+                end: *end,
+                old_len: end - start + 1,
+                new_len: new.len(),
+                insertion: false,
+            }),
+            Operation::Delete { start, end, .. } => events.push(LineMapEvent {
+                position: *start,
+                end: *end,
+                old_len: end - start + 1,
+                new_len: 0,
+                insertion: false,
+            }),
+            Operation::Insert {
+                position,
+                start,
+                end,
+                new,
+                ..
+            } => {
+                let boundary = match position {
+                    InsertPosition::Before => *start,
+                    InsertPosition::After => end + 1,
+                };
+                events.push(LineMapEvent {
+                    position: boundary,
+                    end: boundary.saturating_sub(1),
+                    old_len: 0,
+                    new_len: new.len(),
+                    insertion: true,
+                });
+            }
+        }
+    }
+
+    if !events.iter().any(|event| event.old_len != event.new_len) {
+        return None;
+    }
+
+    events.sort_by_key(|event| (event.position, !event.insertion));
+
+    let mut segments = Vec::new();
+    let mut original_cursor = 1usize;
+    let mut current_cursor = 1usize;
+
+    for event in events {
+        if event.position > original_cursor {
+            let unchanged_end = event.position - 1;
+            let length = unchanged_end - original_cursor + 1;
+            push_line_map_segment(
+                &mut segments,
+                LineMapSegment {
+                    original_start: original_cursor,
+                    original_end: unchanged_end,
+                    current_start: Some(current_cursor),
+                    current_end: Some(current_cursor + length - 1),
+                    changed: None,
+                },
+            );
+            original_cursor = event.position;
+            current_cursor += length;
+        }
+
+        if event.insertion {
+            current_cursor += event.new_len;
+            continue;
+        }
+
+        let current_start = current_cursor;
+        let current_end = (event.new_len > 0)
+            .then_some(current_start + event.new_len - 1);
+        let changed = (event.old_len != event.new_len)
+            .then_some((event.old_len, event.new_len));
+
+        push_line_map_segment(
+            &mut segments,
+            LineMapSegment {
+                original_start: event.position,
+                original_end: event.end,
+                current_start: if event.new_len > 0 {
+                    Some(current_start)
+                } else {
+                    None
+                },
+                current_end,
+                changed,
+            },
+        );
+
+        original_cursor = event.end + 1;
+        current_cursor += event.new_len;
+    }
+
+    if original_cursor <= original_count {
+        let length = original_count - original_cursor + 1;
+        push_line_map_segment(
+            &mut segments,
+            LineMapSegment {
+                original_start: original_cursor,
+                original_end: original_count,
+                current_start: Some(current_cursor),
+                current_end: Some(current_cursor + length - 1),
+                changed: None,
+            },
+        );
+    }
+
+    let mut output = format!(
+        "{}: line map, original -> current (now {} lines)",
+        file.path, current_count
+    );
+
+    for segment in segments {
+        let original_tail = segment.changed.is_none()
+            && segment.original_end == original_count
+            && segment.original_start < segment.original_end;
+        let original_range = line_map_range(
+            segment.original_start,
+            segment.original_end,
+            original_tail,
+        );
+
+        match segment.changed {
+            Some((old_len, 0)) => {
+                output.push_str(&format!(
+                    "\n  {original_range} -> (deleted {old_len} lines)"
+                ));
+            }
+            Some((old_len, new_len)) => {
+                let current_range = line_map_range(
+                    segment.current_start.unwrap(),
+                    segment.current_end.unwrap(),
+                    false,
+                );
+                output.push_str(&format!(
+                    "\n  {original_range} -> {current_range}    ({old_len} lines replaced by {new_len})"
+                ));
+            }
+            None => {
+                let current_start = segment.current_start.unwrap();
+                let current_end = segment.current_end.unwrap();
+                let current_tail = segment.original_end == original_count
+                    && current_end == current_count
+                    && segment.original_start < segment.original_end;
+                let current_range =
+                    line_map_range(current_start, current_end, current_tail);
+                let shift = current_start as isize - segment.original_start as isize;
+                let note = if shift == 0 {
+                    "(same)".to_string()
+                } else if shift > 0 {
+                    format!("(+{shift})")
+                } else {
+                    format!("({shift})")
+                };
+                output.push_str(&format!(
+                    "\n  {original_range} -> {current_range}    {note}"
+                ));
+            }
+        }
+    }
+
+    Some(output)
+}
 fn operation_for_original_line(operations: &[Operation], line: usize) -> Option<usize> {
     operations
         .iter()
@@ -526,6 +761,152 @@ pub(crate) fn render_plan_diff(plan: &Plan, options: RenderOptions) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn make_line_map_file(
+        original: &str,
+        proposed: &str,
+        operations: Vec<Operation>,
+    ) -> crate::surgery::PlannedFile {
+        crate::surgery::PlannedFile {
+            path: "example.rs".to_string(),
+            original: original.to_string(),
+            original_digest: String::new(),
+            proposed: proposed.to_string(),
+            proposed_digest: String::new(),
+            operations,
+        }
+    }
+
+    fn map_lines(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn line_map_reports_replacement_and_shifted_tail() {
+        let file = make_line_map_file(
+            "a\nb\nc\nd\ne\nf\n",
+            "a\nb\nC\ne\nf\n",
+            vec![Operation::Replace {
+                start: 3,
+                end: 4,
+                old: map_lines(&["c", "d"]),
+                new: map_lines(&["C"]),
+            }],
+        );
+
+        let report = render_line_map(&file).unwrap();
+        assert!(report.contains("now 5 lines"));
+        assert!(report.contains("1-2 -> 1-2    (same)"));
+        assert!(report.contains("3-4 -> 3    (2 lines replaced by 1)"));
+        assert!(report.contains("5-end -> 4-end    (-1)"));
+    }
+
+    #[test]
+    fn line_map_handles_insertions_before_and_after_anchors() {
+        let file = make_line_map_file(
+            "a\nb\nc\nd\ne\n",
+            "a\nx\nb\nc\nd\ny\ne\n",
+            vec![
+                Operation::Insert {
+                    position: InsertPosition::Before,
+                    start: 2,
+                    end: 2,
+                    anchor: map_lines(&["b"]),
+                    new: map_lines(&["x"]),
+                },
+                Operation::Insert {
+                    position: InsertPosition::After,
+                    start: 4,
+                    end: 4,
+                    anchor: map_lines(&["d"]),
+                    new: map_lines(&["y"]),
+                },
+            ],
+        );
+
+        let report = render_line_map(&file).unwrap();
+        assert!(report.contains("1 -> 1    (same)"));
+        assert!(report.contains("2-4 -> 3-5    (+1)"));
+        assert!(report.contains("5 -> 7    (+2)"));
+    }
+
+    #[test]
+    fn line_map_preserves_intermediate_shift_when_shifts_cancel() {
+        let file = make_line_map_file(
+            "a\nb\nc\nd\ne\nf\n",
+            "a\nx\nb\nc\ne\nf\n",
+            vec![
+                Operation::Insert {
+                    position: InsertPosition::Before,
+                    start: 2,
+                    end: 2,
+                    anchor: map_lines(&["b"]),
+                    new: map_lines(&["x"]),
+                },
+                Operation::Delete {
+                    start: 4,
+                    end: 4,
+                    old: map_lines(&["d"]),
+                },
+            ],
+        );
+
+        let report = render_line_map(&file).unwrap();
+        assert!(report.contains("2-3 -> 3-4    (+1)"));
+        assert!(report.contains("4 -> (deleted 1 lines)"));
+        assert!(report.contains("5-end -> 5-end    (same)"));
+    }
+
+    #[test]
+    fn line_map_omits_same_length_replacements() {
+        let file = make_line_map_file(
+            "a\nb\nc\n",
+            "a\nB\nc\n",
+            vec![Operation::Replace {
+                start: 2,
+                end: 2,
+                old: map_lines(&["b"]),
+                new: map_lines(&["B"]),
+            }],
+        );
+
+        assert_eq!(render_line_map(&file), None);
+    }
+
+    #[test]
+    fn line_map_does_not_create_a_tail_after_eof_deletion() {
+        let file = make_line_map_file(
+            "a\nb\nc\n",
+            "a\nb\n",
+            vec![Operation::Delete {
+                start: 3,
+                end: 3,
+                old: map_lines(&["c"]),
+            }],
+        );
+
+        let report = render_line_map(&file).unwrap();
+        assert!(report.contains("3 -> (deleted 1 lines)"));
+        assert!(!report.contains("4-end"));
+    }
+
+    #[test]
+    fn line_map_counts_an_unterminated_final_line() {
+        let file = make_line_map_file(
+            "a\nb\nc",
+            "a\nB1\nB2\nc",
+            vec![Operation::Replace {
+                start: 2,
+                end: 2,
+                old: map_lines(&["b"]),
+                new: map_lines(&["B1", "B2"]),
+            }],
+        );
+
+        let report = render_line_map(&file).unwrap();
+        assert!(report.contains("now 4 lines"));
+        assert!(report.contains("3 -> 4    (+1)"));
+    }
 
     #[test]
     fn test_diff_authority_inputs_are_strictly_bytes() {
