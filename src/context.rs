@@ -339,8 +339,9 @@ mod tests {
         let bash = installed_layout(dir.path(), "");
         let copied = Cell::new(false);
 
-        let error = prepare_with(
+        let error = prepare_context_with(
             &bash,
+            "ContextToken1234",
             |_| false,
             |_| {
                 copied.set(true);
