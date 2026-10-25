@@ -1839,6 +1839,37 @@ mod tests {
     }
 
     #[test]
+    fn ambiguity_report_preserves_candidate_order_and_context_boundaries() {
+        let lines = [
+            "line 1", "line 2", "line 3", "line 4", "line 5",
+            "line 6", "line 7", "line 8", "line 9", "line 10",
+        ];
+
+        let report =
+            format_ambiguity_report("src/example.rs", 7, 5, &[1, 10], &lines);
+
+        let first_candidate = report
+            .find("\n1. Line 1\n")
+            .expect("first candidate must be reported");
+        let second_candidate = report
+            .find("\n2. Line 10\n")
+            .expect("second candidate must be reported");
+
+        assert!(first_candidate < second_candidate);
+
+        let first_context = &report[first_candidate..second_candidate];
+        let second_context = &report[second_candidate..];
+
+        assert!(first_context.contains("line 1\n"));
+        assert!(first_context.contains("line 4\n"));
+        assert!(!first_context.contains("line 5\n"));
+
+        assert!(second_context.contains("line 6\n"));
+        assert!(second_context.contains("line 10\n"));
+        assert!(!second_context.contains("line 5\n"));
+    }
+
+    #[test]
     fn check_input_size_accepts_within_cap() {
         assert!(check_input_size(MAX_INPUT_BYTES).is_ok());
         assert!(check_input_size(100).is_ok());
