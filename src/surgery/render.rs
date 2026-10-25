@@ -1624,6 +1624,11 @@ mod tests {
     }
 
     #[test]
+    fn test_review_markers_ignore_embedded_tab() {
+        assert!(compute_line_markers("value\tinside").is_empty());
+    }
+
+    #[test]
     fn test_review_markers_accumulate_on_one_line() {
         let markers = compute_line_markers("\tvalue\u{200b}\u{202e}\u{1} ");
 
