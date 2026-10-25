@@ -809,14 +809,9 @@ fn choose_ambiguous_match<R: std::io::Read>(
 
         for (index, line) in lines.iter().enumerate().take(end).skip(offset) {
             let number = index + 1;
-            let marker = if number == selected_line {
-                '>'
-            } else if number == suggested_line {
-                '*'
-            } else {
-                ' '
-            };
-            eprint!("{marker} {number:>5} | {line}\r\n");
+            let selected_marker = if number == selected_line { '>' } else { ' ' };
+            let suggested_marker = if number == suggested_line { '*' } else { ' ' };
+            eprint!("{selected_marker}{suggested_marker} {number:>5} | {line}\r\n");
         }
         std::io::stderr()
             .flush()
