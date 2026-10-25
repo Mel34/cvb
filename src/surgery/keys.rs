@@ -475,6 +475,20 @@ mod tests {
     }
 
     #[test]
+    fn lone_escape_aborts() {
+        let mut reader = EventReader::new(Cursor::new(b"\x1b".to_vec()));
+        assert_eq!(reader.next_event().unwrap(), Event::Abort);
+        assert_eq!(reader.next_event().unwrap(), Event::Eof);
+    }
+
+    #[test]
+    fn incomplete_escape_sequence_is_ignored() {
+        let mut reader = EventReader::new(Cursor::new(b"\x1b[".to_vec()));
+        assert_eq!(reader.next_event().unwrap(), Event::Other);
+        assert_eq!(reader.next_event().unwrap(), Event::Eof);
+    }
+
+    #[test]
     fn individual_key_events_decode_accurately() {
         let stream = vec![
             0x02,                 // Build (Ctrl+B)
