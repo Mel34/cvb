@@ -318,8 +318,9 @@ mod tests {
         fs::write(&bash, "# wrapper\n").unwrap();
         let copied = Cell::new(false);
 
-        let error = prepare_with(
+        let error = prepare_context_with(
             &bash,
+            "ContextToken1234",
             |_| false,
             |_| {
                 copied.set(true);
