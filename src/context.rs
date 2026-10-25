@@ -360,8 +360,9 @@ mod tests {
         let bash = installed_layout(dir.path(), "# Manual\n\nüñí\n");
         let seen = RefCell::new(Vec::new());
 
-        let outcome = prepare_with(
+        let outcome = prepare_context_with(
             &bash,
+            "ContextToken1234",
             |_| false,
             |buffer| {
                 seen.borrow_mut().extend_from_slice(buffer.as_bytes());
