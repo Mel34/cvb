@@ -469,8 +469,9 @@ mod tests {
         let dir = TempDir::new("clipfail");
         let bash = installed_layout(dir.path(), "manual");
 
-        let error = prepare_with(
+        let error = prepare_context_with(
             &bash,
+            "ContextToken1234",
             |_| false,
             |_| Err("CVB: unable to start wl-copy: not found".to_string()),
         )
