@@ -21,7 +21,7 @@ const MAX_CHOOSER_CANDIDATES: usize = 5;
 pub(crate) struct ChooserState {
     candidate_lines: Vec<usize>,
     selected_index: usize,
-    suggested_index: usize,
+    suggested_index: Option<usize>,
     context_line_count: usize,
     scroll_offset: usize,
 }
@@ -36,21 +36,26 @@ pub(crate) enum ChooserTransition {
 
 impl ChooserState {
     pub(crate) fn new(
-        candidate_lines: Vec<usize>,
-        suggested_index: usize,
+        mut candidate_lines: Vec<usize>,
+        suggested_index: Option<usize>,
     ) -> Option<Self> {
         if !(MIN_CHOOSER_CANDIDATES..=MAX_CHOOSER_CANDIDATES)
             .contains(&candidate_lines.len())
             || candidate_lines.contains(&0)
-            || suggested_index >= candidate_lines.len()
+            || suggested_index.is_some_and(|index| index >= candidate_lines.len())
         {
             return None;
         }
 
+        if let Some(index) = suggested_index {
+            let suggested_line = candidate_lines.remove(index);
+            candidate_lines.insert(0, suggested_line);
+        }
+
         Some(Self {
             candidate_lines,
-            selected_index: suggested_index,
-            suggested_index,
+            selected_index: 0,
+            suggested_index: suggested_index.map(|_| 0),
             context_line_count: 1,
             scroll_offset: 0,
         })
@@ -60,8 +65,8 @@ impl ChooserState {
         self.candidate_lines[self.selected_index]
     }
 
-    pub(crate) fn suggested_line(&self) -> usize {
-        self.candidate_lines[self.suggested_index]
+    pub(crate) fn suggested_line(&self) -> Option<usize> {
+        self.suggested_index.map(|index| self.candidate_lines[index])
     }
 
     pub(crate) fn candidate_lines(&self) -> &[usize] {
@@ -401,102 +406,120 @@ mod tests {
     fn chooser_accepts_two_through_five_candidates() {
         for count in MIN_CHOOSER_CANDIDATES..=MAX_CHOOSER_CANDIDATES {
             let lines: Vec<usize> = (1..=count).map(|line| line * 10).collect();
-            assert!(ChooserState::new(lines, 0).is_some());
+            assert!(ChooserState::new(lines, Some(0)).is_some());
         }
     }
 
     #[test]
     fn chooser_rejects_invalid_candidate_counts_and_indices() {
-        assert!(ChooserState::new(vec![10], 0).is_none());
-        assert!(ChooserState::new(vec![10, 20, 30, 40, 50, 60], 0).is_none());
-        assert!(ChooserState::new(vec![0, 20], 0).is_none());
-        assert!(ChooserState::new(vec![10, 20], 2).is_none());
+        assert!(ChooserState::new(vec![10], Some(0)).is_none());
+        assert!(ChooserState::new(vec![10, 20, 30, 40, 50, 60], Some(0)).is_none());
+        assert!(ChooserState::new(vec![0, 20], Some(0)).is_none());
+        assert!(ChooserState::new(vec![10, 20], Some(2)).is_none());
+    }
+
+    #[test]
+    fn chooser_suggestion_moves_to_first_slot_and_starts_selected() {
+        let chooser = ChooserState::new(vec![10, 20, 30], Some(1)).unwrap();
+
+        assert_eq!(chooser.candidate_lines(), &[20, 10, 30]);
+        assert_eq!(chooser.selected_line(), 20);
+        assert_eq!(chooser.suggested_line(), Some(20));
+    }
+
+    #[test]
+    fn chooser_without_suggestion_preserves_order_and_starts_first() {
+        let chooser = ChooserState::new(vec![10, 20, 30], None).unwrap();
+
+        assert_eq!(chooser.candidate_lines(), &[10, 20, 30]);
+        assert_eq!(chooser.selected_line(), 10);
+        assert_eq!(chooser.suggested_line(), None);
     }
 
     #[test]
     fn chooser_navigation_keeps_suggestion_marker_fixed() {
-        let mut chooser = ChooserState::new(vec![10, 20, 30], 1).unwrap();
+        let mut chooser = ChooserState::new(vec![10, 20, 30], Some(1)).unwrap();
 
         assert_eq!(chooser.selected_line(), 20);
-        assert_eq!(chooser.suggested_line(), 20);
+        assert_eq!(chooser.suggested_line(), Some(20));
+
+        chooser.move_right();
+        assert_eq!(chooser.selected_line(), 10);
+        assert_eq!(chooser.suggested_line(), Some(20));
 
         chooser.move_right();
         assert_eq!(chooser.selected_line(), 30);
-        assert_eq!(chooser.suggested_line(), 20);
-
-        chooser.move_right();
-        assert_eq!(chooser.selected_line(), 30);
+        chooser.move_left();
+        assert_eq!(chooser.selected_line(), 10);
         chooser.move_left();
         assert_eq!(chooser.selected_line(), 20);
         chooser.move_left();
-        assert_eq!(chooser.selected_line(), 10);
-        chooser.move_left();
-        assert_eq!(chooser.selected_line(), 10);
+        assert_eq!(chooser.selected_line(), 20);
 
-        assert_eq!(chooser.suggested_line(), 20);
+        assert_eq!(chooser.suggested_line(), Some(20));
     }
-
 
     #[test]
     fn chooser_enter_selects_the_current_line() {
-        let mut chooser = ChooserState::new(vec![10, 20, 30], 1).unwrap();
+        let mut chooser = ChooserState::new(vec![10, 20, 30], Some(1)).unwrap();
 
         assert_eq!(chooser.step(Event::Enter), ChooserTransition::Selected(20));
 
         chooser.step(Event::Right);
-        assert_eq!(chooser.step(Event::Enter), ChooserTransition::Selected(30));
-        assert_eq!(chooser.suggested_line(), 20);
+        assert_eq!(chooser.step(Event::Enter), ChooserTransition::Selected(10));
+        assert_eq!(chooser.suggested_line(), Some(20));
     }
 
     #[test]
     fn chooser_number_keys_select_candidates_without_moving_suggestion() {
-        let mut chooser = ChooserState::new(vec![10, 20, 30], 1).unwrap();
+        let mut chooser = ChooserState::new(vec![10, 20, 30], Some(1)).unwrap();
 
         assert_eq!(
             chooser.step(Event::ChooseCandidate(2)),
             ChooserTransition::Changed
         );
         assert_eq!(chooser.selected_line(), 30);
-        assert_eq!(chooser.suggested_line(), 20);
+        assert_eq!(chooser.suggested_line(), Some(20));
 
         assert_eq!(
             chooser.step(Event::ChooseCandidate(0)),
             ChooserTransition::Changed
         );
-        assert_eq!(chooser.selected_line(), 10);
-        assert_eq!(chooser.suggested_line(), 20);
+        assert_eq!(chooser.selected_line(), 20);
+        assert_eq!(chooser.suggested_line(), Some(20));
 
         assert_eq!(
             chooser.step(Event::ChooseCandidate(4)),
             ChooserTransition::Ignored
         );
-        assert_eq!(chooser.selected_line(), 10);
-        assert_eq!(chooser.suggested_line(), 20);
+        assert_eq!(chooser.selected_line(), 20);
+        assert_eq!(chooser.suggested_line(), Some(20));
     }
 
     #[test]
     fn chooser_abort_and_eof_never_select_a_candidate() {
-        let mut chooser = ChooserState::new(vec![10, 20], 0).unwrap();
+        let mut chooser = ChooserState::new(vec![10, 20], None).unwrap();
 
         assert_eq!(chooser.step(Event::Abort), ChooserTransition::Aborted);
         assert_eq!(chooser.step(Event::Eof), ChooserTransition::Aborted);
         assert_eq!(chooser.selected_line(), 10);
+        assert_eq!(chooser.suggested_line(), None);
     }
 
     #[test]
     fn chooser_reports_changes_but_ignores_boundary_and_unrelated_events() {
-        let mut chooser = ChooserState::new(vec![10, 20], 0).unwrap();
+        let mut chooser = ChooserState::new(vec![10, 20], Some(0)).unwrap();
 
         assert_eq!(chooser.step(Event::Left), ChooserTransition::Ignored);
         assert_eq!(chooser.step(Event::Right), ChooserTransition::Changed);
         assert_eq!(chooser.step(Event::Right), ChooserTransition::Ignored);
         assert_eq!(chooser.step(Event::Space), ChooserTransition::Ignored);
         assert_eq!(chooser.candidate_lines(), &[10, 20]);
-        assert_eq!(chooser.suggested_line(), 10);
+        assert_eq!(chooser.suggested_line(), Some(10));
     }
     #[test]
     fn chooser_context_navigation_scrolls_and_clamps() {
-        let mut chooser = ChooserState::new(vec![10, 20], 0).unwrap();
+        let mut chooser = ChooserState::new(vec![10, 20], Some(0)).unwrap();
         chooser.set_context_line_count(40);
 
         assert_eq!(chooser.scroll_offset(), 0);
@@ -512,7 +535,7 @@ mod tests {
         assert_eq!(chooser.step(Event::End), ChooserTransition::Changed);
         assert_eq!(chooser.scroll_offset(), 39);
         assert_eq!(chooser.step(Event::Down), ChooserTransition::Ignored);
-        assert_eq!(chooser.suggested_line(), 10);
+        assert_eq!(chooser.suggested_line(), Some(10));
         assert_eq!(chooser.selected_line(), 10);
     }
 

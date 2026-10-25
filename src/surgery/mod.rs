@@ -810,7 +810,7 @@ fn choose_ambiguous_match<R: std::io::Read>(
         .send(&crate::control::ControlMessage::ClipboardWrite { text: report })
         .map_err(|error| format!("CVB: unable to copy ambiguity report: {error}"))?;
 
-    let suggested_index = candidates.iter().position(|line| *line == hint).unwrap_or(0);
+    let suggested_index = candidates.iter().position(|line| *line == hint);
     let mut chooser = ChooserState::new(candidates, suggested_index)
         .ok_or_else(|| "CVB: chooser requires between 2 and 5 valid candidates".to_string())?;
     chooser.set_context_line_count(lines.len());
@@ -830,7 +830,7 @@ fn choose_ambiguous_match<R: std::io::Read>(
         for index in 0..5 {
             if let Some(line) = chooser.candidate_lines().get(index) {
                 let selected = if *line == selected_line { ">" } else { " " };
-                let suggested = if *line == suggested_line { "*" } else { " " };
+                let suggested = if Some(*line) == suggested_line { "*" } else { " " };
                 let slot = format!("{selected}{suggested}{}:L{line}", index + 1);
                 eprint!("{slot:<12}");
             } else {
@@ -843,7 +843,7 @@ fn choose_ambiguous_match<R: std::io::Read>(
         for (index, line) in lines.iter().enumerate().take(end).skip(offset) {
             let number = index + 1;
             let selected_marker = if number == selected_line { '>' } else { ' ' };
-            let suggested_marker = if number == suggested_line { '*' } else { ' ' };
+            let suggested_marker = if Some(number) == suggested_line { '*' } else { ' ' };
             eprint!("{selected_marker}{suggested_marker} {number:>5} | {line}\r\n");
         }
         std::io::stderr()
