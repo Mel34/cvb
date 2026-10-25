@@ -1635,6 +1635,14 @@ mod tests {
     }
 
     #[test]
+    fn test_review_markers_spaces_only_line_has_trailing_marker() {
+        assert_eq!(
+            compute_line_markers("   "),
+            vec![MARKER_TRAILING_WHITESPACE]
+        );
+    }
+
+    #[test]
     fn test_review_markers_detect_tab_after_leading_spaces() {
         assert_eq!(
             compute_line_markers(" \tvalue"),
