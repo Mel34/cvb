@@ -24,6 +24,14 @@ pub(crate) struct ChooserState {
     suggested_index: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChooserTransition {
+    Changed,
+    Selected(usize),
+    Aborted,
+    Ignored,
+}
+
 impl ChooserState {
     pub(crate) fn new(
         candidate_lines: Vec<usize>,
@@ -50,6 +58,36 @@ impl ChooserState {
 
     pub(crate) fn suggested_line(&self) -> usize {
         self.candidate_lines[self.suggested_index]
+    }
+
+    pub(crate) fn candidate_lines(&self) -> &[usize] {
+        &self.candidate_lines
+    }
+
+    pub(crate) fn step(&mut self, event: Event) -> ChooserTransition {
+        match event {
+            Event::Left => {
+                let previous = self.selected_index;
+                self.move_left();
+                if self.selected_index != previous {
+                    ChooserTransition::Changed
+                } else {
+                    ChooserTransition::Ignored
+                }
+            }
+            Event::Right => {
+                let previous = self.selected_index;
+                self.move_right();
+                if self.selected_index != previous {
+                    ChooserTransition::Changed
+                } else {
+                    ChooserTransition::Ignored
+                }
+            }
+            Event::Enter => ChooserTransition::Selected(self.selected_line()),
+            Event::Abort | Event::Eof => ChooserTransition::Aborted,
+            _ => ChooserTransition::Ignored,
+        }
     }
 
     pub(crate) fn move_left(&mut self) {
@@ -352,6 +390,38 @@ mod tests {
         assert_eq!(chooser.suggested_line(), 20);
     }
 
+
+    #[test]
+    fn chooser_enter_selects_the_current_line() {
+        let mut chooser = ChooserState::new(vec![10, 20, 30], 1).unwrap();
+
+        assert_eq!(chooser.step(Event::Enter), ChooserTransition::Selected(20));
+
+        chooser.step(Event::Right);
+        assert_eq!(chooser.step(Event::Enter), ChooserTransition::Selected(30));
+        assert_eq!(chooser.suggested_line(), 20);
+    }
+
+    #[test]
+    fn chooser_abort_and_eof_never_select_a_candidate() {
+        let mut chooser = ChooserState::new(vec![10, 20], 0).unwrap();
+
+        assert_eq!(chooser.step(Event::Abort), ChooserTransition::Aborted);
+        assert_eq!(chooser.step(Event::Eof), ChooserTransition::Aborted);
+        assert_eq!(chooser.selected_line(), 10);
+    }
+
+    #[test]
+    fn chooser_reports_changes_but_ignores_boundary_and_unrelated_events() {
+        let mut chooser = ChooserState::new(vec![10, 20], 0).unwrap();
+
+        assert_eq!(chooser.step(Event::Left), ChooserTransition::Ignored);
+        assert_eq!(chooser.step(Event::Right), ChooserTransition::Changed);
+        assert_eq!(chooser.step(Event::Right), ChooserTransition::Ignored);
+        assert_eq!(chooser.step(Event::Space), ChooserTransition::Ignored);
+        assert_eq!(chooser.candidate_lines(), &[10, 20]);
+        assert_eq!(chooser.suggested_line(), 10);
+    }
     fn sample_candidate(id: &str) -> CandidateData {
         let diff = format!("diff for {id}\n");
         let pager = DiffPager::new(&diff, 300).unwrap();
