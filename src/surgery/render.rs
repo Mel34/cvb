@@ -650,6 +650,39 @@ mod tests {
     }
 
     #[test]
+    fn test_operation_numbers_for_insert_before_and_after() {
+        let file = crate::surgery::PlannedFile {
+            path: "test.rs".to_owned(),
+            original: "one\ntwo\nthree\n".to_owned(),
+            original_digest: String::new(),
+            proposed: "one\ninserted after\ntwo\ninserted before\nthree\n".to_owned(),
+            proposed_digest: String::new(),
+            operations: vec![
+                Operation::Insert {
+                    position: InsertPosition::After,
+                    start: 1,
+                    end: 1,
+                    anchor: vec!["one".to_owned()],
+                    new: vec!["inserted after".to_owned()],
+                },
+                Operation::Insert {
+                    position: InsertPosition::Before,
+                    start: 3,
+                    end: 3,
+                    anchor: vec!["three".to_owned()],
+                    new: vec!["inserted before".to_owned()],
+                },
+            ],
+        };
+
+        assert_eq!(
+            operation_numbers_for_proposed_lines(&file),
+            vec![None, Some(1), None, Some(2), None],
+            "inserted lines must retain their operation numbers after positional shifts"
+        );
+    }
+
+    #[test]
     fn test_review_visibility_escaped_context() {
         let old = "let hidden = \"a\u{200b}b\";\nlet value = 1;\nlet tail = 0;\n";
         let new = "let hidden = \"a\u{200b}b\";\nlet value = 2;\nlet tail = 0;\n";
