@@ -1531,4 +1531,108 @@ mod tests {
         assert!(diff.contains("-line 500 original content"));
         assert!(diff.contains("+line 500 changed content"));
     }
+
+    #[test]
+    fn test_review_visibility_removed_trailing_whitespace() {
+        let old = b"let x = 1; \n";
+        let new = b"let x = 1;\n";
+
+        let plan = Plan {
+            token: String::new(),
+            id: String::new(),
+            digest: String::new(),
+            files: vec![crate::surgery::PlannedFile {
+                path: "test.rs".to_owned(),
+                original: String::from_utf8(old.to_vec()).unwrap(),
+                original_digest: String::new(),
+                proposed: String::from_utf8(new.to_vec()).unwrap(),
+                proposed_digest: String::new(),
+                operations: vec![],
+            }],
+        };
+        let diff = render_plan_diff(&plan, RenderOptions::default());
+
+        assert!(
+            diff.contains(MARKER_TRAILING_WHITESPACE),
+            "removing trailing whitespace must show {MARKER_TRAILING_WHITESPACE} in notes, got:\n{diff}"
+        );
+        assert!(
+            diff.contains("-let x = 1; "),
+            "removed trailing whitespace must remain visible in the diff, got:\n{diff}"
+        );
+    }
+
+    #[test]
+    fn test_review_visibility_added_tab_indent() {
+        let old = b"    println!(\"indent\");\n";
+        let new = b"\tprintln!(\"indent\");\n";
+
+        let plan = Plan {
+            token: String::new(),
+            id: String::new(),
+            digest: String::new(),
+            files: vec![crate::surgery::PlannedFile {
+                path: "test.rs".to_owned(),
+                original: String::from_utf8(old.to_vec()).unwrap(),
+                original_digest: String::new(),
+                proposed: String::from_utf8(new.to_vec()).unwrap(),
+                proposed_digest: String::new(),
+                operations: vec![Operation::Replace {
+                    start: 1,
+                    end: 1,
+                    old: vec!["    println!(\"indent\");".to_owned()],
+                    new: vec!["\tprintln!(\"indent\");".to_owned()],
+                }],
+            }],
+        };
+        let diff = render_plan_diff(&plan, RenderOptions::default());
+
+        assert!(
+            diff.contains(MARKER_TAB_INDENT),
+            "adding tab indentation must show {MARKER_TAB_INDENT} in notes, got:\n{diff}"
+        );
+        assert!(
+            diff.contains("+\tprintln!(\"indent\");"),
+            "added tab indentation must remain visible in the diff, got:\n{diff}"
+        );
+    }
+
+    #[test]
+    fn test_review_visibility_removed_bidi_override() {
+        let old = "let text = \"abc\u{202e}\";\n";
+        let new = "let text = \"abc\";\n";
+
+        let plan = Plan {
+            token: String::new(),
+            id: String::new(),
+            digest: String::new(),
+            files: vec![crate::surgery::PlannedFile {
+                path: "test.rs".to_owned(),
+                original: old.to_owned(),
+                original_digest: String::new(),
+                proposed: new.to_owned(),
+                proposed_digest: String::new(),
+                operations: vec![Operation::Replace {
+                    start: 1,
+                    end: 1,
+                    old: vec!["let text = \"abc\u{202e}\";".to_owned()],
+                    new: vec!["let text = \"abc\";".to_owned()],
+                }],
+            }],
+        };
+        let diff = render_plan_diff(&plan, RenderOptions::default());
+
+        assert!(
+            diff.contains(MARKER_BIDI),
+            "removing a bidi override must show {MARKER_BIDI} in notes, got:\n{diff}"
+        );
+        assert!(
+            diff.contains("-let text = \"abc\\u{202e}\";"),
+            "removed bidi override must be displayed as an escape sequence, got:\n{diff}"
+        );
+        assert!(
+            diff.contains("op 1 L1 -: shown escaped"),
+            "removed escaped line must be attributed to operation 1, got:\n{diff}"
+        );
+    }
 }
