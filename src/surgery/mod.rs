@@ -797,6 +797,12 @@ fn choose_ambiguous_match<R: std::io::Read>(
         Some(PlanDetail::AmbiguousMatches { hint, candidates }) => (*hint, candidates.clone()),
         _ => return Err("CVB: chooser called without ambiguous-match details".into()),
     };
+    if candidates.len() > 5 {
+        return Err(format!(
+            "CVB: anchor too generic: found {} exact matches; narrow the anchor to at most 5 candidates",
+            candidates.len()
+        ));
+    }
 
     let contents = std::fs::read_to_string(root.join(&failure.path))
         .map_err(|error| format!("CVB: unable to read chooser context for {}: {error}", failure.path))?;
@@ -1877,7 +1883,36 @@ mod tests {
     }
 
     #[test]
+    fn ambiguity_chooser_rejects_more_than_five_candidates_as_too_generic() {
+        let failure = PlanFailure {
+            kind: PlanError::AmbiguousMatches,
+            path: "ambiguous.rs".into(),
+            op_index: 1,
+            detail: Some(PlanDetail::AmbiguousMatches {
+                hint: 1,
+                candidates: vec![1, 2, 3, 4, 5, 6],
+            }),
+        };
+        let (control, _peer) = control_pair();
+        let mut reader = crate::surgery::keys::EventReader::new(
+            std::io::Cursor::new(b"q".to_vec()),
+        );
+
+        let error = choose_ambiguous_match(
+            std::path::Path::new("."),
+            &mut reader,
+            &failure,
+            &control,
+        )
+        .expect_err("six candidates must be rejected before opening the chooser");
+
+        assert!(error.starts_with("CVB: anchor too generic:"), "{error}");
+        assert!(error.contains("6 exact matches"), "{error}");
+    }
+
+    #[test]
     fn ambiguity_chooser_copies_report_and_aborts_without_modifying_file() {
+
         use std::collections::HashMap;
         use std::io::Cursor;
 
