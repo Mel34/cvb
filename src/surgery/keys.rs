@@ -18,8 +18,15 @@ pub(crate) enum Event {
     Build,
     Abort,
     Space,
+    Enter,
     Left,
     Right,
+    Up,
+    Down,
+    PageUp,
+    PageDown,
+    Home,
+    End,
     Other,
     PasteError(String),
     Eof,
@@ -223,14 +230,32 @@ impl<R: Read> EventReader<R> {
                         return self.read_bracketed_paste(&mut chunk);
                     }
 
-                    if self.buf.starts_with(b"\x1b[D") || self.buf.starts_with(b"\x1bOD") {
-                        self.buf.drain(..3);
-                        return Ok(Event::Left);
-                    }
+                    let escape_keys: &[(&[u8], Event)] = &[
+                        (b"\x1b[D", Event::Left),
+                        (b"\x1bOD", Event::Left),
+                        (b"\x1b[C", Event::Right),
+                        (b"\x1bOC", Event::Right),
+                        (b"\x1b[A", Event::Up),
+                        (b"\x1bOA", Event::Up),
+                        (b"\x1b[B", Event::Down),
+                        (b"\x1bOB", Event::Down),
+                        (b"\x1b[H", Event::Home),
+                        (b"\x1bOH", Event::Home),
+                        (b"\x1b[1~", Event::Home),
+                        (b"\x1b[7~", Event::Home),
+                        (b"\x1b[F", Event::End),
+                        (b"\x1bOF", Event::End),
+                        (b"\x1b[4~", Event::End),
+                        (b"\x1b[8~", Event::End),
+                        (b"\x1b[5~", Event::PageUp),
+                        (b"\x1b[6~", Event::PageDown),
+                    ];
 
-                    if self.buf.starts_with(b"\x1b[C") || self.buf.starts_with(b"\x1bOC") {
-                        self.buf.drain(..3);
-                        return Ok(Event::Right);
+                    for (sequence, event) in escape_keys {
+                        if self.buf.starts_with(sequence) {
+                            self.buf.drain(..sequence.len());
+                            return Ok(event.clone());
+                        }
                     }
 
                     if self.buf.len() == 1 {
