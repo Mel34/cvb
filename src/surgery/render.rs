@@ -795,6 +795,44 @@ mod tests {
     }
 
     #[test]
+    fn test_review_visibility_removed_zero_width_attribution() {
+        let old = "let hidden = \"a\u{200b}b\";\nlet value = 1;\n";
+        let new = "let value = 1;\n";
+
+        let plan = Plan {
+            token: String::new(),
+            id: String::new(),
+            digest: String::new(),
+            files: vec![crate::surgery::PlannedFile {
+                path: "test.rs".to_owned(),
+                original: old.to_owned(),
+                original_digest: String::new(),
+                proposed: new.to_owned(),
+                proposed_digest: String::new(),
+                operations: vec![Operation::Delete {
+                    start: 1,
+                    end: 1,
+                    old: vec!["let hidden = \"a\u{200b}b\";".to_owned()],
+                }],
+            }],
+        };
+        let diff = render_plan_diff(&plan, RenderOptions::default());
+
+        assert!(
+            diff.contains("let hidden = \"a\\u{200b}b\";"),
+            "removed zero-width character must be displayed as an escape sequence, got:\n{diff}"
+        );
+        assert!(
+            diff.contains("op 1 L1 -: shown escaped"),
+            "escaped removed line must be attributed to operation 1 at original line 1, got:\n{diff}"
+        );
+        assert!(
+            !diff.contains("let hidden = \"a\u{200b}b\";"),
+            "raw zero-width character must not appear in the rendered diff"
+        );
+    }
+
+    #[test]
     fn test_review_visibility_escaped_context() {
         let old = "let hidden = \"a\u{200b}b\";\nlet value = 1;\nlet tail = 0;\n";
         let new = "let hidden = \"a\u{200b}b\";\nlet value = 2;\nlet tail = 0;\n";
