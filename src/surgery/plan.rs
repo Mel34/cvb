@@ -97,9 +97,11 @@ fn resolve_operation(
     }
 
     if matches.len() > 1 {
+        let mut candidates = matches;
+        candidates.sort_by_key(|&candidate| (candidate.abs_diff(hint), candidate));
         return OperationResolution::ChooseRequired {
             hint,
-            candidates: matches,
+            candidates,
         };
     }
 
@@ -1908,14 +1910,14 @@ CVB::k7Q2xw9R::END ops=0";
     #[test]
     fn ambiguous_replace_requires_choice_even_when_hint_matches() {
         let envelope = make_envelope(vec![Operation::Replace {
-            start: 2,
-            end: 2,
+            start: 4,
+            end: 4,
             old: vec!["target".to_owned()],
             new: vec!["REPLACED".to_owned()],
         }]);
         let failure = plan_envelope(
             &envelope,
-            &originals("first\ntarget\nmiddle\ntarget\nlast\n"),
+            &originals("first\ntarget\nmiddle\ntarget\nlast\ntarget\nend\ntarget\n"),
         )
         .unwrap_err();
 
@@ -1923,8 +1925,8 @@ CVB::k7Q2xw9R::END ops=0";
         assert_eq!(
             failure.detail,
             Some(PlanDetail::AmbiguousMatches {
-                hint: 2,
-                candidates: vec![2, 4],
+                hint: 4,
+                candidates: vec![4, 2, 6, 8],
             })
         );
         assert!(failure.to_string().starts_with("CVB: E-AMBIGUOUS:"));
