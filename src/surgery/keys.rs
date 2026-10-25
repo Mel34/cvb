@@ -214,6 +214,7 @@ impl<R: Read> EventReader<R> {
                         if self.buf.len() >= 3
                             && (self.buf[1] == b'[' || self.buf[1] == b'O')
                             && !START_MARKER.starts_with(&self.buf)
+                            && self.buf.last().is_some_and(|byte| (0x40..=0x7e).contains(byte))
                         {
                             break;
                         }
@@ -279,6 +280,10 @@ impl<R: Read> EventReader<R> {
 
                     self.buf.remove(0);
                     return Ok(Event::Abort);
+                }
+                0x0d | 0x0a => {
+                    self.buf.remove(0);
+                    return Ok(Event::Enter);
                 }
                 _ => {
                     self.buf.remove(0);
@@ -550,6 +555,27 @@ mod tests {
     }
 
     #[test]
+    fn page_navigation_sequences_split_across_reads() {
+        struct OneByteReader<'a>(&'a [u8]);
+        impl<'a> Read for OneByteReader<'a> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.0.is_empty() || buf.is_empty() {
+                    return Ok(0);
+                }
+                buf[0] = self.0[0];
+                self.0 = &self.0[1..];
+                Ok(1)
+            }
+        }
+
+        let raw = b"\x1b[5~\x1b[6~";
+        let mut reader = EventReader::new(OneByteReader(raw));
+        assert_eq!(reader.next_event().unwrap(), Event::PageUp);
+        assert_eq!(reader.next_event().unwrap(), Event::PageDown);
+        assert_eq!(reader.next_event().unwrap(), Event::Eof);
+    }
+
+    #[test]
     fn unterminated_paste_returns_error_event() {
         let raw = b"\x1b[200~unterminated paste payload without end";
         let mut reader = EventReader::new(Cursor::new(raw.to_vec()));
@@ -583,10 +609,26 @@ mod tests {
             0x03,                 // Abort (Ctrl+C)
             b'q',                 // Abort (q)
             b' ',                 // Space
+            b'\r',                // Enter (CR)
+            b'\n',                // Enter (LF)
             0x1b, b'[', b'D',     // Left
             0x1b, b'O', b'D',     // Left
             0x1b, b'[', b'C',     // Right
             0x1b, b'O', b'C',     // Right
+            0x1b, b'[', b'A',     // Up
+            0x1b, b'O', b'A',     // Up
+            0x1b, b'[', b'B',     // Down
+            0x1b, b'O', b'B',     // Down
+            0x1b, b'[', b'H',     // Home
+            0x1b, b'O', b'H',     // Home
+            0x1b, b'[', b'1', b'~', // Home
+            0x1b, b'[', b'7', b'~', // Home
+            0x1b, b'[', b'F',     // End
+            0x1b, b'O', b'F',     // End
+            0x1b, b'[', b'4', b'~', // End
+            0x1b, b'[', b'8', b'~', // End
+            0x1b, b'[', b'5', b'~', // PageUp
+            0x1b, b'[', b'6', b'~', // PageDown
             b'z',                 // Other
         ];
 
@@ -596,10 +638,26 @@ mod tests {
         assert_eq!(reader.next_event().unwrap(), Event::Abort);
         assert_eq!(reader.next_event().unwrap(), Event::Abort);
         assert_eq!(reader.next_event().unwrap(), Event::Space);
+        assert_eq!(reader.next_event().unwrap(), Event::Enter);
+        assert_eq!(reader.next_event().unwrap(), Event::Enter);
         assert_eq!(reader.next_event().unwrap(), Event::Left);
         assert_eq!(reader.next_event().unwrap(), Event::Left);
         assert_eq!(reader.next_event().unwrap(), Event::Right);
         assert_eq!(reader.next_event().unwrap(), Event::Right);
+        assert_eq!(reader.next_event().unwrap(), Event::Up);
+        assert_eq!(reader.next_event().unwrap(), Event::Up);
+        assert_eq!(reader.next_event().unwrap(), Event::Down);
+        assert_eq!(reader.next_event().unwrap(), Event::Down);
+        assert_eq!(reader.next_event().unwrap(), Event::Home);
+        assert_eq!(reader.next_event().unwrap(), Event::Home);
+        assert_eq!(reader.next_event().unwrap(), Event::Home);
+        assert_eq!(reader.next_event().unwrap(), Event::Home);
+        assert_eq!(reader.next_event().unwrap(), Event::End);
+        assert_eq!(reader.next_event().unwrap(), Event::End);
+        assert_eq!(reader.next_event().unwrap(), Event::End);
+        assert_eq!(reader.next_event().unwrap(), Event::End);
+        assert_eq!(reader.next_event().unwrap(), Event::PageUp);
+        assert_eq!(reader.next_event().unwrap(), Event::PageDown);
         assert_eq!(reader.next_event().unwrap(), Event::Other);
         assert_eq!(reader.next_event().unwrap(), Event::Eof);
     }
