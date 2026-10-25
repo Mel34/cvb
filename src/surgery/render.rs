@@ -1598,6 +1598,32 @@ mod tests {
     }
 
     #[test]
+    fn test_review_visibility_removed_tab_is_preserved() {
+        let old = b"\tprintln!(\"indent\");\n";
+        let new = b"    println!(\"indent\");\n";
+
+        let diff = render_file_diff("test.rs", old, new, RenderOptions::default());
+
+        assert!(
+            diff.lines().any(|line| line == "-\tprintln!(\"indent\");"),
+            "removed tab indentation must remain visible in the diff, got:\n{diff}"
+        );
+    }
+
+    #[test]
+    fn test_review_visibility_added_trailing_space_is_preserved() {
+        let old = b"let x = 1;\n";
+        let new = b"let x = 1; \n";
+
+        let diff = render_file_diff("test.rs", old, new, RenderOptions::default());
+
+        assert!(
+            diff.lines().any(|line| line.starts_with("+let x = 1;") && line.ends_with(' ')),
+            "added trailing space must remain visible in the diff, got:\n{diff}"
+        );
+    }
+
+    #[test]
     fn test_review_visibility_removed_bidi_override() {
         let old = "let text = \"abc\u{202e}\";\n";
         let new = "let text = \"abc\";\n";
