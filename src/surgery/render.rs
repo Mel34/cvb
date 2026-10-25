@@ -1643,6 +1643,14 @@ mod tests {
     }
 
     #[test]
+    fn test_review_markers_tab_only_line_has_both_markers() {
+        assert_eq!(
+            compute_line_markers("\t"),
+            vec![MARKER_TAB_INDENT, MARKER_TRAILING_WHITESPACE]
+        );
+    }
+
+    #[test]
     fn test_review_markers_accumulate_on_one_line() {
         let markers = compute_line_markers("\tvalue\u{200b}\u{202e}\u{1} ");
 
