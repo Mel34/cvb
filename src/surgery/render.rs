@@ -648,6 +648,45 @@ mod tests {
             "escaped added line must be attributed to its operation, got:\n{diff}"
         );
     }
+
+    #[test]
+    fn test_review_visibility_removed_zero_width() {
+        let old = "let msg = \"hello\u{200b}\";\n";
+        let new = "let msg = \"hello\";\n";
+
+        let plan = Plan {
+            token: String::new(),
+            id: String::new(),
+            digest: String::new(),
+            files: vec![crate::surgery::PlannedFile {
+                path: "test.rs".to_owned(),
+                original: old.to_owned(),
+                original_digest: String::new(),
+                proposed: new.to_owned(),
+                proposed_digest: String::new(),
+                operations: vec![crate::surgery::Operation::Replace {
+                    start: 1,
+                    end: 1,
+                    old: vec!["let msg = \"hello\u{200b}\";".to_owned()],
+                    new: vec!["let msg = \"hello\";".to_owned()],
+                }],
+            }],
+        };
+        let diff = render_plan_diff(&plan, RenderOptions::default());
+
+        assert!(
+            diff.contains(MARKER_ZERO_WIDTH),
+            "removing zero-width char must show {MARKER_ZERO_WIDTH} in notes, got:\n{diff}"
+        );
+        assert!(
+            diff.contains("-let msg = \"hello\\u{200b}\";"),
+            "removed zero-width char must be displayed as an escape sequence, got:\n{diff}"
+        );
+        assert!(
+            diff.contains("op 1 L1 -: shown escaped"),
+            "removed escaped line must be attributed to operation 1, got:\n{diff}"
+        );
+    }
     #[test]
     fn test_review_visibility_control_character() {
         let old = "let value = \"safe\";\n";
