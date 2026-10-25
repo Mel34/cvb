@@ -480,6 +480,51 @@ pub(crate) fn plan_envelope_with_choices(
             }
         }
 
+        let operation_start = |operation: &Operation| match operation {
+            Operation::Replace { start, .. }
+            | Operation::Delete { start, .. }
+            | Operation::Insert { start, .. } => *start,
+        };
+        let same_expected = |a: &Operation, b: &Operation| {
+            let a_expected = match a {
+                Operation::Replace { old, .. } | Operation::Delete { old, .. } => old,
+                Operation::Insert { anchor, .. } => anchor,
+            };
+            let b_expected = match b {
+                Operation::Replace { old, .. } | Operation::Delete { old, .. } => old,
+                Operation::Insert { anchor, .. } => anchor,
+            };
+            a_expected == b_expected
+        };
+
+        for i in 0..resolved_operations.len() {
+            for j in (i + 1)..resolved_operations.len() {
+                let original_a = &section.operations[i];
+                let original_b = &section.operations[j];
+                let resolved_a = &resolved_operations[i];
+                let resolved_b = &resolved_operations[j];
+
+                let relocated_a =
+                    operation_start(original_a) != operation_start(resolved_a);
+                let relocated_b =
+                    operation_start(original_b) != operation_start(resolved_b);
+
+                if same_expected(original_a, original_b) && (relocated_a || relocated_b)
+                {
+                    return Err(PlanFailure {
+                        kind: PlanError::AmbiguousMatches,
+                        path: section.path.clone(),
+                        op_index: i + 1,
+                        detail: Some(PlanDetail::Other(format!(
+                            "operations {} and {} have identical expected blocks; relocation of either operation is unsupported",
+                            i + 1,
+                            j + 1
+                        ))),
+                    });
+                }
+            }
+        }
+
         let mut edits: Vec<(usize, usize, &Operation)> = Vec::new();
 
         for (op_idx, operation) in resolved_operations.iter().enumerate() {
@@ -1004,6 +1049,71 @@ mod tests {
         [("example.txt".to_owned(), contents.to_owned())]
             .into_iter()
             .collect()
+    }
+
+    #[test]
+    fn identical_expected_blocks_reject_relocation_and_name_both_operations() {
+        let envelope = make_envelope(vec![
+            Operation::Replace {
+                start: 1,
+                end: 1,
+                old: vec!["target".to_owned()],
+                new: vec!["first replacement".to_owned()],
+            },
+            Operation::Replace {
+                start: 4,
+                end: 4,
+                old: vec!["target".to_owned()],
+                new: vec!["second replacement".to_owned()],
+            },
+        ]);
+        let original = originals("one\ntarget\nthree\ntarget\nfive\n");
+        let choices = [
+            ((String::from("example.txt"), 1), 2usize),
+            ((String::from("example.txt"), 2), 4usize),
+        ]
+        .into_iter()
+        .collect();
+
+        let failure = plan_envelope_with_choices(&envelope, &original, &choices).unwrap_err();
+        let message = failure.to_string();
+
+        assert_eq!(failure.kind, PlanError::AmbiguousMatches);
+        assert!(message.contains("operations 1 and 2"), "{message}");
+        assert!(message.contains("identical expected blocks"), "{message}");
+        assert!(message.contains("relocation"), "{message}");
+    }
+
+    #[test]
+    fn identical_expected_blocks_without_relocation_remain_allowed() {
+        let envelope = make_envelope(vec![
+            Operation::Replace {
+                start: 2,
+                end: 2,
+                old: vec!["target".to_owned()],
+                new: vec!["first replacement".to_owned()],
+            },
+            Operation::Replace {
+                start: 4,
+                end: 4,
+                old: vec!["target".to_owned()],
+                new: vec!["second replacement".to_owned()],
+            },
+        ]);
+        let original = originals("one\ntarget\nthree\ntarget\nfive\n");
+        let choices = [
+            ((String::from("example.txt"), 1), 2usize),
+            ((String::from("example.txt"), 2), 4usize),
+        ]
+        .into_iter()
+        .collect();
+
+        let plan = plan_envelope_with_choices(&envelope, &original, &choices).unwrap();
+
+        assert_eq!(
+            plan.files[0].proposed,
+            "one\nfirst replacement\nthree\nsecond replacement\nfive\n"
+        );
     }
 
     #[test]
