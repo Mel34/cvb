@@ -1872,6 +1872,7 @@ mod tests {
 
         assert!(second_context.contains("line 6\n"));
         assert!(second_context.contains("line 10\n"));
+        assert!(second_context.contains(">    10 | line 10"));
         assert!(!second_context.contains("line 5\n"));
     }
 
