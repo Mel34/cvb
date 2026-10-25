@@ -683,6 +683,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_review_visibility_removed_control_character() {
+        let old = "let value = \"hidden\u{0085}\";\n";
+        let new = "let value = \"safe\";\n";
+
+        let plan = Plan {
+            token: String::new(),
+            id: String::new(),
+            digest: String::new(),
+            files: vec![crate::surgery::PlannedFile {
+                path: "test.rs".to_owned(),
+                original: old.to_owned(),
+                original_digest: String::new(),
+                proposed: new.to_owned(),
+                proposed_digest: String::new(),
+                operations: vec![Operation::Replace {
+                    start: 1,
+                    end: 1,
+                    old: vec!["let value = \"hidden\u{0085}\";".to_owned()],
+                    new: vec!["let value = \"safe\";".to_owned()],
+                }],
+            }],
+        };
+        let diff = render_plan_diff(&plan, RenderOptions::default());
+
+        assert!(
+            diff.contains(MARKER_CONTROL),
+            "removing U+0085 must show {MARKER_CONTROL} in review notes, got:\n{diff}"
+        );
+        assert!(
+            diff.contains("-let value = \"hidden\\u{85}\";"),
+            "removed U+0085 must be displayed as an escape sequence, got:\n{diff}"
+        );
+        assert!(
+            diff.contains("op 1 L1 -: shown escaped"),
+            "removed escaped line must be attributed to operation 1, got:\n{diff}"
+        );
+    }
+
 
     #[test]
     fn test_operation_numbers_for_insert_before_and_after() {
