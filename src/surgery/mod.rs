@@ -881,6 +881,19 @@ fn choose_ambiguous_match<R: std::io::Read>(
     }
 }
 
+fn format_applied_outcome(id: &str, plan: &Plan) -> String {
+    let mut outcome = format!("CVB surgery APPLIED id={id} files={}\n", plan.files.len());
+
+    for file in &plan.files {
+        if let Some(line_map) = render_line_map(file) {
+            outcome.push_str(&line_map);
+            outcome.push('\n');
+        }
+    }
+
+    outcome
+}
+
 fn run_surgery_mode(root: std::path::PathBuf, session_token: String) -> i32 {
     use std::io::Write as _;
     use crate::surgery::keys::{Event, EventReader, SurgeryTerminalGuard};
@@ -1196,11 +1209,7 @@ fn run_surgery_mode(root: std::path::PathBuf, session_token: String) -> i32 {
 
                     match apply_plan(&project_state, &plan) {
                         Ok(_) => {
-                            let outcome = format!(
-                                "CVB surgery APPLIED id={} files={}\n",
-                                envelope.id,
-                                plan.files.len()
-                            );
+                            let outcome = format_applied_outcome(&envelope.id, &plan);
                             if let Err(send_error) = control.send(&ControlMessage::SurgeryEnd {
                                 status: 0,
                                 outcome: outcome.clone(),
@@ -1654,11 +1663,7 @@ pub(crate) fn run(
     match apply_plan(&state, &plan) {
         Ok(_) => {
             if let Some(ref mut c) = control {
-                let outcome = format!(
-                    "CVB surgery APPLIED id={} files={}\n",
-                    envelope.id,
-                    plan.files.len()
-                );
+                let outcome = format_applied_outcome(&envelope.id, &plan);
                 if let Err(send_error) =
                     c.send(&crate::control::ControlMessage::SurgeryEnd {
                         status: 0,
