@@ -1772,6 +1772,64 @@ mod tests {
     }
 
     #[test]
+    fn applied_outcome_reports_only_files_with_line_maps() {
+        let plan = Plan {
+            token: String::new(),
+            id: "test-id".to_string(),
+            digest: String::new(),
+            files: vec![
+                PlannedFile {
+                    path: "shift.rs".to_string(),
+                    original: "a\nb\n".to_string(),
+                    original_digest: String::new(),
+                    proposed: "a\nx\nb\n".to_string(),
+                    proposed_digest: String::new(),
+                    operations: vec![Operation::Insert {
+                        position: InsertPosition::Before,
+                        start: 2,
+                        end: 2,
+                        anchor: vec!["b".to_string()],
+                        new: vec!["x".to_string()],
+                    }],
+                },
+                PlannedFile {
+                    path: "same-length.rs".to_string(),
+                    original: "old\n".to_string(),
+                    original_digest: String::new(),
+                    proposed: "new\n".to_string(),
+                    proposed_digest: String::new(),
+                    operations: vec![Operation::Replace {
+                        start: 1,
+                        end: 1,
+                        old: vec!["old".to_string()],
+                        new: vec!["new".to_string()],
+                    }],
+                },
+                PlannedFile {
+                    path: "deleted.rs".to_string(),
+                    original: "a\nb\n".to_string(),
+                    original_digest: String::new(),
+                    proposed: "a\n".to_string(),
+                    proposed_digest: String::new(),
+                    operations: vec![Operation::Delete {
+                        start: 2,
+                        end: 2,
+                        old: vec!["b".to_string()],
+                    }],
+                },
+            ],
+        };
+
+        let outcome = format_applied_outcome("test-id", &plan);
+
+        assert!(outcome.starts_with("CVB surgery APPLIED id=test-id files=3\n"));
+        assert!(outcome.contains("shift.rs: line map"));
+        assert!(outcome.contains("deleted.rs: line map"));
+        assert!(!outcome.contains("same-length.rs: line map"));
+        assert!(outcome.ends_with('\n'));
+    }
+
+    #[test]
     fn startup_terminal_entry_failure_sends_surgery_end() {
         let (control, mut peer) = control_pair();
         let (reader, _writer) = nix::unistd::pipe().expect("pipe must succeed");
