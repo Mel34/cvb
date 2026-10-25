@@ -1629,6 +1629,12 @@ mod tests {
     }
 
     #[test]
+    fn test_review_markers_trailing_tab_is_not_indent() {
+        let markers = compute_line_markers("value\t");
+        assert_eq!(markers, vec![MARKER_TRAILING_WHITESPACE]);
+    }
+
+    #[test]
     fn test_review_markers_accumulate_on_one_line() {
         let markers = compute_line_markers("\tvalue\u{200b}\u{202e}\u{1} ");
 
