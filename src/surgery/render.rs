@@ -1624,6 +1624,22 @@ mod tests {
     }
 
     #[test]
+    fn test_review_markers_accumulate_on_one_line() {
+        let markers = compute_line_markers("\tvalue\u{200b}\u{202e}\u{1} ");
+
+        assert_eq!(
+            markers,
+            vec![
+                MARKER_TAB_INDENT,
+                MARKER_TRAILING_WHITESPACE,
+                MARKER_ZERO_WIDTH,
+                MARKER_BIDI,
+                MARKER_CONTROL,
+            ]
+        );
+    }
+
+    #[test]
     fn test_review_visibility_removed_bidi_override() {
         let old = "let text = \"abc\u{202e}\";\n";
         let new = "let text = \"abc\";\n";
