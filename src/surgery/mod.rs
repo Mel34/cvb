@@ -758,10 +758,37 @@ fn start_surgery(
     Ok((guard, tty))
 }
 
+fn format_ambiguity_report(
+    path: &str,
+    op_index: usize,
+    hint: usize,
+    candidates: &[usize],
+    lines: &[&str],
+) -> String {
+    let mut report = format!(
+        "CVB ambiguity report\nFile: {path}\nOperation: {op_index}\nHint line: {hint}\nCandidates (in proximity order):\n"
+    );
+
+    for (index, candidate) in candidates.iter().enumerate() {
+        report.push_str(&format!("\n{}. Line {}\n", index + 1, candidate));
+        let start = candidate.saturating_sub(4).max(1);
+        let end = candidate.saturating_add(3).min(lines.len());
+        for number in start..=end {
+            let marker = if number == *candidate { ">" } else { " " };
+            if let Some(line) = lines.get(number - 1) {
+                report.push_str(&format!("{marker} {number:>5} | {line}\n"));
+            }
+        }
+    }
+
+    report
+}
+
 fn choose_ambiguous_match<R: std::io::Read>(
     root: &Path,
     reader: &mut crate::surgery::keys::EventReader<R>,
     failure: &PlanFailure,
+    control: &crate::control::ControlChannel,
 ) -> Result<Option<usize>, String> {
     use crate::surgery::mode::{ChooserState, ChooserTransition};
     use std::io::Write as _;
@@ -777,6 +804,11 @@ fn choose_ambiguous_match<R: std::io::Read>(
     if lines.is_empty() {
         return Err(format!("CVB: chooser target is empty: {}", failure.path));
     }
+
+    let report = format_ambiguity_report(&failure.path, failure.op_index, hint, &candidates, &lines);
+    control
+        .send(&crate::control::ControlMessage::ClipboardWrite { text: report })
+        .map_err(|error| format!("CVB: unable to copy ambiguity report: {error}"))?;
 
     let suggested_index = candidates.iter().position(|line| *line == hint).unwrap_or(0);
     let mut chooser = ChooserState::new(candidates, suggested_index)
@@ -980,7 +1012,7 @@ fn run_surgery_mode(root: std::path::PathBuf, session_token: String) -> i32 {
                                         &failure.detail,
                                         Some(PlanDetail::AmbiguousMatches { .. })
                                     ) {
-                                        match choose_ambiguous_match(&root, &mut reader, &failure) {
+                                        match choose_ambiguous_match(&root, &mut reader, &failure, &control) {
                                             Ok(Some(line)) => {
                                                 choices.insert(
                                                     (failure.path.clone(), failure.op_index),
