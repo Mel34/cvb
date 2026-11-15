@@ -1071,6 +1071,96 @@ mod tests {
         let _ = fs::remove_dir_all(base);
     }
 
+    /// Characterization test: the order of commit steps for a two-file update.
+    /// Crash-point tests and any later extension depend on this sequence.
+    #[test]
+    fn test_commit_hook_sequence_for_two_file_update() {
+        let base = std::env::temp_dir().join(format!("cvb-commit-seq-{}", std::process::id()));
+        let state_dir = base.join("state");
+        let project_dir = base.join("project");
+
+        if base.exists() {
+            let _ = fs::remove_dir_all(&base);
+        }
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(project_dir.join("a.txt"), "orig a\n").unwrap();
+        fs::write(project_dir.join("b.txt"), "orig b\n").unwrap();
+
+        let state = init_project_state(&state_dir, &project_dir).unwrap();
+        let plan = make_test_plan(
+            "seq-commit",
+            vec![
+                ("a.txt", "orig a\n", "prop a\n"),
+                ("b.txt", "orig b\n", "prop b\n"),
+            ],
+        );
+
+        let mut seen = Vec::new();
+        let journal = commit_plan_with_hook(&state, &plan, |point| {
+            seen.push(point);
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(journal.state, JournalState::Committed);
+        assert_eq!(
+            seen,
+            vec![
+                CommitCrashPoint::JournalPrepared,
+                CommitCrashPoint::TempWrite(0),
+                CommitCrashPoint::TempWrite(1),
+                CommitCrashPoint::BeforeRename(0),
+                CommitCrashPoint::Rename(0),
+                CommitCrashPoint::BeforeRename(1),
+                CommitCrashPoint::Rename(1),
+                CommitCrashPoint::ReadBack,
+                CommitCrashPoint::Committed,
+            ]
+        );
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// Characterization test: a successful commit leaves exactly the target
+    /// files in the project, with no temporary or backup files behind.
+    #[test]
+    fn test_commit_plan_leaves_no_stray_files() {
+        let base = std::env::temp_dir().join(format!("cvb-commit-clean-{}", std::process::id()));
+        let state_dir = base.join("state");
+        let project_dir = base.join("project");
+
+        if base.exists() {
+            let _ = fs::remove_dir_all(&base);
+        }
+        fs::create_dir_all(project_dir.join("src")).unwrap();
+        fs::write(project_dir.join("src").join("a.rs"), "orig a\n").unwrap();
+        fs::write(project_dir.join("b.txt"), "orig b\n").unwrap();
+
+        let state = init_project_state(&state_dir, &project_dir).unwrap();
+        let plan = make_test_plan(
+            "clean-commit",
+            vec![
+                ("src/a.rs", "orig a\n", "prop a\n"),
+                ("b.txt", "orig b\n", "prop b\n"),
+            ],
+        );
+        commit_plan(&state, &plan).unwrap();
+
+        fn names(dir: &std::path::Path) -> Vec<String> {
+            let mut names: Vec<String> = fs::read_dir(dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        }
+
+        assert_eq!(names(&project_dir), vec!["b.txt", "src"]);
+        assert_eq!(names(&project_dir.join("src")), vec!["a.rs"]);
+
+        let _ = fs::remove_dir_all(base);
+    }
+
     #[cfg(unix)]
     #[test]
     fn test_commit_plan_preserves_file_permissions() {

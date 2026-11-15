@@ -721,6 +721,77 @@ mod tests {
 
         assert_eq!(decoded, journal);
     }
+
+    /// Characterization test: pins the exact on-disk journal layout so that
+    /// later extensions cannot change the bytes written for ordinary edits.
+    /// The expected bytes are assembled by hand from the documented layout:
+    /// magic, state, then length-prefixed id and root, dev, ino, the file
+    /// count and, per file, length-prefixed path and two digests followed by
+    /// a u64-prefixed original byte string. Nothing follows the last entry.
+    #[test]
+    fn test_journal_encoding_is_byte_stable() {
+        let journal = Journal {
+            state: JournalState::Prepared,
+            id: "tx1".to_string(),
+            canonical_root: PathBuf::from("/r"),
+            dev: 7,
+            ino: 9,
+            files: vec![JournalFileEntry {
+                path: "a.rs".to_string(),
+                original_digest: "aa".to_string(),
+                planned_digest: "bb".to_string(),
+                original_bytes: b"old\n".to_vec(),
+            }],
+        };
+
+        let mut expected: Vec<u8> = Vec::new();
+        expected.extend_from_slice(b"CVBJRNL1");
+        expected.push(1);
+        expected.extend_from_slice(&3u32.to_le_bytes());
+        expected.extend_from_slice(b"tx1");
+        expected.extend_from_slice(&2u32.to_le_bytes());
+        expected.extend_from_slice(b"/r");
+        expected.extend_from_slice(&7u64.to_le_bytes());
+        expected.extend_from_slice(&9u64.to_le_bytes());
+        expected.extend_from_slice(&1u32.to_le_bytes());
+        expected.extend_from_slice(&4u32.to_le_bytes());
+        expected.extend_from_slice(b"a.rs");
+        expected.extend_from_slice(&2u32.to_le_bytes());
+        expected.extend_from_slice(b"aa");
+        expected.extend_from_slice(&2u32.to_le_bytes());
+        expected.extend_from_slice(b"bb");
+        expected.extend_from_slice(&4u64.to_le_bytes());
+        expected.extend_from_slice(b"old\n");
+
+        assert_eq!(encode_journal(&journal), expected);
+        assert_eq!(decode_journal(&expected).unwrap(), journal);
+    }
+
+    /// Characterization test: the decoder ignores bytes after the last entry.
+    /// A later journal extension relies on this to append optional data that
+    /// older readers skip.
+    #[test]
+    fn test_journal_decoder_ignores_trailing_bytes() {
+        let journal = Journal {
+            state: JournalState::Committed,
+            id: "tx2".to_string(),
+            canonical_root: PathBuf::from("/r"),
+            dev: 1,
+            ino: 2,
+            files: vec![JournalFileEntry {
+                path: "b.rs".to_string(),
+                original_digest: "cc".to_string(),
+                planned_digest: "dd".to_string(),
+                original_bytes: b"x".to_vec(),
+            }],
+        };
+
+        let mut encoded = encode_journal(&journal);
+        encoded.extend_from_slice(b"\x01\x02optional trailing data");
+
+        assert_eq!(decode_journal(&encoded).unwrap(), journal);
+    }
+
     #[test]
     fn test_journal_directory_sync_failure_propagates_after_rename() {
         let base = std::env::temp_dir().join(format!(
