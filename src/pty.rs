@@ -264,7 +264,7 @@ mod transcript_tests {
 
         assert_eq!(
             rendered,
-            b"[Terminal output]\n--------\nRED\n[file.txt]\n--------\n\x1b[31mRAW\x1b[0m\n[Terminal output]\n--------\nNEXT\n"
+            b"[Terminal output]\nRED\n[file.txt]\n--------\n\x1b[31mRAW\x1b[0m\n[Terminal output]\nNEXT\n"
         );
     }
 
@@ -306,7 +306,7 @@ mod transcript_tests {
 
         assert_eq!(
             render_transcript(&transcript, 24, 80),
-            b"[Command produced no visible output]"
+            b"[NO_VISIBLE_OUTPUT]"
         );
     }
 
