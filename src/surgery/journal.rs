@@ -360,6 +360,112 @@ pub(crate) fn encode_journal(journal: &Journal) -> Vec<u8> {
 }
 
 pub(crate) fn decode_journal(data: &[u8]) -> Result<Journal, JournalError> {
+    decode_journal_prefix(data).map(|(journal, _consumed)| journal)
+}
+
+/// Magic that introduces the optional extension block after the last file entry.
+const EXT_MAGIC: &[u8; 8] = b"CVBXTRA1";
+
+/// Extra per-file data a journal can carry for transactions that create or
+/// delete files. Surgery's ordinary edits never write it, so their journals
+/// stay byte-for-byte what they have always been.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct JournalExt {
+    /// Empty (no block is written) or exactly one entry per journal file.
+    pub entries: Vec<EntryExt>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct EntryExt {
+    /// Permission bits of a file that is about to be deleted, so that a
+    /// rollback can recreate it with the same mode.
+    pub mode: u32,
+    /// Directories this transaction may create for an added file, shallowest
+    /// first. A rollback removes them again, deepest first, if they are empty.
+    pub created_dirs: Vec<String>,
+}
+
+impl JournalExt {
+    /// The extension of file `index`, or the default when the journal has none.
+    pub(crate) fn entry(&self, index: usize) -> EntryExt {
+        self.entries.get(index).cloned().unwrap_or_default()
+    }
+}
+
+/// Encodes `journal`, followed by the extension block when `ext` has entries.
+pub(crate) fn encode_journal_with_ext(journal: &Journal, ext: &JournalExt) -> Vec<u8> {
+    let mut buf = encode_journal(journal);
+    if ext.entries.is_empty() {
+        return buf;
+    }
+
+    buf.extend_from_slice(EXT_MAGIC);
+    buf.extend_from_slice(&(ext.entries.len() as u32).to_le_bytes());
+    for entry in &ext.entries {
+        buf.extend_from_slice(&entry.mode.to_le_bytes());
+        buf.extend_from_slice(&(entry.created_dirs.len() as u32).to_le_bytes());
+        for dir in &entry.created_dirs {
+            let bytes = dir.as_bytes();
+            buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            buf.extend_from_slice(bytes);
+        }
+    }
+    buf
+}
+
+/// Decodes a journal and its optional extension block. Bytes after the last
+/// file entry that do not start with the extension magic are ignored, exactly
+/// as `decode_journal` has always done.
+pub(crate) fn decode_journal_with_ext(data: &[u8]) -> Result<(Journal, JournalExt), JournalError> {
+    let (journal, consumed) = decode_journal_prefix(data)?;
+    let rest = &data[consumed..];
+    if !rest.starts_with(EXT_MAGIC) {
+        return Ok((journal, JournalExt::default()));
+    }
+
+    let mut cursor = EXT_MAGIC.len();
+    let take = |cursor: &mut usize, len: usize, desc: &'static str| -> Result<&[u8], JournalError> {
+        if *cursor + len > rest.len() {
+            return Err(JournalError::Truncated(desc.to_string()));
+        }
+        let slice = &rest[*cursor..*cursor + len];
+        *cursor += len;
+        Ok(slice)
+    };
+    let read_u32 = |cursor: &mut usize, desc: &'static str| -> Result<u32, JournalError> {
+        Ok(u32::from_le_bytes(take(cursor, 4, desc)?.try_into().unwrap()))
+    };
+
+    let count = read_u32(&mut cursor, "extension entry count")? as usize;
+    if count != journal.files.len() {
+        return Err(JournalError::Truncated(
+            "extension entry count does not match the file count".to_string(),
+        ));
+    }
+
+    let mut entries = Vec::with_capacity(count);
+    for _ in 0..count {
+        let mode = read_u32(&mut cursor, "extension mode")?;
+        let dir_count = read_u32(&mut cursor, "extension directory count")? as usize;
+        let mut created_dirs = Vec::new();
+        for _ in 0..dir_count {
+            let len = read_u32(&mut cursor, "extension directory length")? as usize;
+            let bytes = take(&mut cursor, len, "extension directory")?;
+            let dir = String::from_utf8(bytes.to_vec())
+                .map_err(|_| JournalError::InvalidUtf8("created directory".to_string()))?;
+            if validate_relative_path(&dir).is_err() {
+                return Err(JournalError::TamperedPath(dir));
+            }
+            created_dirs.push(dir);
+        }
+        entries.push(EntryExt { mode, created_dirs });
+    }
+
+    Ok((journal, JournalExt { entries }))
+}
+
+/// Parses a journal and reports how many bytes it occupied.
+fn decode_journal_prefix(data: &[u8]) -> Result<(Journal, usize), JournalError> {
     let mut cursor = 0;
 
     let take = |cursor: &mut usize, len: usize, desc: &'static str| -> Result<&[u8], JournalError> {
@@ -437,14 +543,17 @@ pub(crate) fn decode_journal(data: &[u8]) -> Result<Journal, JournalError> {
         });
     }
 
-    Ok(Journal {
-        state,
-        id,
-        canonical_root,
-        dev,
-        ino,
-        files,
-    })
+    Ok((
+        Journal {
+            state,
+            id,
+            canonical_root,
+            dev,
+            ino,
+            files,
+        },
+        cursor,
+    ))
 }
 
 /// Atomically writes a journal into `project_dir` under `<id>.journal` with mode 0600.
@@ -452,12 +561,27 @@ pub(crate) fn write_journal_atomic(
     project_dir: &Path,
     journal: &Journal,
 ) -> Result<PathBuf, JournalError> {
+    write_journal_with_ext_atomic(project_dir, journal, &JournalExt::default())
+}
+
+/// Like `write_journal_atomic`, and also records the extension block when `ext`
+/// has entries.
+pub(crate) fn write_journal_with_ext_atomic(
+    project_dir: &Path,
+    journal: &Journal,
+    ext: &JournalExt,
+) -> Result<PathBuf, JournalError> {
     #[cfg(unix)]
     let sync_directory = |path: &Path| fs::File::open(path)?.sync_all();
     #[cfg(not(unix))]
     let sync_directory = |_path: &Path| Ok(());
 
-    write_journal_atomic_with_dir_sync(project_dir, journal, sync_directory)
+    write_journal_bytes_atomic_with_dir_sync(
+        project_dir,
+        &journal.id,
+        encode_journal_with_ext(journal, ext),
+        sync_directory,
+    )
 }
 
 fn write_journal_atomic_with_dir_sync<F>(
@@ -468,13 +592,28 @@ fn write_journal_atomic_with_dir_sync<F>(
 where
     F: FnOnce(&Path) -> std::io::Result<()>,
 {
+    write_journal_bytes_atomic_with_dir_sync(
+        project_dir,
+        &journal.id,
+        encode_journal(journal),
+        sync_directory,
+    )
+}
+
+fn write_journal_bytes_atomic_with_dir_sync<F>(
+    project_dir: &Path,
+    id: &str,
+    encoded: Vec<u8>,
+    sync_directory: F,
+) -> Result<PathBuf, JournalError>
+where
+    F: FnOnce(&Path) -> std::io::Result<()>,
+{
     #[cfg(unix)]
     use std::os::unix::fs::OpenOptionsExt;
 
-    let target_path = project_dir.join(format!("{}.journal", journal.id));
-    let temp_path = project_dir.join(format!(".journal.{}.tmp.{}", journal.id, std::process::id()));
-
-    let encoded = encode_journal(journal);
+    let target_path = project_dir.join(format!("{id}.journal"));
+    let temp_path = project_dir.join(format!(".journal.{id}.tmp.{}", std::process::id()));
 
     let mut options = fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
@@ -512,6 +651,18 @@ pub(crate) fn transition_journal_state(
 pub(crate) fn read_journal(path: &Path) -> Result<Journal, JournalError> {
     let bytes = fs::read(path).map_err(|e| JournalError::Io(e.to_string()))?;
     decode_journal(&bytes)
+}
+
+/// Reads the extension block of journal `id` in `project_dir`. A journal that
+/// does not exist, or has no extension block, yields an empty extension.
+pub(crate) fn read_journal_ext(project_dir: &Path, id: &str) -> Result<JournalExt, JournalError> {
+    let path = project_dir.join(format!("{id}.journal"));
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(JournalExt::default()),
+        Err(e) => return Err(JournalError::Io(e.to_string())),
+    };
+    decode_journal_with_ext(&bytes).map(|(_journal, ext)| ext)
 }
 
 /// Lists all journals found in `project_dir`.
@@ -1004,4 +1155,163 @@ mod tests {
         let _ = fs::remove_dir_all(base);
     }
 
+    fn sample_journal_with_two_files() -> Journal {
+        let entry = |path: &str| JournalFileEntry {
+            path: path.to_string(),
+            original_digest: "aa".to_string(),
+            planned_digest: "bb".to_string(),
+            original_bytes: b"old\n".to_vec(),
+        };
+        Journal {
+            state: JournalState::Prepared,
+            id: "ext-test".to_string(),
+            canonical_root: PathBuf::from("/r"),
+            dev: 3,
+            ino: 4,
+            files: vec![entry("new/added.txt"), entry("gone.sh")],
+        }
+    }
+
+    fn sample_ext() -> JournalExt {
+        JournalExt {
+            entries: vec![
+                EntryExt {
+                    mode: 0,
+                    created_dirs: vec!["new".to_string(), "new/sub".to_string()],
+                },
+                EntryExt {
+                    mode: 0o750,
+                    created_dirs: Vec::new(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn test_journal_extension_roundtrips() {
+        let journal = sample_journal_with_two_files();
+        let ext = sample_ext();
+
+        let encoded = encode_journal_with_ext(&journal, &ext);
+        let (decoded, decoded_ext) = decode_journal_with_ext(&encoded).unwrap();
+
+        assert_eq!(decoded, journal);
+        assert_eq!(decoded_ext, ext);
+        // The plain decoder still reads the same journal and ignores the block.
+        assert_eq!(decode_journal(&encoded).unwrap(), journal);
+    }
+
+    #[test]
+    fn test_empty_extension_leaves_the_journal_bytes_unchanged() {
+        let journal = sample_journal_with_two_files();
+        assert_eq!(
+            encode_journal_with_ext(&journal, &JournalExt::default()),
+            encode_journal(&journal)
+        );
+    }
+
+    #[test]
+    fn test_journal_without_extension_decodes_to_an_empty_one() {
+        let journal = sample_journal_with_two_files();
+        let (decoded, ext) = decode_journal_with_ext(&encode_journal(&journal)).unwrap();
+        assert_eq!(decoded, journal);
+        assert_eq!(ext, JournalExt::default());
+        assert_eq!(ext.entry(0), EntryExt::default());
+    }
+
+    #[test]
+    fn test_trailing_bytes_without_the_magic_are_not_an_extension() {
+        let journal = sample_journal_with_two_files();
+        let mut bytes = encode_journal(&journal);
+        bytes.extend_from_slice(b"some other trailing data");
+        let (decoded, ext) = decode_journal_with_ext(&bytes).unwrap();
+        assert_eq!(decoded, journal);
+        assert_eq!(ext, JournalExt::default());
+    }
+
+    #[test]
+    fn test_bytes_after_the_extension_are_ignored() {
+        let journal = sample_journal_with_two_files();
+        let mut bytes = encode_journal_with_ext(&journal, &sample_ext());
+        bytes.extend_from_slice(b"future data");
+        let (_, ext) = decode_journal_with_ext(&bytes).unwrap();
+        assert_eq!(ext, sample_ext());
+    }
+
+    /// Cutting the block anywhere after its magic must be an error, never a
+    /// silently shorter extension.
+    #[test]
+    fn test_truncated_extension_is_an_error_at_every_cut() {
+        let journal = sample_journal_with_two_files();
+        let plain_len = encode_journal(&journal).len();
+        let full = encode_journal_with_ext(&journal, &sample_ext());
+
+        for cut in (plain_len + EXT_MAGIC.len())..full.len() {
+            assert!(
+                decode_journal_with_ext(&full[..cut]).is_err(),
+                "a block cut at byte {cut} of {} decoded",
+                full.len()
+            );
+        }
+    }
+
+    #[test]
+    fn test_extension_with_the_wrong_entry_count_is_an_error() {
+        let journal = sample_journal_with_two_files();
+        let one_entry = JournalExt {
+            entries: vec![EntryExt::default()],
+        };
+        let bytes = encode_journal_with_ext(&journal, &one_entry);
+        assert!(matches!(
+            decode_journal_with_ext(&bytes),
+            Err(JournalError::Truncated(_))
+        ));
+    }
+
+    #[test]
+    fn test_extension_with_an_unsafe_directory_is_refused() {
+        let journal = sample_journal_with_two_files();
+        for bad in [".git/hooks", "../escape", "/abs", "a//b", ""] {
+            let ext = JournalExt {
+                entries: vec![
+                    EntryExt {
+                        mode: 0,
+                        created_dirs: vec![bad.to_string()],
+                    },
+                    EntryExt::default(),
+                ],
+            };
+            let bytes = encode_journal_with_ext(&journal, &ext);
+            assert!(
+                matches!(
+                    decode_journal_with_ext(&bytes),
+                    Err(JournalError::TamperedPath(_))
+                ),
+                "directory {bad:?} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn test_read_journal_ext_from_disk() {
+        let base = std::env::temp_dir().join(format!("cvb-journal-ext-{}", std::process::id()));
+        if base.exists() {
+            let _ = fs::remove_dir_all(&base);
+        }
+        fs::create_dir_all(&base).unwrap();
+
+        // No journal at all: an empty extension, not an error.
+        assert_eq!(read_journal_ext(&base, "missing").unwrap(), JournalExt::default());
+
+        let journal = sample_journal_with_two_files();
+        write_journal_with_ext_atomic(&base, &journal, &sample_ext()).unwrap();
+        assert_eq!(read_journal_ext(&base, "ext-test").unwrap(), sample_ext());
+        assert_eq!(read_journal(&base.join("ext-test.journal")).unwrap(), journal);
+
+        // Rewriting without an extension (as a state transition does) drops it.
+        write_journal_atomic(&base, &journal).unwrap();
+        assert_eq!(read_journal_ext(&base, "ext-test").unwrap(), JournalExt::default());
+
+        let _ = fs::remove_dir_all(base);
+    }
 }

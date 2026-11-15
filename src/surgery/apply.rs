@@ -1,20 +1,50 @@
 use std::collections::HashSet;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
 use crate::surgery::journal::{
-    check_replay_id, find_unfinished_journal, transition_journal_state, write_journal_atomic,
-    Journal, JournalFileEntry, JournalState, ProjectState,
+    check_replay_id, find_unfinished_journal, read_journal_ext, transition_journal_state,
+    write_journal_with_ext_atomic, EntryExt, Journal, JournalExt, JournalFileEntry, JournalState,
+    ProjectState,
 };
 use crate::surgery::lock::{LockError, ProjectLock};
 use crate::surgery::validate_relative_path;
-use crate::surgery::Plan;
+use crate::surgery::{Plan, PlannedFile};
+
+/// The digest recorded for "this file does not exist". It can never equal a
+/// real SHA-256 hex digest, so a file's state is always either this sentinel
+/// or the digest of its bytes. An added file is absent before the transaction;
+/// a deleted file is absent after it.
+pub(crate) const ABSENT_DIGEST: &str = "absent";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChangeKind {
+    Update,
+    Add,
+    Delete,
+}
+
+/// The kind of change a plan entry describes, derived from its digests.
+/// `None` means the entry is absent both before and after: it changes nothing.
+pub(crate) fn change_kind(original_digest: &str, proposed_digest: &str) -> Option<ChangeKind> {
+    match (
+        original_digest == ABSENT_DIGEST,
+        proposed_digest == ABSENT_DIGEST,
+    ) {
+        (false, false) => Some(ChangeKind::Update),
+        (true, false) => Some(ChangeKind::Add),
+        (false, true) => Some(ChangeKind::Delete),
+        (true, true) => None,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CommitCrashPoint {
     JournalPrepared,
+    /// Reached only when a transaction created directories for added files.
+    DirectoriesCreated,
     TempWrite(usize),
     Rename(usize),
     BeforeRename(usize),
@@ -183,10 +213,193 @@ impl std::fmt::Display for ApplyError {
 
 impl std::error::Error for ApplyError {}
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
+fn io_err(path: &str, error: &std::io::Error) -> ApplyError {
+    ApplyError::Io {
+        path: Some(path.to_string()),
+        message: error.to_string(),
+    }
+}
+
+/// The digest of `path`'s bytes, or the absent sentinel when it does not exist.
+fn current_state_digest(path: &Path) -> std::io::Result<String> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(sha256_hex(&bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ABSENT_DIGEST.to_string()),
+        Err(e) => Err(e),
+    }
+}
+
+/// The kind of every plan entry. Plans that only edit existing files (all that
+/// surgery produces) skip every extra check here, so their behavior is unchanged.
+fn plan_kinds(plan: &Plan) -> Result<Vec<ChangeKind>, ApplyError> {
+    let mut kinds = Vec::with_capacity(plan.files.len());
+    for file in &plan.files {
+        let kind = change_kind(&file.original_digest, &file.proposed_digest).ok_or_else(|| {
+            ApplyError::Io {
+                path: Some(file.path.clone()),
+                message: "plan entry is absent both before and after, so it changes nothing"
+                    .to_string(),
+            }
+        })?;
+        kinds.push(kind);
+    }
+
+    if kinds.iter().any(|kind| *kind != ChangeKind::Update) {
+        let mut seen = HashSet::new();
+        for file in &plan.files {
+            if validate_relative_path(&file.path).is_err() {
+                return Err(ApplyError::Io {
+                    path: Some(file.path.clone()),
+                    message: "invalid or unsafe relative path".to_string(),
+                });
+            }
+            if !seen.insert(file.path.as_str()) {
+                return Err(ApplyError::Io {
+                    path: Some(file.path.clone()),
+                    message: "path appears more than once in the plan".to_string(),
+                });
+            }
+        }
+    }
+
+    Ok(kinds)
+}
+
+/// The directories an added file needs that do not exist yet, shallowest first.
+/// Every existing ancestor must be a plain directory (not a symlink, not a file).
+fn missing_parent_dirs(root: &Path, relative: &str, reported: &str) -> Result<Vec<String>, ApplyError> {
+    let segments: Vec<&str> = relative.split('/').collect();
+    let mut missing: Vec<String> = Vec::new();
+    let mut current = String::new();
+
+    for segment in &segments[..segments.len().saturating_sub(1)] {
+        if !current.is_empty() {
+            current.push('/');
+        }
+        current.push_str(segment);
+
+        if !missing.is_empty() {
+            missing.push(current.clone());
+            continue;
+        }
+        match fs::symlink_metadata(root.join(&current)) {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => {
+                return Err(ApplyError::Io {
+                    path: Some(reported.to_string()),
+                    message: format!("path component '{current}' is not a plain directory"),
+                });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => missing.push(current.clone()),
+            Err(e) => return Err(io_err(reported, &e)),
+        }
+    }
+
+    Ok(missing)
+}
+
+/// Gathers what the journal must remember beyond the ordinary per-file data: the
+/// mode of every file about to be deleted, and the directories each added file
+/// causes to be created (each directory is owned by the first entry needing it).
+/// Plans without added or deleted files get an empty extension.
+fn build_ext(
+    project_state: &ProjectState,
+    plan: &Plan,
+    kinds: &[ChangeKind],
+) -> Result<JournalExt, ApplyError> {
+    if kinds.iter().all(|kind| *kind == ChangeKind::Update) {
+        return Ok(JournalExt::default());
+    }
+
+    let mut claimed: HashSet<String> = HashSet::new();
+    let mut entries = Vec::with_capacity(plan.files.len());
+
+    for (file, kind) in plan.files.iter().zip(kinds) {
+        let mut entry = EntryExt::default();
+        let target = project_state.canonical_root.join(&file.path);
+
+        match kind {
+            ChangeKind::Update => {}
+            ChangeKind::Delete => {
+                let meta = fs::symlink_metadata(&target).map_err(|e| io_err(&file.path, &e))?;
+                if !meta.is_file() {
+                    return Err(ApplyError::Io {
+                        path: Some(file.path.clone()),
+                        message: "only a regular file can be deleted".to_string(),
+                    });
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    entry.mode = meta.permissions().mode() & 0o777;
+                }
+                #[cfg(not(unix))]
+                {
+                    entry.mode = 0o644;
+                }
+            }
+            ChangeKind::Add => {
+                for dir in missing_parent_dirs(&project_state.canonical_root, &file.path, &file.path)? {
+                    if claimed.insert(dir.clone()) {
+                        entry.created_dirs.push(dir);
+                    }
+                }
+            }
+        }
+        entries.push(entry);
+    }
+
+    Ok(JournalExt { entries })
+}
+
+/// Verifies that `file`'s target is exactly as the plan expects before the
+/// change: absent for an added file, the original digest otherwise.
+fn ensure_expected_state(
+    project_state: &ProjectState,
+    file: &PlannedFile,
+    kind: ChangeKind,
+) -> Result<(), ApplyError> {
+    let target = project_state.canonical_root.join(&file.path);
+
+    if kind == ChangeKind::Add {
+        return match fs::symlink_metadata(&target) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            // A file or symlink in place of a directory: the target is not there, and
+            // `missing_parent_dirs` reports which path component is in the way.
+            Err(e) if e.raw_os_error() == Some(libc::ENOTDIR) => Ok(()),
+            Err(e) => Err(io_err(&file.path, &e)),
+            Ok(_) => Err(ApplyError::Stale {
+                path: file.path.clone(),
+                expected_digest: ABSENT_DIGEST.to_string(),
+                actual_digest: current_state_digest(&target)
+                    .unwrap_or_else(|_| "unreadable".to_string()),
+            }),
+        };
+    }
+
+    let current_bytes = fs::read(&target).map_err(|e| io_err(&file.path, &e))?;
+    let current_digest = sha256_hex(&current_bytes);
+    if current_digest != file.original_digest {
+        return Err(ApplyError::Stale {
+            path: file.path.clone(),
+            expected_digest: file.original_digest.clone(),
+            actual_digest: current_digest,
+        });
+    }
+    Ok(())
+}
+
 /// Checks pipeline Step 4 preconditions before any mutations occur:
 /// 1. Unfinished earlier transaction (E-RECOVER)
 /// 2. Replay of previously applied surgery id (E-REPLAY)
-/// 3. Target file freshness against original plan digests (E-STALE)
+/// 3. Target file freshness against original plan digests (E-STALE); a file
+///    the plan adds must not exist yet
 pub(crate) fn check_pipeline_preconditions(
     project_state: &ProjectState,
     plan: &Plan,
@@ -213,24 +426,9 @@ pub(crate) fn check_pipeline_preconditions(
         });
     }
 
-    for file in &plan.files {
-        let full_path = project_state.canonical_root.join(&file.path);
-        let current_bytes = fs::read(&full_path).map_err(|e| ApplyError::Io {
-            path: Some(file.path.clone()),
-            message: e.to_string(),
-        })?;
-
-        let mut hasher = Sha256::new();
-        hasher.update(&current_bytes);
-        let current_digest = format!("{:x}", hasher.finalize());
-
-        if current_digest != file.original_digest {
-            return Err(ApplyError::Stale {
-                path: file.path.clone(),
-                expected_digest: file.original_digest.clone(),
-                actual_digest: current_digest,
-            });
-        }
+    let kinds = plan_kinds(plan)?;
+    for (file, kind) in plan.files.iter().zip(&kinds) {
+        ensure_expected_state(project_state, file, *kind)?;
     }
 
     Ok(())
@@ -276,6 +474,8 @@ where
     F: FnMut(CommitCrashPoint) -> Result<(), ApplyError>,
 {
     check_pipeline_preconditions(project_state, plan)?;
+    let kinds = plan_kinds(plan)?;
+    let ext = build_ext(project_state, plan, &kinds)?;
 
     let mut journal = Journal {
         state: JournalState::Prepared,
@@ -295,26 +495,62 @@ where
             .collect(),
     };
 
-    write_journal_atomic(&project_state.dir, &journal).map_err(|e| ApplyError::Io {
-        path: None,
-        message: e.to_string(),
+    write_journal_with_ext_atomic(&project_state.dir, &journal, &ext).map_err(|e| {
+        ApplyError::Io {
+            path: None,
+            message: e.to_string(),
+        }
     })?;
     hook(CommitCrashPoint::JournalPrepared)?;
 
-    let mut temp_paths = Vec::with_capacity(plan.files.len());
+    // One entry per file; `None` for a deleted file, which needs no temporary.
+    let mut temp_paths: Vec<Option<PathBuf>> = Vec::with_capacity(plan.files.len());
 
     let commit_result: Result<(), ApplyError> = (|| {
-        // Step 2: Write proposed content to temp files in each target's directory, preserving mode
+        // Create the directories that added files need. They are already recorded
+        // in the journal, so a crash from here on can remove them again.
+        let mut created_any = false;
         for (i, file) in plan.files.iter().enumerate() {
+            for dir in &ext.entry(i).created_dirs {
+                fs::create_dir(project_state.canonical_root.join(dir)).map_err(|e| {
+                    if e.kind() == std::io::ErrorKind::AlreadyExists {
+                        ApplyError::Io {
+                            path: Some(file.path.clone()),
+                            message: format!(
+                                "directory '{dir}' appeared while the transaction was being prepared"
+                            ),
+                        }
+                    } else {
+                        io_err(&file.path, &e)
+                    }
+                })?;
+                created_any = true;
+            }
+        }
+        if created_any {
+            hook(CommitCrashPoint::DirectoriesCreated)?;
+        }
+
+        // Step 2: Write proposed content to temp files in each target's directory.
+        // An updated file keeps its mode; an added file gets the mode a new file
+        // normally gets (the umask applies); a deleted file needs no temp file.
+        for (i, (file, kind)) in plan.files.iter().zip(&kinds).enumerate() {
+            if *kind == ChangeKind::Delete {
+                temp_paths.push(None);
+                hook(CommitCrashPoint::TempWrite(i))?;
+                continue;
+            }
+
             let target_path = project_state.canonical_root.join(&file.path);
             let target_dir = target_path.parent().ok_or_else(|| ApplyError::Io {
                 path: Some(file.path.clone()),
                 message: "target has no parent directory".to_string(),
             })?;
-            let meta = fs::metadata(&target_path).map_err(|e| ApplyError::Io {
-                path: Some(file.path.clone()),
-                message: e.to_string(),
-            })?;
+            let update_meta = if *kind == ChangeKind::Update {
+                Some(fs::metadata(&target_path).map_err(|e| io_err(&file.path, &e))?)
+            } else {
+                None
+            };
 
             let temp_path = target_dir.join(format!(
                 ".surgery.{}.{}.{}.tmp",
@@ -328,99 +564,97 @@ where
             {
                 use std::os::unix::fs::OpenOptionsExt;
                 use std::os::unix::fs::PermissionsExt;
-                options.mode(meta.permissions().mode() & 0o777);
+                options.mode(
+                    update_meta
+                        .as_ref()
+                        .map_or(0o666, |meta| meta.permissions().mode() & 0o777),
+                );
             }
 
-            let mut temp_file = options.open(&temp_path).map_err(|e| ApplyError::Io {
-                path: Some(file.path.clone()),
-                message: e.to_string(),
-            })?;
+            let mut temp_file = options
+                .open(&temp_path)
+                .map_err(|e| io_err(&file.path, &e))?;
             // `OpenOptions::mode` is filtered through the process umask, so a strict
             // umask (such as 077) would silently tighten the file. Set the exact
             // mode explicitly; fchmod is not subject to the umask.
             #[cfg(unix)]
-            {
+            if let Some(meta) = &update_meta {
                 use std::os::unix::fs::PermissionsExt;
                 temp_file
                     .set_permissions(fs::Permissions::from_mode(
                         meta.permissions().mode() & 0o777,
                     ))
-                    .map_err(|e| ApplyError::Io {
-                        path: Some(file.path.clone()),
-                        message: e.to_string(),
-                    })?;
+                    .map_err(|e| io_err(&file.path, &e))?;
             }
             use std::io::Write;
             temp_file
                 .write_all(file.proposed.as_bytes())
-                .map_err(|e| ApplyError::Io {
-                    path: Some(file.path.clone()),
-                    message: e.to_string(),
-                })?;
-            temp_file.sync_all().map_err(|e| ApplyError::Io {
-                path: Some(file.path.clone()),
-                message: e.to_string(),
-            })?;
+                .map_err(|e| io_err(&file.path, &e))?;
+            temp_file
+                .sync_all()
+                .map_err(|e| io_err(&file.path, &e))?;
             drop(temp_file);
-            temp_paths.push(temp_path);
+            temp_paths.push(Some(temp_path));
             hook(CommitCrashPoint::TempWrite(i))?;
         }
 
-        // Recheck every target after preparation and before the first rename.
-        for file in &plan.files {
-            let target_path = project_state.canonical_root.join(&file.path);
-            let current_bytes = fs::read(&target_path).map_err(|e| ApplyError::Io {
-                path: Some(file.path.clone()),
-                message: e.to_string(),
-            })?;
-
-            let mut hasher = Sha256::new();
-            hasher.update(&current_bytes);
-            let current_digest = format!("{:x}", hasher.finalize());
-
-            if current_digest != file.original_digest {
-                return Err(ApplyError::Stale {
-                    path: file.path.clone(),
-                    expected_digest: file.original_digest.clone(),
-                    actual_digest: current_digest,
-                });
-            }
+        // Recheck every target after preparation and before the first change.
+        for (file, kind) in plan.files.iter().zip(&kinds) {
+            ensure_expected_state(project_state, file, *kind)?;
         }
 
-        // Step 3: Per-rename digest recheck and rename
-        for (i, (file, temp_path)) in plan.files.iter().zip(&temp_paths).enumerate() {
+        // Step 3: Per-file recheck, then publish. Updated files are renamed into
+        // place; an added file is hard-linked, which fails instead of replacing a
+        // file that appeared in the meantime; a deleted file is unlinked.
+        for (i, ((file, kind), temp_path)) in
+            plan.files.iter().zip(&kinds).zip(&temp_paths).enumerate()
+        {
             let target_path = project_state.canonical_root.join(&file.path);
-            let current_bytes = fs::read(&target_path).map_err(|e| ApplyError::Io {
-                path: Some(file.path.clone()),
-                message: e.to_string(),
-            })?;
-
-            let mut hasher = Sha256::new();
-            hasher.update(&current_bytes);
-            let current_digest = format!("{:x}", hasher.finalize());
-
-            if current_digest != file.original_digest {
-                return Err(ApplyError::Stale {
-                    path: file.path.clone(),
-                    expected_digest: file.original_digest.clone(),
-                    actual_digest: current_digest,
-                });
-            }
+            ensure_expected_state(project_state, file, *kind)?;
 
             hook(CommitCrashPoint::BeforeRename(i))?;
-            fs::rename(temp_path, &target_path).map_err(|e| ApplyError::Io {
-                path: Some(file.path.clone()),
-                message: e.to_string(),
-            })?;
+            match kind {
+                ChangeKind::Update | ChangeKind::Add => {
+                    let temp = temp_path.as_ref().ok_or_else(|| ApplyError::Io {
+                        path: Some(file.path.clone()),
+                        message: "temporary file is missing".to_string(),
+                    })?;
+                    if *kind == ChangeKind::Update {
+                        fs::rename(temp, &target_path).map_err(|e| io_err(&file.path, &e))?;
+                    } else {
+                        fs::hard_link(temp, &target_path).map_err(|e| {
+                            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                                ApplyError::Stale {
+                                    path: file.path.clone(),
+                                    expected_digest: ABSENT_DIGEST.to_string(),
+                                    actual_digest: current_state_digest(&target_path)
+                                        .unwrap_or_else(|_| "unreadable".to_string()),
+                                }
+                            } else {
+                                io_err(&file.path, &e)
+                            }
+                        })?;
+                        let _ = fs::remove_file(temp);
+                    }
+                }
+                ChangeKind::Delete => {
+                    fs::remove_file(&target_path).map_err(|e| io_err(&file.path, &e))?;
+                }
+            }
             hook(CommitCrashPoint::Rename(i))?;
         }
 
         // Step 4: Fsync directories and re-read verification
         let mut parent_dirs = HashSet::new();
-        for file in &plan.files {
+        for (i, file) in plan.files.iter().enumerate() {
             let target_path = project_state.canonical_root.join(&file.path);
             if let Some(parent) = target_path.parent() {
                 parent_dirs.insert(parent.to_path_buf());
+            }
+            for dir in &ext.entry(i).created_dirs {
+                if let Some(parent) = project_state.canonical_root.join(dir).parent() {
+                    parent_dirs.insert(parent.to_path_buf());
+                }
             }
         }
         for dir in parent_dirs {
@@ -429,12 +663,23 @@ where
             }
         }
 
-        for file in &plan.files {
+        for (file, kind) in plan.files.iter().zip(&kinds) {
             let target_path = project_state.canonical_root.join(&file.path);
-            let read_back = fs::read_to_string(&target_path).map_err(|e| ApplyError::Io {
-                path: Some(file.path.clone()),
-                message: e.to_string(),
-            })?;
+            if *kind == ChangeKind::Delete {
+                match fs::symlink_metadata(&target_path) {
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Ok(_) => {
+                        return Err(ApplyError::Io {
+                            path: Some(file.path.clone()),
+                            message: "file still present after commit".to_string(),
+                        });
+                    }
+                    Err(e) => return Err(io_err(&file.path, &e)),
+                }
+                continue;
+            }
+            let read_back =
+                fs::read_to_string(&target_path).map_err(|e| io_err(&file.path, &e))?;
             if read_back != file.proposed {
                 return Err(ApplyError::Io {
                     path: Some(file.path.clone()),
@@ -453,7 +698,7 @@ where
         }
 
         // Clean up remaining temporary files
-        for temp in &temp_paths {
+        for temp in temp_paths.iter().flatten() {
             let _ = fs::remove_file(temp);
         }
 
@@ -673,22 +918,26 @@ pub(crate) fn recover_journal(
         return Ok(RecoveryOutcome::NothingToDo(journal.state));
     }
 
+    // Mode of deleted files and directories created for added files; empty for
+    // transactions that only edited existing files.
+    let ext = read_journal_ext(&project_state.dir, &journal.id).map_err(|e| ApplyError::Io {
+        path: None,
+        message: e.to_string(),
+    })?;
+
     let mut classifications = Vec::with_capacity(journal.files.len());
     for f in &journal.files {
         let target_path = project_state.canonical_root.join(&f.path);
-        let actual_bytes = match fs::read(&target_path) {
-            Ok(b) => b,
-            Err(e) => {
-                return Err(ApplyError::Io {
-                    path: Some(f.path.clone()),
-                    message: e.to_string(),
-                });
+        // Only a file the transaction adds or deletes may legitimately be missing;
+        // for an edited file a missing target stays an error, as it always was.
+        let may_be_absent = f.original_digest == ABSENT_DIGEST || f.planned_digest == ABSENT_DIGEST;
+        let actual_digest = match fs::read(&target_path) {
+            Ok(bytes) => sha256_hex(&bytes),
+            Err(e) if may_be_absent && e.kind() == std::io::ErrorKind::NotFound => {
+                ABSENT_DIGEST.to_string()
             }
+            Err(e) => return Err(io_err(&f.path, &e)),
         };
-
-        let mut hasher = Sha256::new();
-        hasher.update(&actual_bytes);
-        let actual_digest = format!("{:x}", hasher.finalize());
 
         if actual_digest == f.original_digest {
             classifications.push(FileClassification::Original);
@@ -705,7 +954,7 @@ pub(crate) fn recover_journal(
 
     if has_other {
         let mut conflicts = Vec::new();
-        for (entry, class) in journal.files.iter().zip(&classifications) {
+        for (i, (entry, class)) in journal.files.iter().zip(&classifications).enumerate() {
             match class {
                 FileClassification::Other { actual_digest } => {
                     conflicts.push(FileConflict {
@@ -716,7 +965,7 @@ pub(crate) fn recover_journal(
                     });
                 }
                 FileClassification::Planned => {
-                    restore_file_to_original(project_state, entry)?;
+                    restore_entry(project_state, entry, &ext.entry(i))?;
                 }
                 FileClassification::Original => {}
             }
@@ -751,12 +1000,13 @@ pub(crate) fn recover_journal(
             },
         )?;
         cleanup_journal_temp_files(project_state, journal);
+        remove_created_dirs(project_state, &ext);
         return Ok(RecoveryOutcome::RolledBack);
     }
 
-    for (entry, class) in journal.files.iter().zip(&classifications) {
+    for (i, (entry, class)) in journal.files.iter().zip(&classifications).enumerate() {
         if matches!(class, FileClassification::Planned) {
-            restore_file_to_original(project_state, entry)?;
+            restore_entry(project_state, entry, &ext.entry(i))?;
         }
     }
 
@@ -767,8 +1017,151 @@ pub(crate) fn recover_journal(
         },
     )?;
     cleanup_journal_temp_files(project_state, journal);
+    remove_created_dirs(project_state, &ext);
 
     Ok(RecoveryOutcome::RolledBack)
+}
+
+/// Undoes one file's planned change. An edited file gets its original bytes
+/// back; an added file is removed; a deleted file is recreated with its
+/// original bytes and mode.
+fn restore_entry(
+    project_state: &ProjectState,
+    entry: &JournalFileEntry,
+    ext: &EntryExt,
+) -> Result<(), ApplyError> {
+    if entry.original_digest == ABSENT_DIGEST {
+        remove_added_file(project_state, entry)
+    } else if entry.planned_digest == ABSENT_DIGEST {
+        recreate_deleted_file(project_state, entry, ext)
+    } else {
+        restore_file_to_original(project_state, entry)
+    }
+}
+
+/// Removes a file the transaction added, but only while it still has the planned
+/// content; anything else is somebody else's file and is left alone.
+fn remove_added_file(
+    project_state: &ProjectState,
+    entry: &JournalFileEntry,
+) -> Result<(), ApplyError> {
+    let target_path = project_state.canonical_root.join(&entry.path);
+    let current = match fs::read(&target_path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(io_err(&entry.path, &e)),
+    };
+    let current_digest = sha256_hex(&current);
+    if current_digest != entry.planned_digest {
+        return Err(ApplyError::Stale {
+            path: entry.path.clone(),
+            expected_digest: entry.planned_digest.clone(),
+            actual_digest: current_digest,
+        });
+    }
+    fs::remove_file(&target_path).map_err(|e| io_err(&entry.path, &e))?;
+    if let Some(dir) = target_path.parent().and_then(|d| fs::File::open(d).ok()) {
+        let _ = dir.sync_all();
+    }
+    Ok(())
+}
+
+/// Recreates a deleted file from the journaled bytes with its recorded mode. It
+/// never replaces a file that is there now: the new file is hard-linked into
+/// place, which fails if the name has been taken.
+fn recreate_deleted_file(
+    project_state: &ProjectState,
+    entry: &JournalFileEntry,
+    ext: &EntryExt,
+) -> Result<(), ApplyError> {
+    let target_path = project_state.canonical_root.join(&entry.path);
+    let target_dir = target_path.parent().ok_or_else(|| ApplyError::Io {
+        path: Some(entry.path.clone()),
+        message: "target has no parent directory".to_string(),
+    })?;
+
+    match current_state_digest(&target_path) {
+        Ok(digest) if digest == ABSENT_DIGEST => {}
+        Ok(digest) if digest == entry.original_digest => return Ok(()),
+        Ok(digest) => {
+            return Err(ApplyError::Stale {
+                path: entry.path.clone(),
+                expected_digest: ABSENT_DIGEST.to_string(),
+                actual_digest: digest,
+            });
+        }
+        Err(e) => return Err(io_err(&entry.path, &e)),
+    }
+
+    let temp_path = target_dir.join(format!(
+        ".restore.{}.{}.tmp",
+        entry.path.replace('/', "_"),
+        std::process::id()
+    ));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(ext.mode & 0o777);
+    }
+    let mut temp_file = options
+        .open(&temp_path)
+        .map_err(|e| io_err(&entry.path, &e))?;
+    // Exact mode, independent of the umask (see the commit path).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temp_file
+            .set_permissions(fs::Permissions::from_mode(ext.mode & 0o777))
+            .map_err(|e| io_err(&entry.path, &e))?;
+    }
+    #[cfg(not(unix))]
+    let _ = ext;
+    use std::io::Write;
+    temp_file
+        .write_all(&entry.original_bytes)
+        .map_err(|e| io_err(&entry.path, &e))?;
+    temp_file
+        .sync_all()
+        .map_err(|e| io_err(&entry.path, &e))?;
+    drop(temp_file);
+
+    let linked = fs::hard_link(&temp_path, &target_path);
+    let _ = fs::remove_file(&temp_path);
+    linked.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            ApplyError::Stale {
+                path: entry.path.clone(),
+                expected_digest: ABSENT_DIGEST.to_string(),
+                actual_digest: current_state_digest(&target_path)
+                    .unwrap_or_else(|_| "unreadable".to_string()),
+            }
+        } else {
+            io_err(&entry.path, &e)
+        }
+    })?;
+
+    if let Ok(dir) = fs::File::open(target_dir) {
+        let _ = dir.sync_all();
+    }
+    Ok(())
+}
+
+/// Removes the directories a rolled-back transaction created, deepest first. A
+/// directory that is not empty (somebody put something in it) is left alone.
+fn remove_created_dirs(project_state: &ProjectState, ext: &JournalExt) {
+    for entry in ext.entries.iter().rev() {
+        for dir in entry.created_dirs.iter().rev() {
+            let path = project_state.canonical_root.join(dir);
+            if let (true, Some(parent)) = (
+                fs::remove_dir(&path).is_ok(),
+                path.parent().and_then(|p| fs::File::open(p).ok()),
+            ) {
+                let _ = parent.sync_all();
+            }
+        }
+    }
 }
 
 /// Finds and recovers any unfinished transaction for `project_state`.
@@ -2518,5 +2911,615 @@ mod tests {
         let formatted = report.to_string();
         assert!(formatted.contains("src/good.rs: restored to original bytes"));
         assert!(formatted.contains("src/alien.rs: not restorable: conflict with unknown content (digest deadbeef, untouched)"));
+    }
+
+    // ---------------------------------------------------------------------
+    // Added and deleted files
+    // ---------------------------------------------------------------------
+
+    use crate::surgery::journal::{encode_journal, list_project_journals};
+
+    /// Entries are `(path, original, proposed)`. `None` means the file is absent
+    /// on that side: an added file has no original, a deleted file no proposed.
+    fn make_change_plan(id: &str, files: Vec<(&str, Option<&str>, Option<&str>)>) -> Plan {
+        fn digest(text: Option<&str>) -> String {
+            match text {
+                Some(text) => sha256_hex(text.as_bytes()),
+                None => ABSENT_DIGEST.to_string(),
+            }
+        }
+        Plan {
+            token: "tok".to_string(),
+            id: id.to_string(),
+            digest: "plan-digest".to_string(),
+            files: files
+                .into_iter()
+                .map(|(path, original, proposed)| PlannedFile {
+                    path: path.to_string(),
+                    original: original.unwrap_or("").to_string(),
+                    original_digest: digest(original),
+                    proposed: proposed.unwrap_or("").to_string(),
+                    proposed_digest: digest(proposed),
+                    operations: Vec::new(),
+                })
+                .collect(),
+        }
+    }
+
+    /// A clean temporary project; returns (base, state_dir, project_dir).
+    fn fresh_project(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!("cvb-{name}-{}", std::process::id()));
+        if base.exists() {
+            let _ = fs::remove_dir_all(&base);
+        }
+        let project_dir = base.join("project");
+        fs::create_dir_all(&project_dir).unwrap();
+        (base.clone(), base.join("state"), project_dir)
+    }
+
+    /// Sorted names of the entries directly inside `dir`.
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// True when no leftover temporary file exists anywhere under `dir`.
+    fn has_no_temp_files(dir: &Path) -> bool {
+        for entry in fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with(".surgery.") || name.starts_with(".restore.") {
+                return false;
+            }
+            if path.is_dir() && !has_no_temp_files(&path) {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[test]
+    fn test_add_creates_file_in_existing_directory() {
+        let (base, state_dir, project_dir) = fresh_project("add-existing-dir");
+        fs::create_dir_all(project_dir.join("src")).unwrap();
+
+        let state = init_project_state(&state_dir, &project_dir).unwrap();
+        let plan = make_change_plan("add-one", vec![("src/new.rs", None, Some("fn new() {}\n"))]);
+        let journal = commit_plan(&state, &plan).unwrap();
+
+        assert_eq!(journal.state, JournalState::Committed);
+        assert_eq!(
+            fs::read_to_string(project_dir.join("src/new.rs")).unwrap(),
+            "fn new() {}\n"
+        );
+        assert_eq!(names_in(&project_dir.join("src")), vec!["new.rs"]);
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn test_add_creates_missing_directories() {
+        let (base, state_dir, project_dir) = fresh_project("add-new-dirs");
+
+        let state = init_project_state(&state_dir, &project_dir).unwrap();
+        let plan = make_change_plan("add-deep", vec![("a/b/c.txt", None, Some("deep\n"))]);
+        commit_plan(&state, &plan).unwrap();
+
+        assert_eq!(fs::read_to_string(project_dir.join("a/b/c.txt")).unwrap(), "deep\n");
+        assert!(has_no_temp_files(&project_dir));
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn test_add_rejects_existing_target_and_touches_nothing() {
+        let (base, state_dir, project_dir) = fresh_project("add-exists");
+        fs::write(project_dir.join("x.txt"), "mine\n").unwrap();
+
+        let state = init_project_state(&state_dir, &project_dir).unwrap();
+        let plan = make_change_plan("add-existing", vec![("x.txt", None, Some("other\n"))]);
+        let err = commit_plan(&state, &plan).unwrap_err();
+
+        match err {
+            ApplyError::Stale { path, expected_digest, .. } => {
+                assert_eq!(path, "x.txt");
+                assert_eq!(expected_digest, ABSENT_DIGEST);
+            }
+            other => panic!("expected Stale, got {other:?}"),
+        }
+        assert_eq!(fs::read_to_string(project_dir.join("x.txt")).unwrap(), "mine\n");
+        assert!(list_project_journals(&state.dir).unwrap().is_empty());
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn test_add_never_overwrites_a_file_created_before_publish() {
+        let (base, state_dir, project_dir) = fresh_project("add-race");
+
+        let state = init_project_state(&state_dir, &project_dir).unwrap();
+        let plan = make_change_plan("add-race", vec![("late.txt", None, Some("ours\n"))]);
+        let late = project_dir.join("late.txt");
+
+        let result = commit_plan_with_hook(&state, &plan, |point| {
+            if point == CommitCrashPoint::BeforeRename(0) {
+                fs::write(&late, "theirs\n").unwrap();
+            }
+            Ok(())
+        });
+
+        assert!(matches!(result, Err(ApplyError::CommitFailed(_))));
+        assert_eq!(fs::read_to_string(&late).unwrap(), "theirs\n");
+        assert_eq!(names_in(&project_dir), vec!["late.txt"]);
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn test_add_rejects_symlinked_ancestor() {
+        let (base, state_dir, project_dir) = fresh_project("add-symlink");
+        fs::create_dir_all(project_dir.join("real")).unwrap();
+        std::os::unix::fs::symlink(project_dir.join("real"), project_dir.join("link")).unwrap();
+
+        let state = init_project_state(&state_dir, &project_dir).unwrap();
+        let plan = make_change_plan("add-link", vec![("link/f.txt", None, Some("x\n"))]);
+        let err = commit_plan(&state, &plan).unwrap_err();
+
+        assert!(err.to_string().contains("not a plain directory"), "{err}");
+        assert!(names_in(&project_dir.join("real")).is_empty());
+        assert!(list_project_journals(&state.dir).unwrap().is_empty());
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn test_add_rejects_a_file_where_a_directory_is_needed() {
+        let (base, state_dir, project_dir) = fresh_project("add-file-in-way");
+        fs::write(project_dir.join("a"), "plain file\n").unwrap();
+
+        let state = init_project_state(&state_dir, &project_dir).unwrap();
+        let plan = make_change_plan("add-blocked", vec![("a/b.txt", None, Some("x\n"))]);
+        let err = commit_plan(&state, &plan).unwrap_err();
+
+        assert!(err.to_string().contains("not a plain directory"), "{err}");
+        assert_eq!(fs::read_to_string(project_dir.join("a")).unwrap(), "plain file\n");
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn test_delete_removes_file() {
+        let (base, state_dir, project_dir) = fresh_project("delete-one");
+        fs::write(project_dir.join("gone.txt"), "bye\n").unwrap();
+
+        let state = init_project_state(&state_dir, &project_dir).unwrap();
+        let plan = make_change_plan("del-one", vec![("gone.txt", Some("bye\n"), None)]);
+        let journal = commit_plan(&state, &plan).unwrap();
+
+        assert_eq!(journal.state, JournalState::Committed);
+        assert!(!project_dir.join("gone.txt").exists());
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn test_delete_rejects_a_modified_file() {
+        let (base, state_dir, project_dir) = fresh_project("delete-stale");
+        fs::write(project_dir.join("gone.txt"), "changed since planning\n").unwrap();
+
+        let state = init_project_state(&state_dir, &project_dir).unwrap();
+        let plan = make_change_plan("del-stale", vec![("gone.txt", Some("bye\n"), None)]);
+
+        assert!(matches!(
+            commit_plan(&state, &plan),
+            Err(ApplyError::Stale { .. })
+        ));
+        assert_eq!(
+            fs::read_to_string(project_dir.join("gone.txt")).unwrap(),
+            "changed since planning\n"
+        );
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn test_delete_rolls_back_with_original_bytes_and_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (base, state_dir, project_dir) = fresh_project("delete-rollback");
+        let script = project_dir.join("gone.sh");
+        fs::write(&script, "#!/bin/sh\necho hi\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o750)).unwrap();
+        fs::write(project_dir.join("keep.txt"), "a\n").unwrap();
+
+        let state = init_project_state(&state_dir, &project_dir).unwrap();
+        let plan = make_change_plan(
+            "del-rollback",
+            vec![
+                ("gone.sh", Some("#!/bin/sh\necho hi\n"), None),
+                ("keep.txt", Some("a\n"), Some("b\n")),
+            ],
+        );
+
+        let result = commit_plan_with_hook(&state, &plan, |point| {
+            if point == CommitCrashPoint::BeforeRename(1) {
+                return Err(ApplyError::Io {
+                    path: None,
+                    message: "simulated failure".to_string(),
+                });
+            }
+            Ok(())
+        });
+
+        assert!(matches!(result, Err(ApplyError::CommitFailed(_))));
+        assert_eq!(fs::read_to_string(&script).unwrap(), "#!/bin/sh\necho hi\n");
+        assert_eq!(
+            fs::metadata(&script).unwrap().permissions().mode() & 0o777,
+            0o750,
+            "a deleted file must come back with its original mode"
+        );
+        assert_eq!(fs::read_to_string(project_dir.join("keep.txt")).unwrap(), "a\n");
+        assert!(has_no_temp_files(&project_dir));
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// A project holding one file to update and one to delete, plus a plan that
+    /// also adds a file in two new directories.
+    fn mixed_project(name: &str) -> (PathBuf, PathBuf, PathBuf, Plan) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (base, state_dir, project_dir) = fresh_project(name);
+        fs::write(project_dir.join("u.txt"), "u-old\n").unwrap();
+        fs::write(project_dir.join("d.txt"), "d-old\n").unwrap();
+        fs::set_permissions(project_dir.join("d.txt"), fs::Permissions::from_mode(0o750)).unwrap();
+
+        let plan = make_change_plan(
+            "mixed-tx",
+            vec![
+                ("new/sub/added.txt", None, Some("added\n")),
+                ("u.txt", Some("u-old\n"), Some("u-new\n")),
+                ("d.txt", Some("d-old\n"), None),
+            ],
+        );
+        (base, state_dir, project_dir, plan)
+    }
+
+    #[test]
+    fn test_mixed_add_update_delete_commits_together() {
+        let (base, state_dir, project_dir, plan) = mixed_project("mixed-commit");
+
+        let state = init_project_state(&state_dir, &project_dir).unwrap();
+        let journal = commit_plan(&state, &plan).unwrap();
+
+        assert_eq!(journal.state, JournalState::Committed);
+        assert_eq!(
+            fs::read_to_string(project_dir.join("new/sub/added.txt")).unwrap(),
+            "added\n"
+        );
+        assert_eq!(fs::read_to_string(project_dir.join("u.txt")).unwrap(), "u-new\n");
+        assert!(!project_dir.join("d.txt").exists());
+        assert!(has_no_temp_files(&project_dir));
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn test_mixed_failure_rolls_back_as_a_unit() {
+        let (base, state_dir, project_dir, plan) = mixed_project("mixed-rollback");
+
+        let state = init_project_state(&state_dir, &project_dir).unwrap();
+        let result = commit_plan_with_hook(&state, &plan, |point| {
+            // The add and the update are already published; the delete is not.
+            if point == CommitCrashPoint::BeforeRename(2) {
+                return Err(ApplyError::Io {
+                    path: None,
+                    message: "simulated failure".to_string(),
+                });
+            }
+            Ok(())
+        });
+
+        assert!(matches!(result, Err(ApplyError::CommitFailed(_))));
+        assert!(!project_dir.join("new").exists(), "created directories are removed");
+        assert_eq!(fs::read_to_string(project_dir.join("u.txt")).unwrap(), "u-old\n");
+        assert_eq!(fs::read_to_string(project_dir.join("d.txt")).unwrap(), "d-old\n");
+        assert!(has_no_temp_files(&project_dir));
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn test_two_adds_share_one_new_directory_and_roll_back_together() {
+        let (base, state_dir, project_dir) = fresh_project("add-shared-dir");
+
+        let state = init_project_state(&state_dir, &project_dir).unwrap();
+        let plan = make_change_plan(
+            "add-shared",
+            vec![
+                ("shared/a.txt", None, Some("a\n")),
+                ("shared/b.txt", None, Some("b\n")),
+            ],
+        );
+
+        let result = commit_plan_with_hook(&state, &plan, |point| {
+            if point == CommitCrashPoint::BeforeRename(1) {
+                return Err(ApplyError::Io {
+                    path: None,
+                    message: "simulated failure".to_string(),
+                });
+            }
+            Ok(())
+        });
+
+        assert!(matches!(result, Err(ApplyError::CommitFailed(_))));
+        assert!(names_in(&project_dir).is_empty(), "the shared directory is gone too");
+
+        // The same plan succeeds when nothing fails.
+        let plan = make_change_plan(
+            "add-shared-ok",
+            vec![
+                ("shared/a.txt", None, Some("a\n")),
+                ("shared/b.txt", None, Some("b\n")),
+            ],
+        );
+        commit_plan(&state, &plan).unwrap();
+        assert_eq!(names_in(&project_dir.join("shared")), vec!["a.txt", "b.txt"]);
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// Crash the mixed transaction at every step it takes and check that recovery
+    /// always leaves the tree entirely as it was or entirely as planned.
+    #[test]
+    fn test_crash_matrix_for_mixed_transaction_is_all_or_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Record the steps of an uninterrupted run.
+        let (base, state_dir, project_dir, plan) = mixed_project("matrix-record");
+        let state = init_project_state(&state_dir, &project_dir).unwrap();
+        let mut points = Vec::new();
+        commit_plan_with_hook(&state, &plan, |point| {
+            points.push(point);
+            Ok(())
+        })
+        .unwrap();
+        let _ = fs::remove_dir_all(base);
+
+        assert!(points.contains(&CommitCrashPoint::DirectoriesCreated));
+        assert!(points.len() >= 10, "unexpectedly short step list: {points:?}");
+
+        for (crash_at, crash_point) in points.iter().enumerate() {
+            let name = format!("matrix-{crash_at}");
+            let (base, state_dir, project_dir, plan) = mixed_project(&name);
+            let state = init_project_state(&state_dir, &project_dir).unwrap();
+
+            let mut seen = 0;
+            let result = commit_plan_with_hook(&state, &plan, |_point| {
+                let current = seen;
+                seen += 1;
+                if current == crash_at {
+                    return Err(ApplyError::FaultInjected(format!("step {current}")));
+                }
+                Ok(())
+            });
+            assert!(
+                matches!(result, Err(ApplyError::FaultInjected(_))),
+                "step {crash_at} ({:?}) did not crash",
+                crash_point
+            );
+
+            let fresh_state = init_project_state(&state_dir, &project_dir).unwrap();
+            let outcome = recover_project(&fresh_state).unwrap();
+
+            let added = project_dir.join("new/sub/added.txt");
+            let u = fs::read_to_string(project_dir.join("u.txt")).unwrap();
+            let d_path = project_dir.join("d.txt");
+
+            let is_original = !project_dir.join("new").exists()
+                && u == "u-old\n"
+                && fs::read_to_string(&d_path).ok().as_deref() == Some("d-old\n")
+                && fs::metadata(&d_path).unwrap().permissions().mode() & 0o777 == 0o750;
+            let is_planned = fs::read_to_string(&added).ok().as_deref() == Some("added\n")
+                && u == "u-new\n"
+                && !d_path.exists();
+
+            assert!(
+                is_original ^ is_planned,
+                "crash at step {crash_at} ({:?}): tree is neither fully original nor fully planned",
+                crash_point
+            );
+            match outcome {
+                Some(RecoveryOutcome::RolledBack) => assert!(is_original, "step {crash_at}"),
+                Some(RecoveryOutcome::RolledForward) | None => {
+                    assert!(is_planned, "step {crash_at}")
+                }
+                other => panic!("step {crash_at}: unexpected outcome {other:?}"),
+            }
+            assert!(
+                has_no_temp_files(&project_dir),
+                "crash at step {crash_at} ({:?}) left temporary files",
+                crash_point
+            );
+
+            let _ = fs::remove_dir_all(base);
+        }
+    }
+
+    #[test]
+    fn test_recovery_leaves_foreign_content_at_an_added_path() {
+        let (base, state_dir, project_dir) = fresh_project("recover-foreign");
+
+        let state = init_project_state(&state_dir, &project_dir).unwrap();
+        let plan = make_change_plan("add-foreign", vec![("x.txt", None, Some("ours\n"))]);
+        let _ = commit_plan_with_hook(&state, &plan, |point| {
+            if point == CommitCrashPoint::Rename(0) {
+                return Err(ApplyError::FaultInjected("crash after publish".to_string()));
+            }
+            Ok(())
+        });
+
+        // Somebody replaces our file before recovery runs.
+        fs::write(project_dir.join("x.txt"), "theirs\n").unwrap();
+
+        let fresh_state = init_project_state(&state_dir, &project_dir).unwrap();
+        match recover_project(&fresh_state).unwrap() {
+            Some(RecoveryOutcome::Conflict(conflicts)) => {
+                assert_eq!(conflicts.len(), 1);
+                assert_eq!(conflicts[0].path, "x.txt");
+            }
+            other => panic!("expected a conflict, got {other:?}"),
+        }
+        assert_eq!(fs::read_to_string(project_dir.join("x.txt")).unwrap(), "theirs\n");
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn test_update_only_journal_has_no_extension_block() {
+        let (base, state_dir, project_dir) = fresh_project("ext-none");
+        fs::write(project_dir.join("a.txt"), "old\n").unwrap();
+
+        let state = init_project_state(&state_dir, &project_dir).unwrap();
+        let plan = make_change_plan("ext-none", vec![("a.txt", Some("old\n"), Some("new\n"))]);
+        let _ = commit_plan_with_hook(&state, &plan, |point| {
+            if point == CommitCrashPoint::JournalPrepared {
+                return Err(ApplyError::FaultInjected("crash".to_string()));
+            }
+            Ok(())
+        });
+
+        let path = state.dir.join("ext-none.journal");
+        let raw = fs::read(&path).unwrap();
+        assert_eq!(raw, encode_journal(&read_journal(&path).unwrap()));
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn test_journal_records_modes_and_created_directories() {
+        let (base, state_dir, project_dir, plan) = mixed_project("ext-recorded");
+
+        let state = init_project_state(&state_dir, &project_dir).unwrap();
+        let _ = commit_plan_with_hook(&state, &plan, |point| {
+            if point == CommitCrashPoint::JournalPrepared {
+                return Err(ApplyError::FaultInjected("crash".to_string()));
+            }
+            Ok(())
+        });
+
+        let ext = read_journal_ext(&state.dir, "mixed-tx").unwrap();
+        assert_eq!(ext.entries.len(), 3);
+        assert_eq!(ext.entries[0].created_dirs, vec!["new", "new/sub"]);
+        assert_eq!(ext.entries[1], EntryExt::default());
+        assert_eq!(ext.entries[2].mode, 0o750);
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn test_plan_entry_that_changes_nothing_is_rejected() {
+        let (base, state_dir, project_dir) = fresh_project("no-change");
+
+        let state = init_project_state(&state_dir, &project_dir).unwrap();
+        let plan = make_change_plan("nothing", vec![("x.txt", None, None)]);
+        assert!(matches!(commit_plan(&state, &plan), Err(ApplyError::Io { .. })));
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn test_plan_naming_a_path_twice_is_rejected() {
+        let (base, state_dir, project_dir) = fresh_project("dup-path");
+        fs::write(project_dir.join("same.txt"), "x\n").unwrap();
+
+        let state = init_project_state(&state_dir, &project_dir).unwrap();
+        let plan = make_change_plan(
+            "dup",
+            vec![
+                ("same.txt", Some("x\n"), None),
+                ("same.txt", None, Some("y\n")),
+            ],
+        );
+        let err = commit_plan(&state, &plan).unwrap_err();
+
+        assert!(err.to_string().contains("more than once"), "{err}");
+        assert_eq!(fs::read_to_string(project_dir.join("same.txt")).unwrap(), "x\n");
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// Recovery classifies a file before it restores it; these two tests call the
+    /// restore helpers directly to pin their own guard against the file changing
+    /// in between.
+    fn journal_entry_for(path: &str, original: Option<&str>, planned: Option<&str>) -> JournalFileEntry {
+        let digest = |text: Option<&str>| match text {
+            Some(text) => sha256_hex(text.as_bytes()),
+            None => ABSENT_DIGEST.to_string(),
+        };
+        JournalFileEntry {
+            path: path.to_string(),
+            original_digest: digest(original),
+            planned_digest: digest(planned),
+            original_bytes: original.unwrap_or("").as_bytes().to_vec(),
+        }
+    }
+
+    #[test]
+    fn test_remove_added_file_refuses_content_that_is_not_ours() {
+        let (base, state_dir, project_dir) = fresh_project("remove-added-guard");
+        let state = init_project_state(&state_dir, &project_dir).unwrap();
+        let entry = journal_entry_for("x.txt", None, Some("ours\n"));
+
+        // Somebody else's content: left alone, reported as stale.
+        fs::write(project_dir.join("x.txt"), "theirs\n").unwrap();
+        assert!(matches!(
+            remove_added_file(&state, &entry),
+            Err(ApplyError::Stale { .. })
+        ));
+        assert_eq!(fs::read_to_string(project_dir.join("x.txt")).unwrap(), "theirs\n");
+
+        // Our content: removed. Already gone: fine.
+        fs::write(project_dir.join("x.txt"), "ours\n").unwrap();
+        remove_added_file(&state, &entry).unwrap();
+        assert!(!project_dir.join("x.txt").exists());
+        remove_added_file(&state, &entry).unwrap();
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn test_recreate_deleted_file_never_replaces_an_existing_file() {
+        let (base, state_dir, project_dir) = fresh_project("recreate-guard");
+        let state = init_project_state(&state_dir, &project_dir).unwrap();
+        let entry = journal_entry_for("gone.txt", Some("original\n"), None);
+        let ext = EntryExt { mode: 0o640, created_dirs: Vec::new() };
+
+        // A different file took the name: untouched, reported as stale.
+        fs::write(project_dir.join("gone.txt"), "someone else's\n").unwrap();
+        assert!(matches!(
+            recreate_deleted_file(&state, &entry, &ext),
+            Err(ApplyError::Stale { .. })
+        ));
+        assert_eq!(
+            fs::read_to_string(project_dir.join("gone.txt")).unwrap(),
+            "someone else's\n"
+        );
+
+        // The original bytes are already back: nothing to do.
+        fs::write(project_dir.join("gone.txt"), "original\n").unwrap();
+        recreate_deleted_file(&state, &entry, &ext).unwrap();
+
+        // Truly missing: recreated with the original bytes and no temp file left.
+        fs::remove_file(project_dir.join("gone.txt")).unwrap();
+        recreate_deleted_file(&state, &entry, &ext).unwrap();
+        assert_eq!(fs::read_to_string(project_dir.join("gone.txt")).unwrap(), "original\n");
+        assert!(has_no_temp_files(&project_dir));
+
+        let _ = fs::remove_dir_all(base);
     }
 }
