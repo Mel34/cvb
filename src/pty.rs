@@ -224,7 +224,7 @@ fn render_transcript(transcript: &Transcript, rows: u16, cols: u16) -> Vec<u8> {
     for segment in &transcript.segments {
         match segment {
             TranscriptSegment::Terminal(bytes) => {
-                output.extend_from_slice(b"[Terminal output]\n--------\n");
+                output.extend_from_slice(b"[Terminal output]\n");
 
                 let text = render_terminal_segment(bytes, rows, cols);
                 let processed = if text.is_empty() {
@@ -306,7 +306,7 @@ mod transcript_tests {
 
         assert_eq!(
             render_transcript(&transcript, 24, 80),
-            b"[NO_VISIBLE_OUTPUT]"
+            b"[Command produced no visible output]"
         );
     }
 
