@@ -9,6 +9,9 @@ mod context;
 mod control;
 mod keybind;
 mod keyboard;
+// Not wired into the proxy yet (build step 6), so its items are unused for now.
+#[allow(dead_code)]
+mod patch;
 mod pty;
 mod pull;
 mod shell;
