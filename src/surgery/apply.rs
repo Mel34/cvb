@@ -335,6 +335,21 @@ where
                 path: Some(file.path.clone()),
                 message: e.to_string(),
             })?;
+            // `OpenOptions::mode` is filtered through the process umask, so a strict
+            // umask (such as 077) would silently tighten the file. Set the exact
+            // mode explicitly; fchmod is not subject to the umask.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                temp_file
+                    .set_permissions(fs::Permissions::from_mode(
+                        meta.permissions().mode() & 0o777,
+                    ))
+                    .map_err(|e| ApplyError::Io {
+                        path: Some(file.path.clone()),
+                        message: e.to_string(),
+                    })?;
+            }
             use std::io::Write;
             temp_file
                 .write_all(file.proposed.as_bytes())
@@ -561,6 +576,19 @@ fn restore_file_to_original(
         path: Some(entry.path.clone()),
         message: e.to_string(),
     })?;
+    // See the commit path: set the exact mode, the umask must not change it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temp_file
+            .set_permissions(fs::Permissions::from_mode(
+                meta.permissions().mode() & 0o777,
+            ))
+            .map_err(|e| ApplyError::Io {
+                path: Some(entry.path.clone()),
+                message: e.to_string(),
+            })?;
+    }
     use std::io::Write;
     temp_file
         .write_all(&entry.original_bytes)
@@ -1192,6 +1220,81 @@ mod tests {
             meta.permissions().mode() & 0o777,
             0o755,
             "target file must preserve executable 0755 permissions"
+        );
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// 0o775 has a group-write bit that the common umasks (022 and 077) clear,
+    /// so this fails on a typical machine if the mode passes through the umask.
+    #[cfg(unix)]
+    #[test]
+    fn test_commit_plan_mode_is_not_filtered_by_umask() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let base = std::env::temp_dir().join(format!("cvb-commit-umask-{}", std::process::id()));
+        let state_dir = base.join("state");
+        let project_dir = base.join("project");
+
+        if base.exists() {
+            let _ = fs::remove_dir_all(&base);
+        }
+        fs::create_dir_all(&project_dir).unwrap();
+
+        let target = project_dir.join("shared.sh");
+        fs::write(&target, "old\n").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o775)).unwrap();
+
+        let state = init_project_state(&state_dir, &project_dir).unwrap();
+        let plan = make_test_plan("umask-commit", vec![("shared.sh", "old\n", "new\n")]);
+        commit_plan(&state, &plan).unwrap();
+
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new\n");
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o775,
+            "commit must keep the exact mode regardless of the umask"
+        );
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// Same check for the rollback path, which also writes through a temp file.
+    #[cfg(unix)]
+    #[test]
+    fn test_restore_file_mode_is_not_filtered_by_umask() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let base = std::env::temp_dir().join(format!("cvb-restore-umask-{}", std::process::id()));
+        let state_dir = base.join("state");
+        let project_dir = base.join("project");
+
+        if base.exists() {
+            let _ = fs::remove_dir_all(&base);
+        }
+        fs::create_dir_all(&project_dir).unwrap();
+
+        let target = project_dir.join("shared.sh");
+        fs::write(&target, "new\n").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o775)).unwrap();
+
+        let state = init_project_state(&state_dir, &project_dir).unwrap();
+        // Restore only overwrites a file whose digest is the planned one.
+        let mut hasher = Sha256::new();
+        hasher.update(b"new\n");
+        let entry = JournalFileEntry {
+            path: "shared.sh".to_string(),
+            original_digest: "unused".to_string(),
+            planned_digest: format!("{:x}", hasher.finalize()),
+            original_bytes: b"old\n".to_vec(),
+        };
+        restore_file_to_original(&state, &entry).unwrap();
+
+        assert_eq!(fs::read_to_string(&target).unwrap(), "old\n");
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o775,
+            "restore must keep the exact mode regardless of the umask"
         );
 
         let _ = fs::remove_dir_all(base);
