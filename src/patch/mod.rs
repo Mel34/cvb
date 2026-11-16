@@ -6,3 +6,4 @@
 pub(crate) mod guard;
 pub(crate) mod parse;
 pub(crate) mod paste;
+pub(crate) mod run;

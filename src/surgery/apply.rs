@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -213,7 +213,7 @@ impl std::fmt::Display for ApplyError {
 
 impl std::error::Error for ApplyError {}
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     format!("{:x}", hasher.finalize())
@@ -468,6 +468,30 @@ pub(crate) fn commit_plan(
 pub(crate) fn commit_plan_with_hook<F>(
     project_state: &ProjectState,
     plan: &Plan,
+    hook: F,
+) -> Result<Journal, ApplyError>
+where
+    F: FnMut(CommitCrashPoint) -> Result<(), ApplyError>,
+{
+    commit_plan_inner(project_state, plan, &HashMap::new(), hook)
+}
+
+/// Applies a plan under the project lock. A file the plan adds and that is named
+/// in `add_modes` gets exactly that permission mode (not filtered by the umask),
+/// which lets a moved file keep the mode of its source.
+pub(crate) fn apply_plan_with_modes(
+    project_state: &ProjectState,
+    plan: &Plan,
+    add_modes: &HashMap<String, u32>,
+) -> Result<Journal, ApplyError> {
+    let _lock = ProjectLock::acquire(&project_state.dir).map_err(ApplyError::Lock)?;
+    commit_plan_inner(project_state, plan, add_modes, |_| Ok(()))
+}
+
+fn commit_plan_inner<F>(
+    project_state: &ProjectState,
+    plan: &Plan,
+    add_modes: &HashMap<String, u32>,
     mut hook: F,
 ) -> Result<Journal, ApplyError>
 where
@@ -577,6 +601,15 @@ where
             // `OpenOptions::mode` is filtered through the process umask, so a strict
             // umask (such as 077) would silently tighten the file. Set the exact
             // mode explicitly; fchmod is not subject to the umask.
+            #[cfg(unix)]
+            if *kind == ChangeKind::Add
+                && let Some(mode) = add_modes.get(&file.path)
+            {
+                use std::os::unix::fs::PermissionsExt;
+                temp_file
+                    .set_permissions(fs::Permissions::from_mode(mode & 0o777))
+                    .map_err(|e| io_err(&file.path, &e))?;
+            }
             #[cfg(unix)]
             if let Some(meta) = &update_meta {
                 use std::os::unix::fs::PermissionsExt;
@@ -3520,6 +3553,32 @@ mod tests {
         assert_eq!(fs::read_to_string(project_dir.join("gone.txt")).unwrap(), "original\n");
         assert!(has_no_temp_files(&project_dir));
 
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// An added file named in `add_modes` gets exactly that mode, whatever the
+    /// umask; one that is not named gets the default.
+    #[test]
+    fn test_apply_plan_with_modes_sets_the_exact_mode_of_added_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let (base, state_dir, project_dir) = fresh_project("add-modes");
+        let state = init_project_state(&state_dir, &project_dir).unwrap();
+        let plan = make_change_plan(
+            "add-modes",
+            vec![("tool.sh", None, Some("#!/bin/sh\n")), ("plain.txt", None, Some("x\n"))],
+        );
+        let mut modes = HashMap::new();
+        modes.insert("tool.sh".to_string(), 0o775);
+
+        apply_plan_with_modes(&state, &plan, &modes).unwrap();
+
+        let mode = |name: &str| {
+            fs::metadata(project_dir.join(name)).unwrap().permissions().mode() & 0o777
+        };
+        assert_eq!(mode("tool.sh"), 0o775);
+        // Not named: the default 0o666 filtered by the umask, never executable.
+        assert_eq!(mode("plain.txt") & 0o111, 0);
+        assert!(has_no_temp_files(&project_dir));
         let _ = fs::remove_dir_all(base);
     }
 }
