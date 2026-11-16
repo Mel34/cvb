@@ -122,6 +122,13 @@ printf '\nCVB context initialization ready.\nPaste into your LLM to begin.\n\n'
 CVB_SAVED_PS1=$PS1
 PS1='\[\e[31m\]●\[\e[0m\] '"$CVB_SAVED_PS1"
 
+# Paste-to-apply: after CVB prints the result of a pasted patch it sends this
+# private key sequence, which redraws the prompt and anything half-typed without
+# running a command or touching history. Bound in every editing mode.
+bind -m emacs '"\e[9999~": redraw-current-line' 2>/dev/null
+bind -m vi-insert '"\e[9999~": redraw-current-line' 2>/dev/null
+bind -m vi-command '"\e[9999~": redraw-current-line' 2>/dev/null
+
 cvb() {
     if [[ -z "$1" ]]; then
         printf 'CVB: already running\n' >&2

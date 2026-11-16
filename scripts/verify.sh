@@ -58,6 +58,15 @@ if [[ -z "$pty_capture_summary" ]]; then
 fi
 printf 'PTY capture: %s\n' "$pty_capture_summary"
 
+run_step "Patch paste" "$tmpdir/patch-paste.log" scripts/test-patch-paste.py
+patch_paste_summary=$(grep -E '^(SKIP: interactive PTY unavailable|[0-9]+ passed, [0-9]+ failed)' "$tmpdir/patch-paste.log" | tail -n 1 || true)
+if [[ -z "$patch_paste_summary" ]]; then
+    printf 'FAIL: patch paste harness produced no recognizable summary. Full output follows:\n' >&2
+    cat "$tmpdir/patch-paste.log" >&2
+    exit 1
+fi
+printf 'Patch paste: %s\n' "$patch_paste_summary"
+
 run_step "cargo check" "$tmpdir/check.log" cargo check
 run_step "git diff --check" "$tmpdir/diff.log" git diff --check
 

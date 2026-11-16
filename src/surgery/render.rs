@@ -380,7 +380,7 @@ pub(crate) fn is_control_char(c: char) -> bool {
         || (0x80..=0x9F).contains(&code)
 }
 
-fn is_escape_char(c: char) -> bool {
+pub(crate) fn is_escape_char(c: char) -> bool {
     is_format_char(c) || is_space_separator(c) || is_zero_width(c) || is_control_char(c)
 }
 

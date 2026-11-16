@@ -259,6 +259,56 @@ Commands inside functions and compound commands such as
 .B if
 are not matched.
 The file is read on every command, so changes apply immediately. Screen captures are not affected.
+.SH PATCH PASTE
+Inside a resident session, a patch in
+.B apply_patch
+format pasted at the shell prompt is applied automatically. The paste must be exactly one patch, from a line
+.B *** Begin Patch
+to a line
+.BR "*** End Patch" ,
+sent as a bracketed paste by the terminal.
+.PP
+CVB runs the
+.B apply_patch
+program found in
+.B PATH
+on a scratch copy of the files the patch names, then commits the result as one transaction, so a patch is applied completely or not at all. The root is the current directory of the shell. Supported are
+.BR "Update File" ,
+.BR "Add File" ,
+.B "Delete File"
+and
+.BR "Move to" .
+An
+.B Add File
+whose path exists is refused. Files must be UTF-8 text. Paths must be relative, without
+.B ..
+or a
+.B .git
+component, and must not pass through a symlink.
+.PP
+The result is printed, copied to the clipboard and the prompt is drawn again. It begins with
+.B CVB patch APPLIED files=N\c
+,
+.B CVB patch FAILED (apply_patch exit N)
+followed by the output of
+.B apply_patch
+and
+.BR "No files were modified." ,
+or
+.B CVB patch REJECTED: reason\c
+\&. Nothing is added to the shell history.
+.PP
+A paste is examined only while the shell waits for a command. Pastes that are not a single patch are passed to the shell unchanged; a patch without its end line is refused.
+.PP
+The environment variable
+.B CVB_PATCH_PASTE
+set to
+.BR off ,
+.BR 0 ,
+.B false
+or
+.B no
+disables the feature.
 .SH TARGET RESOLUTION
 Existing filesystem paths take precedence over external commands.
 .PP

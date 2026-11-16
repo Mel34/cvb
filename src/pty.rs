@@ -906,6 +906,89 @@ fn install_control_fd(control: OwnedFd) -> Result<(), String> {
     Ok(())
 }
 
+fn write_to_master(master: &OwnedFd, data: &[u8]) -> Result<(), String> {
+    let mut written = 0;
+    while written < data.len() {
+        match write(master.as_fd(), &data[written..]) {
+            Ok(0) => {
+                return Err("CVB: PTY write returned zero bytes".to_string());
+            }
+            Ok(count) => written += count,
+            Err(nix::errno::Errno::EINTR) => continue,
+            Err(error) => {
+                return Err(format!("CVB: PTY write failed: {error}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Carries out what the paste recognizer decided, in order.
+fn dispatch_paste_events(
+    events: Vec<crate::patch::paste::PasteEvent>,
+    master: &OwnedFd,
+    child: Pid,
+    stdout: &io::Stdout,
+    screen_terminal: &mut vt100::Parser,
+) -> Result<(), String> {
+    use crate::patch::deliver;
+    use crate::patch::paste::PasteEvent;
+
+    for event in events {
+        match event {
+            PasteEvent::Forward(bytes) => write_to_master(master, &bytes)?,
+            PasteEvent::Patch(text) => {
+                debug_log("patch_paste", &format!("bytes={}", text.len()));
+                let report = deliver::apply_for_shell(&text, child.as_raw());
+                present_patch_report(&report, master, stdout, screen_terminal)?;
+            }
+            PasteEvent::Reject(reason) => {
+                debug_log("patch_paste_rejected", &format!("reason={reason:?}"));
+                present_patch_report(
+                    &deliver::rejection_text(reason),
+                    master,
+                    stdout,
+                    screen_terminal,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Shows the result of a pasted patch, copies it, and has the shell redraw its
+/// prompt. The text never passes through the shell, so it is not part of any
+/// command's transcript and leaves no history entry.
+fn present_patch_report(
+    text: &str,
+    master: &OwnedFd,
+    stdout: &io::Stdout,
+    screen_terminal: &mut vt100::Parser,
+) -> Result<(), String> {
+    let screen = crate::patch::deliver::screen_bytes(text);
+    screen_terminal.process(&screen);
+    {
+        let mut stdout = stdout.lock();
+        stdout
+            .write_all(&screen)
+            .and_then(|()| stdout.flush())
+            .map_err(|error| format!("CVB: stdout write failed: {error}"))?;
+    }
+
+    // A clipboard problem must not end the session; say so and carry on.
+    let buffer = crate::clipboard::ClipboardBuffer::new(text.as_bytes().to_vec());
+    if let Err(error) = crate::clipboard::process(&buffer) {
+        let note = crate::patch::deliver::screen_bytes(&format!(
+            "CVB: the result could not be copied to the clipboard: {error}"
+        ));
+        screen_terminal.process(&note);
+        let mut stdout = stdout.lock();
+        let _ = stdout.write_all(&note).and_then(|()| stdout.flush());
+    }
+
+    write_to_master(master, crate::patch::deliver::REDRAW_SEQUENCE)
+}
+
 fn proxy(
     master: &OwnedFd,
     child: Pid,
@@ -933,6 +1016,9 @@ fn proxy(
     // commands from the skip list. Consumed by the next END marker.
     let mut skip_requested = false;
     let mut surgery_state = SurgeryProxyState::Ordinary;
+    // Recognizes a patch pasted at an idle prompt (see src/patch/). Everything
+    // else typed or pasted goes to the shell unchanged.
+    let mut patch_input = crate::patch::input::PatchInput::new(crate::patch::deliver::enabled());
     debug_log("proxy_start", &format!("pid={}", std::process::id()));
 
     loop {
@@ -948,10 +1034,17 @@ fn proxy(
             nix::poll::PollFd::new(keybind_fd, nix::poll::PollFlags::POLLIN),
         ];
 
-        match nix::poll::poll(&mut poll_fds, None::<u16>) {
+        match nix::poll::poll(&mut poll_fds, patch_input.poll_timeout_ms(Instant::now())) {
             Ok(_) => {}
             Err(nix::errno::Errno::EINTR) => continue,
             Err(error) => return Err(format!("CVB: PTY poll failed: {error}")),
+        }
+
+        // A held partial marker (an Escape key) or a stalled patch paste goes to
+        // the shell once its deadline has passed.
+        let due = patch_input.flush_if_due(Instant::now());
+        if !due.is_empty() {
+            dispatch_paste_events(due, master, child, &stdout, &mut screen_terminal)?;
         }
 
         let stdin_events = poll_fds[0]
@@ -1070,19 +1163,11 @@ fn proxy(
                 break;
             }
 
-            let mut written = 0;
-            while written < count {
-                match write(master.as_fd(), &buffer[written..count]) {
-                    Ok(0) => {
-                        return Err("CVB: PTY write returned zero bytes".to_string());
-                    }
-                    Ok(count) => written += count,
-                    Err(nix::errno::Errno::EINTR) => continue,
-                    Err(error) => {
-                        return Err(format!("CVB: PTY write failed: {error}"));
-                    }
-                }
-            }
+            // A paste only counts as a patch when the shell is at a prompt: not
+            // while a command (an editor, `cat`, ssh, surgery) is running.
+            let idle = !capture.capturing && surgery_state == SurgeryProxyState::Ordinary;
+            let events = patch_input.feed(&buffer[..count], idle, Instant::now());
+            dispatch_paste_events(events, master, child, &stdout, &mut screen_terminal)?;
         } else if stdin_events.intersects(
             nix::poll::PollFlags::POLLHUP | nix::poll::PollFlags::POLLERR,
         ) {
