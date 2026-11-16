@@ -154,6 +154,11 @@ pub(crate) fn run_patch(text: &str, env: &Env) -> Report {
     let output = rewrite_paths(&raw_output, &scratch.dir, &state.canonical_root);
 
     if !status.success() {
+        // Only an annotation: a patch pasted twice fails correctly, but reads as broken.
+        let output = match crate::patch::already::note(text, &originals, &state.canonical_root) {
+            Some(note) => format!("{}{note}", with_newline(&output)),
+            None => output,
+        };
         return Report::Failed { exit: status.code(), output };
     }
 
@@ -781,6 +786,39 @@ printf '%s\n' "${changed[@]}"
         let text = report.to_text();
         assert!(text.starts_with("CVB patch FAILED (apply_patch exit 1)\n"), "{text}");
         assert!(text.ends_with("No files were modified.\n"), "{text}");
+    }
+
+    /// The reported case end to end: pasting a patch whose changes are already
+    /// in the file fails as before (nothing modified) and says why.
+    #[test]
+    fn a_patch_that_was_already_applied_fails_with_an_explanation() {
+        let f = Fixture::new("twice");
+        f.write("a.txt", "head\nNEW\ntail\n");
+        let before = f.snapshot();
+
+        let report = f.run("*** Update File: a.txt\n@@\n head\n-OLD\n+NEW\n tail\n");
+
+        let Report::Failed { exit: Some(1), output } = &report else {
+            panic!("expected a failure, got {report:?}");
+        };
+        let root = f.root.display();
+        assert!(output.contains("Failed to find expected lines"), "{output}");
+        assert!(output.contains("Note: every hunk of this patch appears to be already present"), "{output}");
+        assert!(output.contains(&format!("{root}/a.txt (1 of 1 hunks)")), "{output}");
+        assert_eq!(f.snapshot(), before);
+        let text = report.to_text();
+        let note_at = text.find("Note: every hunk").unwrap();
+        let end_at = text.find("No files were modified.").unwrap();
+        assert!(note_at < end_at && text.ends_with("No files were modified.\n"), "{text}");
+    }
+
+    #[test]
+    fn an_ordinary_failure_gets_no_note() {
+        let f = Fixture::new("nonote");
+        f.write("a.txt", "one\n");
+        let report = f.run("*** Update File: a.txt\n@@\n-absent\n+x\n");
+        let Report::Failed { output, .. } = &report else { panic!("{report:?}") };
+        assert!(!output.contains("Note:"), "{output}");
     }
 
     #[test]

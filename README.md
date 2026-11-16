@@ -237,6 +237,7 @@ A /home/you/project/src/new.rs
 - **What is supported.** `Update File`, `Add File`, `Delete File` and `Move to`. `Add File` is refused when the path already exists (use `Update File`). A move keeps the file's mode. Files must be UTF-8 text.
 - **Where it applies.** The patch root is the shell's current directory. Paths must be relative, without `..` or a `.git` component, and must not pass through a symlink. A patch that touches a file someone else changed while it was being applied is refused.
 - **Only at a prompt.** A paste is examined only while the shell is waiting for a command, not inside an editor, `ssh` or a running program. A paste that is not exactly one patch reaches the shell unchanged. A patch without its `*** End Patch` line (for example cut short by the 4 MB clipboard limit) is refused and never reaches the shell.
+- **Pasted twice?** When a patch fails because its changes are already in the files, the failure text says so (`Note: every hunk of this patch appears to be already present ...`). The note is only an explanation; the outcome is still FAILED with nothing modified.
 - **Refusals** read `CVB patch REJECTED: reason`.
 
 This needs a terminal that sends bracketed paste (most do; Bash enables it by default). Set `CVB_PATCH_PASTE=off` to turn the feature off.

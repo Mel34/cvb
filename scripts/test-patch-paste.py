@@ -332,6 +332,20 @@ def main():
             s.settle()
             check("the prompt is back after a failure", DOT in bytes(s.buffer).split(b"CVB patch FAILED", 1)[-1])
 
+            # ------------------------------------- the same patch pasted twice
+            before_a = s.read("src/a.rs")
+            capture = s.paste_patch(
+                "*** Update File: src/a.rs\n@@\n one\n-two\n+TWO\n three\n"
+            ).decode()
+            check("a patch pasted twice fails and says its changes are already present",
+                  capture.startswith("CVB patch FAILED (apply_patch exit 1)\n")
+                  and "Note: every hunk of this patch appears to be already present" in capture
+                  and f"{s.project.resolve()}/src/a.rs (1 of 1 hunks)" in capture
+                  and capture.endswith("No files were modified.\n"),
+                  capture)
+            check("the second paste changed nothing", s.read("src/a.rs") == before_a)
+            s.settle()
+
             # ------------------------------------------------------- refusals
             capture = s.paste_patch("*** Add File: b.txt\n+overwrite\n").decode()
             check("Add File over an existing file is rejected",

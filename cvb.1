@@ -298,6 +298,12 @@ or
 .B CVB patch REJECTED: reason\c
 \&. Nothing is added to the shell history.
 .PP
+When a patch fails because its changes are already present in the files (for example, it was pasted twice), the output of
+.B apply_patch
+is followed by a line starting with
+.B Note:
+that names the files. The note only explains the failure; nothing is modified.
+.PP
 A paste is examined only while the shell waits for a command. Pastes that are not a single patch are passed to the shell unchanged; a patch without its end line is refused.
 .PP
 The environment variable
