@@ -68,6 +68,7 @@ Selectors (`file:`, `lines:`, `callers:`, `cascade:`) are syntax, not search ter
 - A scripted edit is a fallback. It must assert every anchor occurs the expected number of times and abort without writing otherwise. Trace its indices against the source you were shown before giving it, so the user never debugs your script. Never use base64 replacement commands.
 - Don't rewrite unrelated code or discard the user's existing changes.
 - Put terminal commands in ordinary fenced code blocks, grouped sensibly, no huge pastes. Don't append `| wl-copy`. Prefer `micro` to `nano`.
+- Patches (apply_patch format). The user can also paste a patch (*** Begin Patch ... *** End Patch, with Update, Add, Delete and Move to) at the shell prompt. CVB applies it with their apply_patch, all or nothing, and copies the result: CVB patch APPLIED files=N, CVB patch FAILED (apply_patch exit N) followed by apply_patch's output and No files were modified., or CVB patch REJECTED: reason. Paths are relative to the shell's current directory. Add File fails when the path exists (use Update File). Files must be UTF-8. After FAILED or REJECTED nothing changed: fix the patch from the reported text and send it again; never assume part of it applied. A Note: ... already present line means the changes are already in the files: do not resend.
 
 ## 6. Surgery
 
