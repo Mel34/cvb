@@ -13,6 +13,9 @@
 //!   first non-blank line must be exactly `*** Begin Patch`.
 //! * A patch is buffered until the end marker, up to [`MAX_PATCH_BYTES`]. Over the
 //!   cap, or on timeout, the held bytes are forwarded unchanged.
+//! * A paste whose first non-blank line is `diff --git ...`, or a `--- a/...` line
+//!   followed by `+++ `, is a unified diff. It has no end marker, so the whole
+//!   paste is the patch and the parser judges whether it is complete.
 //! * The whole paste must be exactly one patch: begin marker first, `*** End
 //!   Patch` last, only blank lines outside them. A paste that starts like a patch
 //!   but contains no `*** End Patch` line is [`PasteEvent::Reject`]ed (the
@@ -27,6 +30,9 @@ pub(crate) const PASTE_END: &[u8] = b"\x1b[201~";
 pub(crate) const MAX_PATCH_BYTES: usize = 3 * 1024 * 1024;
 
 const BEGIN: &[u8] = b"*** Begin Patch";
+const DIFF_GIT: &[u8] = b"diff --git ";
+const DIFF_OLD: &[u8] = b"--- ";
+const DIFF_NEW: &[u8] = b"+++ ";
 const END_LINE: &[u8] = b"*** End Patch";
 
 /// Why a patch-looking paste was not applied.
@@ -68,7 +74,7 @@ enum State {
     Normal,
     /// A paste started at an idle prompt; not yet known to be a patch.
     Sniff,
-    /// Known to be a patch; buffering until the end marker.
+    /// Known to be a patch (or a diff); buffering until the end marker.
     Buffer,
     /// Inside a paste that is passed through; looking for its end marker.
     Foreign,
@@ -84,6 +90,56 @@ pub(crate) struct PasteRecognizer {
     buf: Vec<u8>,
     /// Offset in `buf` from which the end marker still has to be searched.
     scan_from: usize,
+    /// What the held paste turned out to be (valid from `Buffer` on).
+    kind: Kind,
+}
+
+/// The syntax of a held paste.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// `*** Begin Patch` ... `*** End Patch`.
+    Envelope,
+    /// A unified diff.
+    Diff,
+}
+
+/// What the start of a paste says about a diff.
+enum DiffSniff {
+    Yes,
+    No,
+    /// Not enough bytes yet.
+    More,
+}
+
+/// Does `rest` (the paste without leading blank space) start a unified diff?
+/// `ended` says no more bytes will come.
+fn sniff_diff(rest: &[u8], ended: bool) -> DiffSniff {
+    let decide_more = |more: bool| if more && !ended { DiffSniff::More } else { DiffSniff::No };
+    if rest.starts_with(DIFF_GIT) {
+        return DiffSniff::Yes;
+    }
+    if DIFF_GIT.starts_with(rest) || DIFF_OLD.starts_with(rest) {
+        return decide_more(true);
+    }
+    if !rest.starts_with(DIFF_OLD) {
+        return DiffSniff::No;
+    }
+    // `--- ` line: it must name an `a/` path or /dev/null, then `+++ ` follows.
+    let Some(newline) = rest.iter().position(|b| *b == b'\n') else {
+        let line = trim_cr(rest);
+        let fits = |operand: &[u8]| operand.starts_with(line) || line.starts_with(operand);
+        return decide_more(fits(b"--- a/") || fits(b"--- /dev/null"));
+    };
+    let line = trim_cr(&rest[..newline]);
+    if !(line.starts_with(b"--- a/") || line.starts_with(b"--- /dev/null")) {
+        return DiffSniff::No;
+    }
+    let next = &rest[newline + 1..];
+    if next.starts_with(DIFF_NEW) {
+        DiffSniff::Yes
+    } else {
+        decide_more(DIFF_NEW.starts_with(next))
+    }
 }
 
 impl Default for PasteRecognizer {
@@ -98,6 +154,7 @@ impl PasteRecognizer {
             state: State::Normal,
             buf: Vec::new(),
             scan_from: 0,
+            kind: Kind::Envelope,
         }
     }
 
@@ -214,6 +271,23 @@ impl PasteRecognizer {
             .count();
         let rest = &content[skip..];
 
+        if !(rest.starts_with(BEGIN) || BEGIN.starts_with(rest)) {
+            // Not an envelope: maybe a unified diff.
+            return match sniff_diff(rest, end.is_some()) {
+                DiffSniff::Yes => {
+                    self.kind = Kind::Diff;
+                    self.state = State::Buffer;
+                    true
+                }
+                DiffSniff::No => {
+                    self.not_a_patch(end, events);
+                    true
+                }
+                DiffSniff::More => false,
+            };
+        }
+        self.kind = Kind::Envelope;
+
         if rest.len() < BEGIN.len() {
             if !BEGIN.starts_with(rest) || end.is_some() {
                 // Not a patch (or an empty paste): pass through.
@@ -262,7 +336,10 @@ impl PasteRecognizer {
         self.buf = rest;
         self.scan_from = 0;
         self.state = State::Normal;
-        events.push(classify(body));
+        events.push(match self.kind {
+            Kind::Envelope => classify(body),
+            Kind::Diff => classify_diff(body),
+        });
         true
     }
 
@@ -302,6 +379,20 @@ impl PasteRecognizer {
         push_forward(events, bytes);
         self.state = State::Foreign;
         self.scan_from = 0;
+    }
+}
+
+/// A unified diff: the whole paste, without blank lines around it, ending in
+/// one line feed. Only line feeds are trimmed at the end (a last line may be a
+/// context line holding a single space).
+fn classify_diff(body: Vec<u8>) -> PasteEvent {
+    match std::str::from_utf8(&body) {
+        Ok(text) => {
+            let text = text.trim_start_matches([' ', '\t', '\r', '\n']);
+            let text = text.trim_end_matches(['\r', '\n']);
+            PasteEvent::Patch(format!("{text}\n"))
+        }
+        Err(_) => PasteEvent::Reject(RejectReason::NotUtf8),
     }
 }
 
@@ -766,5 +857,107 @@ mod tests {
             assert_eq!(events, whole, "sizes {sizes:?}");
             assert_eq!(r.pending(), whole_r.pending(), "sizes {sizes:?}");
         }
+    }
+
+    const DIFF: &str = "diff --git a/a.txt b/a.txt\nindex 1..2 100644\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new";
+    const PLAIN_DIFF: &str = "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new";
+
+    fn diff_events(text: &str) -> Vec<PasteEvent> {
+        vec![PasteEvent::Patch(format!("{}\n", text.trim_end_matches('\n')))]
+    }
+
+    #[test]
+    fn recognizes_a_git_diff_for_every_chunking() {
+        for text in [DIFF, PLAIN_DIFF] {
+            let input = wrapped(text);
+            for size in 1..=input.len() {
+                let (events, r) = run(&input, &[size], true);
+                assert_eq!(events, diff_events(text), "chunk size {size}: {text}");
+                assert_eq!(r.pending(), Pending::Nothing, "chunk size {size}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_diff_is_trimmed_of_blank_lines_and_ends_in_one_line_feed() {
+        let (events, _) = run(&wrapped(&format!("\n \n{DIFF}\n\n\n")), &[usize::MAX], true);
+        assert_eq!(events, diff_events(DIFF));
+        // A final context line that is a single space survives.
+        let with_blank_context = "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n-a\n+b\n ";
+        let (events, _) = run(&wrapped(with_blank_context), &[usize::MAX], true);
+        assert_eq!(events, vec![PasteEvent::Patch(format!("{with_blank_context}\n"))]);
+    }
+
+    #[test]
+    fn a_diff_with_crlf_lines_is_kept_as_pasted() {
+        let crlf = DIFF.replace('\n', "\r\n");
+        let (events, _) = run(&wrapped(&crlf), &[usize::MAX], true);
+        let [PasteEvent::Patch(text)] = events.as_slice() else { panic!("{events:?}") };
+        assert!(text.starts_with("diff --git a/a.txt b/a.txt\r\n") && text.ends_with("+new\n"), "{text:?}");
+    }
+
+    #[test]
+    fn a_diff_that_is_not_valid_utf8_is_rejected() {
+        let mut input = PASTE_START.to_vec();
+        input.extend_from_slice(b"diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-\xff\n+b");
+        input.extend_from_slice(PASTE_END);
+        let (events, _) = run(&input, &[usize::MAX], true);
+        assert_eq!(events, vec![PasteEvent::Reject(RejectReason::NotUtf8)]);
+    }
+
+    #[test]
+    fn pastes_that_only_resemble_a_diff_reach_the_shell_unchanged() {
+        let cases = [
+            "---\ntitle: notes\n---\n",         // YAML front matter
+            "--- some markdown rule\n",           // not an a/ path
+            "--- a/x\nnot a plus line\n",         // no +++ after ---
+            "--- notes\n+++ more notes\n",        // a ---/+++ pair, but not a/ paths
+            "--- a/x",                             // cut right there
+            "diff -u old new\n",                  // classic diff command line
+            "diff --gi",                           // cut inside the marker
+            "difference between the two\n",
+            "- item\n- item\n",
+            "+++ b/x\n",
+        ];
+        for text in cases {
+            let input = wrapped(text);
+            for size in [usize::MAX, 7, 1] {
+                let (events, r) = run(&input, &[size], true);
+                assert_eq!(forwarded(&events), input, "{text:?} chunk {size}");
+                assert!(!events.iter().any(|e| !matches!(e, PasteEvent::Forward(_))), "{text:?}");
+                assert_eq!(r.pending(), Pending::Nothing);
+            }
+        }
+    }
+
+    #[test]
+    fn a_diff_pasted_while_a_command_runs_is_not_touched() {
+        let input = wrapped(DIFF);
+        let (events, _) = run(&input, &[usize::MAX], false);
+        assert_eq!(forwarded(&events), input);
+    }
+
+    #[test]
+    fn a_partial_diff_is_held_and_then_handed_over_on_timeout() {
+        let mut r = PasteRecognizer::new();
+        let mut input = PASTE_START.to_vec();
+        input.extend_from_slice(b"diff --git a/x b/x\n--- a/x\n");
+        assert!(r.feed(&input, true).is_empty());
+        assert_eq!(r.pending(), Pending::Paste);
+        let events = r.on_timeout();
+        assert_eq!(forwarded(&events), input);
+    }
+
+    #[test]
+    fn a_diff_followed_by_more_pastes_leaves_the_recognizer_ready() {
+        let mut input = wrapped(DIFF);
+        input.extend_from_slice(b"ls\r");
+        input.extend_from_slice(&wrapped(PATCH));
+        let (events, r) = run(&input, &[usize::MAX], true);
+        assert_eq!(events.len(), 3, "{events:?}");
+        assert!(matches!(&events[0], PasteEvent::Patch(t) if t.starts_with("diff --git")));
+        assert_eq!(events[1], PasteEvent::Forward(b"ls\r".to_vec()));
+        assert_eq!(events[2], expected_patch()[0]);
+        assert_eq!(r.pending(), Pending::Nothing);
     }
 }

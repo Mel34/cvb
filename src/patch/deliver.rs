@@ -18,6 +18,9 @@ pub(crate) const REDRAW_SEQUENCE: &[u8] = b"\x1b[9999~";
 /// Name of the program that applies the patch (looked up in `PATH`).
 pub(crate) const PROGRAM: &str = "apply_patch";
 
+/// Name of the program that applies unified diffs (`git apply`, looked up in `PATH`).
+pub(crate) const GIT_PROGRAM: &str = "git";
+
 /// `CVB_PATCH_PASTE=off` (or `0`, `false`, `no`) turns paste-to-apply off.
 pub(crate) fn enabled_by(value: Option<&OsStr>) -> bool {
     match value.and_then(OsStr::to_str) {
@@ -68,6 +71,7 @@ pub(crate) fn apply_for_shell(text: &str, shell_pid: i32) -> String {
         root: &root,
         state_base: &state_base,
         program: OsStr::new(PROGRAM),
+        git: OsStr::new(GIT_PROGRAM),
         timeout: DEFAULT_TIMEOUT,
     };
     run_patch(text, &env).to_text()

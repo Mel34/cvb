@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::patch::guard::check_tree;
-use crate::patch::parse::{Change, ParsedPatch, parse_patch};
+use crate::patch::parse::{Change, Format, ParsedPatch, parse_any};
 use crate::surgery::apply::{ABSENT_DIGEST, ApplyError, apply_plan_with_modes, sha256_hex};
 use crate::surgery::journal::{ProjectState, init_project_state};
 use crate::surgery::load::{MAX_AGGREGATE_BYTES, MAX_TARGET_BYTES};
@@ -46,6 +46,8 @@ pub(crate) struct Env<'a> {
     pub state_base: &'a Path,
     /// The `apply_patch` program: a bare name is looked up in `PATH`.
     pub program: &'a OsStr,
+    /// The `git` program that applies unified diffs (`git apply`).
+    pub git: &'a OsStr,
     pub timeout: Duration,
 }
 
@@ -54,8 +56,9 @@ pub(crate) struct Env<'a> {
 pub(crate) enum Report {
     /// Every change was committed.
     Applied { files: usize, output: String },
-    /// `apply_patch` failed in the scratch copy; the real tree is untouched.
-    Failed { exit: Option<i32>, output: String },
+    /// The program failed in the scratch copy; the real tree is untouched.
+    /// `tool` names it (`apply_patch` or `git apply`).
+    Failed { tool: &'static str, exit: Option<i32>, output: String },
     /// CVB refused or could not finish; the reason says what happened.
     Rejected(String),
 }
@@ -67,10 +70,10 @@ impl Report {
             Report::Applied { files, output } => {
                 format!("CVB patch APPLIED files={files}\n{}", with_newline(output))
             }
-            Report::Failed { exit, output } => {
+            Report::Failed { tool, exit, output } => {
                 let status = match exit {
-                    Some(code) => format!("apply_patch exit {code}"),
-                    None => "apply_patch was terminated by a signal".to_string(),
+                    Some(code) => format!("{tool} exit {code}"),
+                    None => format!("{tool} was terminated by a signal"),
                 };
                 format!(
                     "CVB patch FAILED ({status})\n{}No files were modified.\n",
@@ -119,7 +122,7 @@ fn new_id() -> String {
 
 /// Parses, checks and applies one pasted patch (`text` is a complete envelope).
 pub(crate) fn run_patch(text: &str, env: &Env) -> Report {
-    let parsed = match parse_patch(text) {
+    let parsed = match parse_any(text) {
         Ok(parsed) => parsed,
         Err(error) => return rejected(error.to_string()),
     };
@@ -147,7 +150,11 @@ pub(crate) fn run_patch(text: &str, env: &Env) -> Report {
         return rejected(reason);
     }
 
-    let (status, raw_output) = match run_program(env, &scratch, text) {
+    let tool = match parsed.format {
+        Format::ApplyPatch => Tool::ApplyPatch,
+        Format::GitDiff => Tool::GitApply,
+    };
+    let (status, raw_output) = match run_program(env, &scratch, text, tool) {
         Ok(result) => result,
         Err(reason) => return rejected(reason),
     };
@@ -159,12 +166,18 @@ pub(crate) fn run_patch(text: &str, env: &Env) -> Report {
             Some(note) => format!("{}{note}", with_newline(&output)),
             None => output,
         };
-        return Report::Failed { exit: status.code(), output };
+        return Report::Failed { tool: tool.label(), exit: status.code(), output };
     }
 
     let (plan, modes, files) = match build_plan(&parsed, &originals, &scratch.dir, &state, text, id) {
         Ok(result) => result,
         Err(reason) => return rejected(reason),
+    };
+    // `git apply` prints nothing on success: CVB writes the same kind of summary
+    // `apply_patch` does, so the report reads alike for both formats.
+    let output = match parsed.format {
+        Format::ApplyPatch => output,
+        Format::GitDiff => git_summary(&parsed, &state.canonical_root),
     };
     match apply_plan_with_modes(&state, &plan, &modes) {
         Ok(_) => Report::Applied { files, output },
@@ -173,6 +186,39 @@ pub(crate) fn run_patch(text: &str, env: &Env) -> Report {
         )),
         Err(error) => rejected(error.to_string()),
     }
+}
+
+/// The program that applies a patch.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tool {
+    ApplyPatch,
+    GitApply,
+}
+
+impl Tool {
+    fn label(self) -> &'static str {
+        match self {
+            Tool::ApplyPatch => "apply_patch",
+            Tool::GitApply => "git apply",
+        }
+    }
+}
+
+/// `Success. Updated the following files:` plus one line per file, with real paths.
+fn git_summary(parsed: &ParsedPatch, root: &Path) -> String {
+    let root = root.display();
+    let mut text = String::from("Success. Updated the following files:\n");
+    for op in &parsed.ops {
+        let line = match &op.change {
+            Change::Add => format!("A {root}/{}", op.path),
+            Change::Update => format!("M {root}/{}", op.path),
+            Change::Delete => format!("D {root}/{}", op.path),
+            Change::Move { to } => format!("M {root}/{to} (moved from {})", op.path),
+        };
+        text.push_str(&line);
+        text.push('\n');
+    }
+    text
 }
 
 /// UTF-8 text of every file the patch reads, keyed by path.
@@ -285,14 +331,34 @@ fn run_program(
     env: &Env,
     scratch: &Scratch,
     text: &str,
+    tool: Tool,
 ) -> Result<(std::process::ExitStatus, String), String> {
+    let label = tool.label();
     let out_file = fs::File::create(&scratch.out)
-        .map_err(|e| format!("cannot capture apply_patch output: {e}"))?;
+        .map_err(|e| format!("cannot capture {label} output: {e}"))?;
     let err_file = out_file
         .try_clone()
-        .map_err(|e| format!("cannot capture apply_patch output: {e}"))?;
+        .map_err(|e| format!("cannot capture {label} output: {e}"))?;
 
-    let mut child = Command::new(env.program)
+    let mut command = match tool {
+        Tool::ApplyPatch => Command::new(env.program),
+        Tool::GitApply => {
+            let mut command = Command::new(env.git);
+            // Strict, deterministic and outside any repository: the user's git
+            // configuration must not change how a patch applies, and the scratch
+            // copy must never be taken for part of a repository.
+            command
+                .args(["apply", "--whitespace=nowarn", "-"])
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("LC_ALL", "C");
+            if let Some(parent) = scratch.dir.parent() {
+                command.env("GIT_CEILING_DIRECTORIES", parent);
+            }
+            command
+        }
+    };
+    let mut child = command
         .current_dir(&scratch.dir)
         // A program that trusts $PWD must not be sent back to the real tree.
         .env("PWD", &scratch.dir)
@@ -301,13 +367,16 @@ fn run_program(
         .stderr(Stdio::from(err_file))
         .spawn()
         .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => "apply_patch not found in PATH".to_string(),
-            _ => format!("cannot run apply_patch: {e}"),
+            std::io::ErrorKind::NotFound => format!("{} not found in PATH", match tool {
+                Tool::ApplyPatch => "apply_patch",
+                Tool::GitApply => "git",
+            }),
+            _ => format!("cannot run {label}: {e}"),
         })?;
 
     // The patch always goes on stdin, with a final line feed. A separate thread
     // writes it so a program that stops reading cannot block CVB.
-    let mut stdin = child.stdin.take().ok_or("cannot open apply_patch stdin")?;
+    let mut stdin = child.stdin.take().ok_or_else(|| format!("cannot open {label} stdin"))?;
     let mut bytes = text.as_bytes().to_vec();
     if !bytes.ends_with(b"\n") {
         bytes.push(b'\n');
@@ -325,12 +394,12 @@ fn run_program(
                 let _ = child.wait();
                 let _ = writer.join();
                 return Err(format!(
-                    "apply_patch did not finish within {} seconds and was stopped; no files were modified",
+                    "{label} did not finish within {} seconds and was stopped; no files were modified",
                     env.timeout.as_secs()
                 ));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(5)),
-            Err(e) => return Err(format!("cannot wait for apply_patch: {e}")),
+            Err(e) => return Err(format!("cannot wait for {label}: {e}")),
         }
     };
     let _ = writer.join();
@@ -338,7 +407,7 @@ fn run_program(
     let mut captured = Vec::new();
     fs::File::open(&scratch.out)
         .and_then(|file| file.take(MAX_OUTPUT_BYTES as u64 + 1).read_to_end(&mut captured))
-        .map_err(|e| format!("cannot read apply_patch output: {e}"))?;
+        .map_err(|e| format!("cannot read {label} output: {e}"))?;
     let truncated = captured.len() > MAX_OUTPUT_BYTES;
     captured.truncate(MAX_OUTPUT_BYTES);
     let mut output = String::from_utf8_lossy(&captured).into_owned();
@@ -468,6 +537,9 @@ fn build_plan(
                 let proposed = read_result(scratch, &op.path)?;
                 total += proposed.len() as u64;
                 files.push(added(&op.path, proposed));
+                if let Some(&mode) = parsed.modes.get(&op.path) {
+                    modes.insert(op.path.clone(), mode);
+                }
                 changed += 1;
             }
             Change::Update => {
@@ -661,7 +733,13 @@ printf '%s\n' "${changed[@]}"
         }
 
         fn env(&self, timeout: Duration) -> Env<'_> {
-            Env { root: &self.root, state_base: &self.state, program: self.program.as_os_str(), timeout }
+            Env {
+                root: &self.root,
+                state_base: &self.state,
+                program: self.program.as_os_str(),
+                git: OsStr::new("git"),
+                timeout,
+            }
         }
 
         fn run(&self, body: &str) -> Report {
@@ -670,6 +748,11 @@ printf '%s\n' "${changed[@]}"
 
         fn run_with(&self, body: &str, timeout: Duration) -> Report {
             run_patch(&format!("*** Begin Patch\n{body}*** End Patch\n"), &self.env(timeout))
+        }
+
+        /// Runs a pasted unified diff (the text is used as it is).
+        fn run_diff(&self, text: &str) -> Report {
+            run_patch(text, &self.env(Duration::from_secs(30)))
         }
 
         /// Every file under the root with its bytes and mode.
@@ -773,7 +856,7 @@ printf '%s\n' "${changed[@]}"
              *** Add File: c.txt\n+c\n",
         );
 
-        let Report::Failed { exit: Some(1), output } = &report else {
+        let Report::Failed { exit: Some(1), output, .. } = &report else {
             panic!("expected a failure, got {report:?}");
         };
         let root = f.root.display();
@@ -798,7 +881,7 @@ printf '%s\n' "${changed[@]}"
 
         let report = f.run("*** Update File: a.txt\n@@\n head\n-OLD\n+NEW\n tail\n");
 
-        let Report::Failed { exit: Some(1), output } = &report else {
+        let Report::Failed { exit: Some(1), output, .. } = &report else {
             panic!("expected a failure, got {report:?}");
         };
         let root = f.root.display();
@@ -819,6 +902,212 @@ printf '%s\n' "${changed[@]}"
         let report = f.run("*** Update File: a.txt\n@@\n-absent\n+x\n");
         let Report::Failed { output, .. } = &report else { panic!("{report:?}") };
         assert!(!output.contains("Note:"), "{output}");
+    }
+
+    // ---------------------------------------------------------------- git diffs
+
+    #[test]
+    fn a_git_diff_updates_a_file_and_reports_a_summary_with_real_paths() {
+        let f = Fixture::new("diff-update");
+        f.write("src/a.rs", "one\ntwo\nthree\n");
+        fs::set_permissions(f.root.join("src/a.rs"), fs::Permissions::from_mode(0o750)).unwrap();
+
+        let report = f.run_diff(
+            "diff --git a/src/a.rs b/src/a.rs\nindex 1..2 100750\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,3 +1,3 @@\n one\n-two\n+TWO\n three\n",
+        );
+
+        let (files, output) = applied(&report);
+        assert_eq!(files, 1);
+        assert_eq!(f.read("src/a.rs"), "one\nTWO\nthree\n");
+        assert_eq!(f.mode("src/a.rs"), 0o750, "an update keeps the mode");
+        let root = f.root.display();
+        assert_eq!(output, format!("Success. Updated the following files:\nM {root}/src/a.rs\n"));
+        assert!(report.to_text().starts_with("CVB patch APPLIED files=1\nSuccess."));
+        assert_eq!(f.leftovers(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_git_diff_adds_deletes_and_moves_together_and_keeps_modes() {
+        let f = Fixture::new("diff-mixed");
+        f.write("gone.txt", "bye\n");
+        f.write("bin/tool.sh", "#!/bin/sh\necho old\n");
+        fs::set_permissions(f.root.join("bin/tool.sh"), fs::Permissions::from_mode(0o775)).unwrap();
+
+        let report = f.run_diff(concat!(
+            "diff --git a/new/dir/run.sh b/new/dir/run.sh\nnew file mode 100755\nindex 000..111\n--- /dev/null\n+++ b/new/dir/run.sh\n@@ -0,0 +1,2 @@\n+#!/bin/sh\n+echo hi\n",
+            "diff --git a/new/empty b/new/empty\nnew file mode 100644\nindex 000..e69de29\n",
+            "diff --git a/gone.txt b/gone.txt\ndeleted file mode 100644\nindex 111..000\n--- a/gone.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-bye\n",
+            "diff --git a/bin/tool.sh b/bin/tool2.sh\nsimilarity index 80%\nrename from bin/tool.sh\nrename to bin/tool2.sh\nindex 1..2\n--- a/bin/tool.sh\n+++ b/bin/tool2.sh\n@@ -1,2 +1,2 @@\n #!/bin/sh\n-echo old\n+echo new\n",
+        ));
+
+        let (files, output) = applied(&report);
+        assert_eq!(files, 4, "{output}");
+        assert_eq!(f.read("new/dir/run.sh"), "#!/bin/sh\necho hi\n");
+        assert_eq!(f.mode("new/dir/run.sh"), 0o755, "the new file's mode comes from the diff");
+        assert_eq!(f.read("new/empty"), "");
+        assert_eq!(f.mode("new/empty"), 0o644);
+        assert!(!f.root.join("gone.txt").exists());
+        assert!(!f.root.join("bin/tool.sh").exists());
+        assert_eq!(f.read("bin/tool2.sh"), "#!/bin/sh\necho new\n");
+        assert_eq!(f.mode("bin/tool2.sh"), 0o775, "a move keeps the source's mode");
+        let root = f.root.display();
+        assert!(output.contains(&format!("A {root}/new/dir/run.sh")), "{output}");
+        assert!(output.contains(&format!("D {root}/gone.txt")), "{output}");
+        assert!(output.contains(&format!("M {root}/bin/tool2.sh (moved from bin/tool.sh)")), "{output}");
+        assert_eq!(f.leftovers(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_pure_rename_moves_the_file() {
+        let f = Fixture::new("diff-rename");
+        f.write("a.txt", "x\n");
+        let report = f.run_diff("diff --git a/a.txt b/b.txt\nsimilarity index 100%\nrename from a.txt\nrename to b.txt\n");
+        applied(&report);
+        assert!(!f.root.join("a.txt").exists());
+        assert_eq!(f.read("b.txt"), "x\n");
+    }
+
+    #[test]
+    fn a_failing_git_diff_leaves_the_tree_untouched_and_names_git_apply() {
+        let f = Fixture::new("diff-atomic");
+        f.write("a.txt", "one\n");
+        f.write("b.txt", "two\n");
+        let before = f.snapshot();
+
+        let report = f.run_diff(concat!(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-one\n+ONE\n",
+            "diff --git a/b.txt b/b.txt\n--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-does not exist\n+x\n",
+        ));
+
+        let Report::Failed { tool: "git apply", exit: Some(code), output } = &report else {
+            panic!("expected a git apply failure, got {report:?}");
+        };
+        assert_ne!(*code, 0);
+        assert!(output.contains("b.txt"), "{output}");
+        assert!(!output.contains(SCRATCH_PREFIX), "{output}");
+        assert_eq!(f.snapshot(), before);
+        let text = report.to_text();
+        assert!(text.starts_with(&format!("CVB patch FAILED (git apply exit {code})\n")), "{text}");
+        assert!(text.ends_with("No files were modified.\n"), "{text}");
+        assert_eq!(f.leftovers(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_git_diff_for_a_file_without_a_final_newline_applies() {
+        let f = Fixture::new("diff-nonl");
+        f.write("a.txt", "one\ntwo");
+        let report = f.run_diff(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n one\n-two\n\\ No newline at end of file\n+TWO\n\\ No newline at end of file\n",
+        );
+        applied(&report);
+        assert_eq!(f.read("a.txt"), "one\nTWO");
+    }
+
+    #[test]
+    fn the_same_guards_apply_to_diffs() {
+        let f = Fixture::new("diff-guards");
+        f.write("b.txt", "b\n");
+        let before = f.snapshot();
+        for (diff, reason) in [
+            ("diff --git a/b.txt b/b.txt\nnew file mode 100644\n--- /dev/null\n+++ b/b.txt\n@@ -0,0 +1 @@\n+over\n", "Add File target already exists: b.txt"),
+            ("diff --git a/nope.txt b/nope.txt\n--- a/nope.txt\n+++ b/nope.txt\n@@ -1 +1 @@\n-a\n+b\n", "target does not exist: nope.txt"),
+            ("diff --git a/../x b/../x\n--- a/../x\n+++ b/../x\n@@ -1 +1 @@\n-a\n+b\n", "unsafe path"),
+        ] {
+            let Report::Rejected(text) = f.run_diff(diff) else { panic!("{diff}") };
+            assert!(text.contains(reason), "{reason}: {text}");
+        }
+        assert_eq!(f.snapshot(), before);
+    }
+
+    #[test]
+    fn a_truncated_or_unsupported_diff_is_rejected_before_anything_runs() {
+        let f = Fixture::new("diff-reject");
+        f.write("a.txt", "one\ntwo\n");
+        let before = f.snapshot();
+        let Report::Rejected(text) = f.run_diff(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n one\n",
+        ) else {
+            panic!()
+        };
+        assert!(text.starts_with("incomplete paste") && text.contains("4 MB"), "{text}");
+        let Report::Rejected(text) =
+            f.run_diff("diff --git a/a.txt b/a.txt\nindex 1..2\nBinary files a/a.txt and b/a.txt differ\n")
+        else {
+            panic!()
+        };
+        assert!(text.contains("binary patches"), "{text}");
+        let Report::Rejected(text) =
+            f.run_diff("diff --git a/a.txt b/a.txt\nold mode 100644\nnew mode 100755\n")
+        else {
+            panic!()
+        };
+        assert!(text.contains("mode change"), "{text}");
+        assert_eq!(f.snapshot(), before);
+    }
+
+    #[test]
+    fn a_missing_git_is_reported_by_name() {
+        let f = Fixture::new("diff-nogit");
+        f.write("a.txt", "one\n");
+        let env = Env {
+            root: &f.root,
+            state_base: &f.state,
+            program: f.program.as_os_str(),
+            git: OsStr::new("definitely-not-a-git-binary"),
+            timeout: Duration::from_secs(5),
+        };
+        let report = run_patch(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-one\n+two\n",
+            &env,
+        );
+        assert_eq!(report, Report::Rejected("git not found in PATH".into()));
+        assert_eq!(f.read("a.txt"), "one\n");
+    }
+
+    /// The state directory (and so the scratch copy) may sit inside a repository,
+    /// for example when `XDG_STATE_HOME` is under a dotfiles repo. `git apply`
+    /// must still treat the scratch copy as a plain directory.
+    #[test]
+    fn a_repository_around_the_state_directory_does_not_change_how_a_diff_applies() {
+        let f = Fixture::new("diff-in-repo");
+        let init = Command::new("git").args(["init", "-q"]).current_dir(&f.base).status().unwrap();
+        assert!(init.success());
+        // A repository whose index and ignore rules would matter to a repo-aware apply.
+        fs::write(f.base.join(".gitignore"), "*.txt\n").unwrap();
+        f.write("a.txt", "one\n");
+        let report = f.run_diff("diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-one\n+two\n");
+        applied(&report);
+        assert_eq!(f.read("a.txt"), "two\n");
+    }
+
+    #[test]
+    fn a_diff_is_applied_by_git_and_never_by_apply_patch() {
+        // The fake apply_patch logs its stdin; it must not have run for a diff.
+        let f = Fixture::new("diff-not-fake");
+        f.write("a.txt", "one\n");
+        applied(&f.run_diff("diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-one\n+two\n"));
+        assert_eq!(f.log("stdin"), "");
+        assert_eq!(f.read("a.txt"), "two\n");
+    }
+
+    #[test]
+    fn an_apply_patch_envelope_is_still_applied_by_apply_patch() {
+        let f = Fixture::new("envelope-still");
+        f.write("a.txt", "one\n");
+        applied(&f.run("*** Update File: a.txt\n@@\n-one\n+two\n"));
+        assert!(f.log("stdin").starts_with("*** Begin Patch"));
+    }
+
+    #[test]
+    fn the_failure_label_follows_the_tool() {
+        assert_eq!(
+            Report::Failed { tool: "git apply", exit: Some(128), output: "boom".into() }.to_text(),
+            "CVB patch FAILED (git apply exit 128)\nboom\nNo files were modified.\n"
+        );
+        assert_eq!(
+            Report::Failed { tool: "git apply", exit: None, output: String::new() }.to_text(),
+            "CVB patch FAILED (git apply was terminated by a signal)\nNo files were modified.\n"
+        );
     }
 
     #[test]
@@ -958,6 +1247,7 @@ printf '%s\n' "${changed[@]}"
             root: &f.root,
             state_base: &f.state,
             program: OsStr::new("definitely-not-an-apply-patch-binary"),
+            git: OsStr::new("definitely-not-a-git-binary"),
             timeout: Duration::from_secs(5),
         };
         let report = run_patch(
@@ -995,7 +1285,10 @@ printf '%s\n' "${changed[@]}"
         text.push_str(&"+y\n".repeat(200_000));
         text.push_str("*** End Patch\n");
         let report = run_patch(&text, &f.env(Duration::from_secs(30)));
-        assert_eq!(report, Report::Failed { exit: Some(3), output: "nope\n".into() });
+        assert_eq!(
+            report,
+            Report::Failed { tool: "apply_patch", exit: Some(3), output: "nope\n".into() }
+        );
     }
 
     #[test]
@@ -1135,11 +1428,11 @@ printf '%s\n' "${changed[@]}"
             "CVB patch APPLIED files=2\nSuccess.\nM /p/a\n"
         );
         assert_eq!(
-            Report::Failed { exit: Some(1), output: "boom".into() }.to_text(),
+            Report::Failed { tool: "apply_patch", exit: Some(1), output: "boom".into() }.to_text(),
             "CVB patch FAILED (apply_patch exit 1)\nboom\nNo files were modified.\n"
         );
         assert_eq!(
-            Report::Failed { exit: Some(1), output: String::new() }.to_text(),
+            Report::Failed { tool: "apply_patch", exit: Some(1), output: String::new() }.to_text(),
             "CVB patch FAILED (apply_patch exit 1)\nNo files were modified.\n"
         );
         assert_eq!(

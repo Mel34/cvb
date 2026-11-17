@@ -405,6 +405,68 @@ def main():
             check("a paste that merely mentions the marker passes through",
                   "mentions *** Begin Patch only" in payload and "REJECTED" not in payload, payload)
 
+            # ------------------------------------------------- git diff pastes
+            s.write("d.txt", "alpha\nbeta\ngamma\n")
+            s.write("gone.txt", "bye\n")
+            capture = s.paste_patch(
+                "diff --git a/d.txt b/d.txt\nindex 111..222 100644\n--- a/d.txt\n+++ b/d.txt\n"
+                "@@ -1,3 +1,3 @@\n alpha\n-beta\n+BETA\n gamma\n"
+                "diff --git a/dir/run.sh b/dir/run.sh\nnew file mode 100755\nindex 000..111\n"
+                "--- /dev/null\n+++ b/dir/run.sh\n@@ -0,0 +1,2 @@\n+#!/bin/sh\n+echo hi\n"
+                "diff --git a/gone.txt b/gone.txt\ndeleted file mode 100644\nindex 111..000\n"
+                "--- a/gone.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-bye\n",
+                wrap=False,
+            ).decode()
+            check("a pasted git diff is applied (update, new executable file, delete)",
+                  s.read("d.txt") == "alpha\nBETA\ngamma\n"
+                  and s.read("dir/run.sh") == "#!/bin/sh\necho hi\n"
+                  and (s.project / "dir/run.sh").stat().st_mode & 0o777 == 0o755
+                  and not (s.project / "gone.txt").exists(),
+                  capture)
+            check("the clipboard holds the APPLIED report for a diff, with real paths",
+                  capture.startswith("CVB patch APPLIED files=3\n")
+                  and f"M {s.project.resolve()}/d.txt" in capture
+                  and f"A {s.project.resolve()}/dir/run.sh" in capture
+                  and "patch-scratch" not in capture,
+                  capture)
+            s.settle()
+            check("the prompt is drawn again after a diff result",
+                  DOT in bytes(s.buffer).split(b"CVB patch APPLIED", 1)[-1])
+
+            before_d = s.read("d.txt")
+            s.write("e.txt", "one\n")
+            capture = s.paste_patch(
+                "diff --git a/d.txt b/d.txt\n--- a/d.txt\n+++ b/d.txt\n@@ -1 +1 @@\n-alpha\n+ALPHA\n"
+                "diff --git a/e.txt b/e.txt\n--- a/e.txt\n+++ b/e.txt\n@@ -1 +1 @@\n-missing\n+x\n",
+                wrap=False,
+            ).decode()
+            check("a failing git diff reports git apply's failure and that nothing was modified",
+                  capture.startswith("CVB patch FAILED (git apply exit")
+                  and capture.endswith("No files were modified.\n")
+                  and "e.txt" in capture and "patch-scratch" not in capture,
+                  capture)
+            check("a failing git diff leaves every file untouched",
+                  s.read("d.txt") == before_d and s.read("e.txt") == "one\n")
+
+            capture = s.paste_patch(
+                "diff --git a/d.txt b/d.txt\n--- a/d.txt\n+++ b/d.txt\n@@ -1,3 +1,3 @@\n alpha\n",
+                wrap=False,
+            ).decode()
+            check("a git diff cut inside a hunk is rejected as incomplete, not run",
+                  "CVB patch REJECTED: incomplete paste" in capture and s.read("d.txt") == before_d,
+                  capture)
+            s.settle()
+            check("the cut diff did not reach the shell", b"command not found" not in bytes(s.buffer))
+
+            s.settle()
+            before = len(s.captures())
+            s.paste("--- not a diff, just text")
+            s.settle()
+            s.send(b"\n")
+            payload = s.wait_capture(before + 1)[before].decode()
+            check("a paste that only starts with dashes passes through to the shell",
+                  "---: command not found" in payload and "CVB patch" not in payload, payload)
+
             # ------------------------------ not at a prompt: passes through
             s.write("untouched.txt", "keep\n")
             s.send(b"cat > catted.txt\n")

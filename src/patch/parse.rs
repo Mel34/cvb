@@ -17,7 +17,7 @@
 //! *** End Patch
 //! ```
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::surgery::validate_relative_path;
 
@@ -49,10 +49,23 @@ pub(crate) struct FileOp {
     pub line: usize,
 }
 
+/// Which syntax a patch was written in. It decides the program that applies it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Format {
+    /// `*** Begin Patch` ... `*** End Patch`, applied by `apply_patch`.
+    ApplyPatch,
+    /// A unified diff as `git diff` prints it, applied by `git apply`.
+    GitDiff,
+}
+
 /// A structurally valid patch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ParsedPatch {
     pub ops: Vec<FileOp>,
+    pub format: Format,
+    /// Exact permission bits for added files whose patch states them
+    /// (`new file mode 100755`), keyed by path.
+    pub modes: HashMap<String, u32>,
 }
 
 impl ParsedPatch {
@@ -83,6 +96,12 @@ pub(crate) enum ParseError {
     DuplicatePath { line: usize, path: String },
     MoveToSelf { line: usize, path: String },
     EmptyUpdate { line: usize, path: String },
+    /// A diff that stops inside a hunk (the clipboard probably cut it short).
+    Truncated { line: usize },
+    /// Valid syntax that CVB does not apply (binary patches, mode changes, ...).
+    Unsupported { line: usize, what: String },
+    /// A diff that is malformed in the way the message says.
+    BadDiff { line: usize, message: String },
 }
 
 impl std::fmt::Display for ParseError {
@@ -118,6 +137,15 @@ impl std::fmt::Display for ParseError {
             ParseError::EmptyUpdate { line, path } => {
                 write!(f, "line {line}: update of {} has no changes", show(path))
             }
+            ParseError::Truncated { line } => write!(
+                f,
+                "incomplete paste: the diff ends inside a hunk at line {line}. The clipboard may \
+                 have truncated it (4 MB limit); split the patch into smaller ones"
+            ),
+            ParseError::Unsupported { line, what } => {
+                write!(f, "line {line}: not supported: {what}")
+            }
+            ParseError::BadDiff { line, message } => write!(f, "line {line}: {message}"),
         }
     }
 }
@@ -126,7 +154,7 @@ impl std::error::Error for ParseError {}
 
 /// Quotes text for a message, with control characters made visible and long
 /// text cut short, so a hostile line cannot drive the terminal.
-fn show(text: &str) -> String {
+pub(crate) fn show(text: &str) -> String {
     let mut out = String::from("'");
     for (count, ch) in text.chars().enumerate() {
         if count >= 80 {
@@ -148,6 +176,17 @@ enum Open {
     Add,
     Delete,
     Update { index: usize, body: bool, moved: bool },
+}
+
+/// Parses a pasted patch in either syntax: `*** Begin Patch` selects the
+/// `apply_patch` format, a first line of `diff --git ` or `--- ` selects a diff.
+pub(crate) fn parse_any(text: &str) -> Result<ParsedPatch, ParseError> {
+    let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    if first.starts_with("diff --git ") || first.starts_with("--- ") {
+        crate::patch::gitdiff::parse_git_diff(text)
+    } else {
+        parse_patch(text)
+    }
 }
 
 /// Parses `text`, which must be one complete patch.
@@ -243,7 +282,7 @@ pub(crate) fn parse_patch(text: &str) -> Result<ParsedPatch, ParseError> {
     if ops.is_empty() {
         return Err(ParseError::NoFiles);
     }
-    Ok(ParsedPatch { ops })
+    Ok(ParsedPatch { ops, format: Format::ApplyPatch, modes: HashMap::new() })
 }
 
 fn unexpected(line: usize, text: &str) -> ParseError {
@@ -260,7 +299,7 @@ fn finish(open: &Open, ops: &[FileOp]) -> Result<(), ParseError> {
 }
 
 /// Syntax rules for a header path, and uniqueness across the whole patch.
-fn checked_path(
+pub(crate) fn checked_path(
     raw: &str,
     line: usize,
     seen: &mut HashSet<String>,
