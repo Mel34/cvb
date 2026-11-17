@@ -66,6 +66,11 @@ pub(crate) struct ParsedPatch {
     /// Exact permission bits for added files whose patch states them
     /// (`new file mode 100755`), keyed by path.
     pub modes: HashMap<String, u32>,
+    /// For a diff whose hunk header counts were wrong: the diff with the counts
+    /// corrected, which is what gets applied. `None` means "apply the pasted text".
+    pub normalized: Option<String>,
+    /// Remarks for the report (what CVB corrected).
+    pub notes: Vec<String>,
 }
 
 impl ParsedPatch {
@@ -282,7 +287,13 @@ pub(crate) fn parse_patch(text: &str) -> Result<ParsedPatch, ParseError> {
     if ops.is_empty() {
         return Err(ParseError::NoFiles);
     }
-    Ok(ParsedPatch { ops, format: Format::ApplyPatch, modes: HashMap::new() })
+    Ok(ParsedPatch {
+        ops,
+        format: Format::ApplyPatch,
+        modes: HashMap::new(),
+        normalized: None,
+        notes: Vec::new(),
+    })
 }
 
 fn unexpected(line: usize, text: &str) -> ParseError {

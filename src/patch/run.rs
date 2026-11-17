@@ -154,7 +154,7 @@ pub(crate) fn run_patch(text: &str, env: &Env) -> Report {
         Format::ApplyPatch => Tool::ApplyPatch,
         Format::GitDiff => Tool::GitApply,
     };
-    let (status, raw_output) = match run_program(env, &scratch, text, tool) {
+    let (status, raw_output) = match run_program(env, &scratch, parsed.normalized.as_deref().unwrap_or(text), tool) {
         Ok(result) => result,
         Err(reason) => return rejected(reason),
     };
@@ -166,6 +166,7 @@ pub(crate) fn run_patch(text: &str, env: &Env) -> Report {
             Some(note) => format!("{}{note}", with_newline(&output)),
             None => output,
         };
+        let output = with_notes(output, &parsed.notes);
         return Report::Failed { tool: tool.label(), exit: status.code(), output };
     }
 
@@ -179,6 +180,7 @@ pub(crate) fn run_patch(text: &str, env: &Env) -> Report {
         Format::ApplyPatch => output,
         Format::GitDiff => git_summary(&parsed, &state.canonical_root),
     };
+    let output = with_notes(output, &parsed.notes);
     match apply_plan_with_modes(&state, &plan, &modes) {
         Ok(_) => Report::Applied { files, output },
         Err(ApplyError::Stale { path, .. }) => rejected(format!(
@@ -186,6 +188,19 @@ pub(crate) fn run_patch(text: &str, env: &Env) -> Report {
         )),
         Err(error) => rejected(error.to_string()),
     }
+}
+
+/// `output` followed by the remarks CVB wants to make (what it corrected).
+fn with_notes(output: String, notes: &[String]) -> String {
+    if notes.is_empty() {
+        return output;
+    }
+    let mut text = with_newline(&output);
+    for note in notes {
+        text.push_str(note);
+        text.push('\n');
+    }
+    text
 }
 
 /// The program that applies a patch.
@@ -1025,7 +1040,7 @@ printf '%s\n' "${changed[@]}"
         f.write("a.txt", "one\ntwo\n");
         let before = f.snapshot();
         let Report::Rejected(text) = f.run_diff(
-            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n one\n",
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n",
         ) else {
             panic!()
         };
@@ -1043,6 +1058,53 @@ printf '%s\n' "${changed[@]}"
         };
         assert!(text.contains("mode change"), "{text}");
         assert_eq!(f.snapshot(), before);
+    }
+
+    /// The first diff from the field: the header claims 7 and 7 lines, the hunk
+    /// has 8 and 8 (the `///` line), as LLMs routinely miscount.
+    #[test]
+    fn a_diff_whose_header_counts_too_few_lines_is_corrected_and_applied() {
+        let f = Fixture::new("diff-undercount");
+        f.write(
+            "src/io.zig",
+            "        condition: c.pthread_cond_t = undefined,\n        event_fd: std.posix.fd_t,\n        threads: []std.Thread,\n        execute: *const fn (?*anyopaque, Task) Result,\n        discard_result: *const fn (Result) void,\n        context: ?*anyopaque,\n\n        /// `worker_count` and `capacity` must both be greater than zero.\n",
+        );
+        let report = f.run_diff(
+            "diff --git a/src/io.zig b/src/io.zig\n--- a/src/io.zig\n+++ b/src/io.zig\n@@ -15,7 +15,7 @@ pub fn WorkerPool(comptime Task: type, comptime Result: type) type {\n         condition: c.pthread_cond_t = undefined,\n         event_fd: std.posix.fd_t,\n         threads: []std.Thread,\n         execute: *const fn (?*anyopaque, Task) Result,\n-        discard_result: *const fn (Result) void,\n+        discard_result: *const fn (?*anyopaque, Result) void,\n         context: ?*anyopaque,\n\n         /// `worker_count` and `capacity` must both be greater than zero.\n",
+        );
+        let (files, output) = applied(&report);
+        assert_eq!(files, 1);
+        assert!(f.read("src/io.zig").contains("discard_result: *const fn (?*anyopaque, Result) void,"));
+        assert!(f.read("src/io.zig").ends_with("greater than zero.\n"));
+        assert!(output.contains("Note: corrected the line counts of 1 hunk header "), "{output}");
+        assert_eq!(f.leftovers(), Vec::<String>::new());
+    }
+
+    /// The second diff from the field: the header claims 9 old lines, there are 7.
+    #[test]
+    fn a_diff_whose_header_counts_too_many_lines_is_corrected_and_applied() {
+        let f = Fixture::new("diff-overcount");
+        f.write(
+            "t.zig",
+            "    try std.testing.expectEqual(@as(u32, 2), pool.tryPopResult().?);\n    try std.testing.expect(pool.trySubmit(3));\n\n    var results: [2]u32 = undefined;\n    try collect(pool, &results);\n    try std.testing.expectEqualSlices(u32, &.{ 4, 6 }, &results);\n}\n",
+        );
+        let report = f.run_diff(
+            "diff --git a/t.zig b/t.zig\n--- a/t.zig\n+++ b/t.zig\n@@ -98,9 +98,11 @@ test \"completed uncollected results retain outstanding capacity\" {\n     try std.testing.expectEqual(@as(u32, 2), pool.tryPopResult().?);\n     try std.testing.expect(pool.trySubmit(3));\n \n+    // The second result was already queued before the new submission.\n+    try waitForResults(pool, 1);\n     var results: [2]u32 = undefined;\n-    try collect(pool, &results);\n+    for (&results) |*slot| {\n+        slot.* = pool.tryPopResult() orelse return error.NotifiedResultMissing;\n+    }\n     try std.testing.expectEqualSlices(u32, &.{ 4, 6 }, &results);\n }\n",
+        );
+        let (_, output) = applied(&report);
+        let text = f.read("t.zig");
+        assert!(text.contains("try waitForResults(pool, 1);") && !text.contains("try collect(pool"), "{text}");
+        assert!(output.contains("Note: corrected the line counts"), "{output}");
+    }
+
+    #[test]
+    fn a_failing_diff_with_wrong_counts_still_reports_the_correction() {
+        let f = Fixture::new("diff-count-fail");
+        f.write("a.txt", "one\n");
+        let report = f.run_diff("diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,5 +1,5 @@\n-absent\n+x\n");
+        let Report::Failed { output, .. } = &report else { panic!("{report:?}") };
+        assert!(output.contains("Note: corrected the line counts of 1 hunk header"), "{output}");
+        assert_eq!(f.read("a.txt"), "one\n");
     }
 
     #[test]

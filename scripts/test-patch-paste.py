@@ -449,14 +449,26 @@ def main():
                   s.read("d.txt") == before_d and s.read("e.txt") == "one\n")
 
             capture = s.paste_patch(
-                "diff --git a/d.txt b/d.txt\n--- a/d.txt\n+++ b/d.txt\n@@ -1,3 +1,3 @@\n alpha\n",
+                "diff --git a/d.txt b/d.txt\n--- a/d.txt\n+++ b/d.txt\n@@ -1,3 +1,3 @@\n",
                 wrap=False,
             ).decode()
-            check("a git diff cut inside a hunk is rejected as incomplete, not run",
+            check("a git diff cut right after a hunk header is rejected as incomplete, not run",
                   "CVB patch REJECTED: incomplete paste" in capture and s.read("d.txt") == before_d,
                   capture)
             s.settle()
             check("the cut diff did not reach the shell", b"command not found" not in bytes(s.buffer))
+
+            # A diff whose header counts are wrong (LLMs miscount) is corrected, applied and says so.
+            s.write("w.txt", "one\ntwo\nthree\nfour\n")
+            capture = s.paste_patch(
+                "diff --git a/w.txt b/w.txt\n--- a/w.txt\n+++ b/w.txt\n@@ -1,9 +1,2 @@\n one\n-two\n+TWO\n three\n",
+                wrap=False,
+            ).decode()
+            check("a diff with wrong hunk header counts is applied and the report says it corrected them",
+                  s.read("w.txt") == "one\nTWO\nthree\nfour\n"
+                  and capture.startswith("CVB patch APPLIED files=1\n")
+                  and "Note: corrected the line counts of 1 hunk header" in capture,
+                  capture)
 
             s.settle()
             before = len(s.captures())

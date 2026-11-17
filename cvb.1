@@ -284,7 +284,7 @@ path prefixes. It is applied with
 .B git apply
 (found in
 .BR PATH )
-on the same scratch copy and committed in the same transaction. Modified, new (with the stated file mode), deleted and renamed files are supported. Binary patches, copies, symbolic links, submodules, mode changes and merge diffs are refused with a reason. The line counts of every hunk header are checked, so a diff that ends inside a hunk is refused.
+on the same scratch copy and committed in the same transaction. Modified, new (with the stated file mode), deleted and renamed files are supported. Binary patches, copies, symbolic links, submodules, mode changes and merge diffs are refused with a reason. The line counts in the hunk headers are not trusted: every hunk is recounted from its lines, headers that were wrong are corrected, and the report says so. A diff that ends right after a hunk header is refused.
 .PP
 CVB runs the
 .B apply_patch

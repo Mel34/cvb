@@ -2,11 +2,20 @@
 //!
 //! Like the `apply_patch` parser this reads structure only: which files change
 //! and how, so the paths can be checked and the result committed. `git apply`
-//! interprets the hunks, in a scratch copy. One thing is read deeper than in the
-//! other format: the line counts of every hunk header (`@@ -a,b +c,d @@`). A diff
-//! has no end marker, so those counts are the only way to see that a paste was cut
-//! short, and they decide where a hunk ends (a removed line may itself start with
-//! `--`).
+//! interprets the hunks, in a scratch copy.
+//!
+//! The line counts in the hunk headers (`@@ -a,b +c,d @@`) are not trusted. LLMs
+//! cannot count lines and get them wrong in both directions, and a strict reader
+//! would refuse most of what they write. A hunk therefore ends where the
+//! structure says it ends (the next `@@`, `diff --git`, or a `--- a/...` /
+//! `+++ ...` pair), its counts are recomputed from its lines, and only a header
+//! whose counts differ is rewritten; `git apply` then receives the corrected
+//! text and the report says so. The header counts serve only to decide whether
+//! blank lines at the very end of a hunk are context or separators.
+//!
+//! Consequence: a diff has no end marker and the counts no longer vouch for
+//! completeness, so a paste cut inside a hunk is noticed only when the hunk has
+//! no lines at all. The optional review gate is the safety net for that.
 //!
 //! Supported: modified files, new files (with their mode), deleted files, renames
 //! (with or without changes), and `\ No newline at end of file`. Refused with a
@@ -67,25 +76,37 @@ fn same_path(rest: &str) -> Option<String> {
     (tail == first).then(|| first.to_string())
 }
 
-fn range_count(range: &str) -> Option<usize> {
-    match range.split_once(',') {
+/// `@@ -a,b +c,d @@tail`.
+struct HunkHeader<'a> {
+    old_start: &'a str,
+    new_start: &'a str,
+    old_count: usize,
+    new_count: usize,
+    /// Everything after the closing `@@` (the function context git adds).
+    tail: &'a str,
+}
+
+/// `98` or `98,9` to the start line and the line count (1 when omitted).
+fn range(text: &str) -> Option<(&str, usize)> {
+    match text.split_once(',') {
         Some((start, count)) => {
             start.parse::<usize>().ok()?;
-            count.parse().ok()
+            Some((start, count.parse().ok()?))
         }
         None => {
-            range.parse::<usize>().ok()?;
-            Some(1)
+            text.parse::<usize>().ok()?;
+            Some((text, 1))
         }
     }
 }
 
-/// `@@ -a,b +c,d @@ ...` to `(b, d)`.
-fn hunk_counts(header: &str) -> Option<(usize, usize)> {
+fn parse_hunk_header(header: &str) -> Option<HunkHeader<'_>> {
     let rest = header.strip_prefix("@@ -")?;
     let (old, rest) = rest.split_once(" +")?;
-    let (new, _) = rest.split_once(" @@")?;
-    Some((range_count(old)?, range_count(new)?))
+    let (new, tail) = rest.split_once(" @@")?;
+    let (old_start, old_count) = range(old)?;
+    let (new_start, new_count) = range(new)?;
+    Some(HunkHeader { old_start, new_start, old_count, new_count, tail })
 }
 
 /// A `---` or `+++` operand: path without the timestamp git tools may append.
@@ -113,55 +134,107 @@ fn strip_prefix_ab(path: &str, prefix: &str, line: usize) -> Result<(Option<Stri
     }
 }
 
-/// Reads one hunk body whose header is at `lines[at]`; returns the index after it.
-fn read_hunk(lines: &[(usize, &str)], at: usize) -> Result<usize, ParseError> {
-    let (number, header) = lines[at];
-    let Some((mut old_left, mut new_left)) = hunk_counts(header) else {
-        return Err(bad(number, &format!("malformed hunk header: {}", show(header))));
+/// Does a file header (`--- a/...` or `--- /dev/null`, then `+++ `) start at `at`?
+fn starts_file_header(lines: &[(usize, &str)], at: usize) -> bool {
+    let line = lines[at].1;
+    (line.starts_with("--- a/") || line.starts_with("--- /dev/null"))
+        && lines.get(at + 1).is_some_and(|next| next.1.starts_with("+++ "))
+}
+
+/// One hunk, read by structure, with its counts recomputed.
+struct Hunk {
+    /// Index of the first line after the hunk.
+    end: usize,
+    /// The lines to hand to `git apply`: the header (rewritten when its counts
+    /// were wrong), then the body.
+    emit: Vec<String>,
+    corrected: bool,
+}
+
+/// Reads the hunk whose `@@` header is at `lines[at]` (`raws` holds the same
+/// lines with their original line endings).
+fn read_hunk(lines: &[(usize, &str)], raws: &[&str], at: usize) -> Result<Hunk, ParseError> {
+    let (number, header_text) = lines[at];
+    let Some(header) = parse_hunk_header(header_text) else {
+        return Err(bad(number, &format!("malformed hunk header: {}", show(header_text))));
     };
+
+    let mut body: Vec<usize> = Vec::new();
     let mut i = at + 1;
-    while old_left > 0 || new_left > 0 {
-        let Some(&(n, text)) = lines.get(i) else {
-            return Err(ParseError::Truncated { line: lines.last().map_or(number, |l| l.0) });
-        };
-        let counts_off = || {
-            bad(n, "the hunk has more lines than its '@@' header says (a line count is wrong)")
-        };
+    while let Some(&(n, text)) = lines.get(i) {
+        if text.starts_with("@@") || text.starts_with("diff --git ") || starts_file_header(lines, i) {
+            break;
+        }
         match text.chars().next() {
             // An empty line is a context line whose blank was stripped in transit.
-            Some(' ') | None => {
-                old_left = old_left.checked_sub(1).ok_or_else(counts_off)?;
-                new_left = new_left.checked_sub(1).ok_or_else(counts_off)?;
-            }
-            Some('-') => old_left = old_left.checked_sub(1).ok_or_else(counts_off)?,
-            Some('+') => new_left = new_left.checked_sub(1).ok_or_else(counts_off)?,
-            Some('\\') => {}
+            Some(' ' | '-' | '+' | '\\') | None => body.push(i),
             Some(_) => {
-                return Err(bad(
-                    n,
-                    &format!("line does not belong to the hunk: {}", show(text)),
-                ));
+                return Err(bad(n, &format!("line does not belong to the hunk: {}", show(text))));
             }
         }
         i += 1;
     }
-    while lines.get(i).is_some_and(|l| l.1.starts_with('\\')) {
-        i += 1;
+
+    let tally = |indices: &[usize]| {
+        indices.iter().fold((0usize, 0usize), |(old, new), &k| {
+            match lines[k].1.chars().next() {
+                Some('-') => (old + 1, new),
+                Some('+') => (old, new + 1),
+                Some('\\') => (old, new),
+                _ => (old + 1, new + 1),
+            }
+        })
+    };
+    // Blank lines at the very end are context only when the header has room for
+    // them; otherwise they separate this hunk from what follows.
+    let blanks = body.iter().rev().take_while(|&&k| lines[k].1.is_empty()).count();
+    let core = body.len() - blanks;
+    let (core_old, core_new) = tally(&body[..core]);
+    let room = header.old_count.saturating_sub(core_old).min(header.new_count.saturating_sub(core_new));
+    body.truncate(core + blanks.min(room));
+    if body.is_empty() {
+        return Err(ParseError::Truncated { line: number });
     }
-    Ok(i)
+
+    let (old, new) = tally(&body);
+    let corrected = (old, new) != (header.old_count, header.new_count);
+    let mut emit = Vec::with_capacity(body.len() + 1);
+    emit.push(if corrected {
+        let cr = if raws[at].ends_with('\r') { "\r" } else { "" };
+        format!(
+            "@@ -{},{old} +{},{new} @@{}{cr}",
+            header.old_start, header.new_start, header.tail
+        )
+    } else {
+        raws[at].to_string()
+    });
+    for &k in &body {
+        let raw = raws[k];
+        // Git reads an empty line as blank context; say so explicitly.
+        emit.push(if lines[k].1.is_empty() {
+            if raw.ends_with('\r') { " \r".to_string() } else { " ".to_string() }
+        } else {
+            raw.to_string()
+        });
+    }
+    Ok(Hunk { end: i, emit, corrected })
 }
 
 /// Parses `text`, which must be one complete diff.
 pub(crate) fn parse_git_diff(text: &str) -> Result<ParsedPatch, ParseError> {
-    let mut lines: Vec<(usize, &str)> = text
-        .split('\n')
+    let mut raws: Vec<&str> = text.split('\n').collect();
+    // `split` leaves an empty last element when the text ends with a line feed.
+    if raws.last().is_some_and(|l| l.is_empty()) {
+        raws.pop();
+    }
+    let lines: Vec<(usize, &str)> = raws
+        .iter()
         .enumerate()
         .map(|(i, l)| (i + 1, l.strip_suffix('\r').unwrap_or(l)))
         .collect();
-    // `split` leaves an empty last element when the text ends with a line feed.
-    if lines.last().is_some_and(|l| l.1.is_empty()) {
-        lines.pop();
-    }
+    // The text handed to `git apply`: the pasted lines, hunk headers corrected.
+    let mut out: Vec<String> = Vec::with_capacity(raws.len());
+    let mut corrected_headers = 0usize;
 
     let mut files: Vec<FileDiff> = Vec::new();
     let mut current: Option<FileDiff> = None;
@@ -178,6 +251,7 @@ pub(crate) fn parse_git_diff(text: &str) -> Result<ParsedPatch, ParseError> {
                 quoted: rest.contains('"'),
                 ..FileDiff::default()
             });
+            out.push(raws[i].to_string());
             i += 1;
         } else if let Some(old) = line.strip_prefix("--- ") {
             let Some(&(m, next)) = lines.get(i + 1) else {
@@ -194,13 +268,18 @@ pub(crate) fn parse_git_diff(text: &str) -> Result<ParsedPatch, ParseError> {
             (file.old_path, file.old_null) = strip_prefix_ab(old, "a/", n)?;
             (file.new_path, file.new_null) = strip_prefix_ab(new, "b/", m)?;
             file.has_files = true;
+            out.push(raws[i].to_string());
+            out.push(raws[i + 1].to_string());
             i += 2;
             while lines.get(i).is_some_and(|l| l.1.starts_with("@@")) {
                 if !lines[i].1.starts_with("@@ ") {
                     return Err(unsupported(lines[i].0, "combined (merge) diffs"));
                 }
-                i = read_hunk(&lines, i)?;
+                let hunk = read_hunk(&lines, &raws, i)?;
+                i = hunk.end;
                 file.hunks += 1;
+                corrected_headers += usize::from(hunk.corrected);
+                out.extend(hunk.emit);
             }
         } else if let Some(file) = current.as_mut() {
             let value = |key: &str| line.strip_prefix(key).map(|v| v.trim().to_string());
@@ -229,6 +308,7 @@ pub(crate) fn parse_git_diff(text: &str) -> Result<ParsedPatch, ParseError> {
             } else {
                 return Err(bad(n, &format!("unexpected line: {}", show(line))));
             }
+            out.push(raws[i].to_string());
             i += 1;
         } else {
             return Err(bad(n, &format!("unexpected line: {}", show(line))));
@@ -245,7 +325,17 @@ pub(crate) fn parse_git_diff(text: &str) -> Result<ParsedPatch, ParseError> {
     for file in &files {
         convert(file, &mut seen, &mut ops, &mut modes)?;
     }
-    Ok(ParsedPatch { ops, format: Format::GitDiff, modes })
+    let mut notes = Vec::new();
+    let mut normalized = None;
+    if corrected_headers > 0 {
+        let s = if corrected_headers == 1 { "" } else { "s" };
+        notes.push(format!(
+            "Note: corrected the line counts of {corrected_headers} hunk header{s} \
+             (the counts in the diff did not match its lines)."
+        ));
+        normalized = Some(format!("{}\n", out.join("\n")));
+    }
+    Ok(ParsedPatch { ops, format: Format::GitDiff, modes, normalized, notes })
 }
 
 /// `100755` to the permission bits; only regular-file modes are accepted.
@@ -421,16 +511,18 @@ mod tests {
     }
 
     #[test]
-    fn counts_decide_where_a_hunk_ends_so_dashes_in_content_are_content() {
+    fn dashes_in_content_are_content_and_only_a_real_file_header_ends_a_hunk() {
         // The removed line "-- note" prints as "--- note"; it is not a file header.
-        let text = "diff --git a/s.sql b/s.sql\n--- a/s.sql\n+++ b/s.sql\n@@ -1,2 +1,1 @@\n--- note\n-- keep\n";
-        // old 2 lines ("-- note", "- keep"), new 1 line is wrong: make it right.
-        let _ = text;
-        let text = "diff --git a/s.sql b/s.sql\n--- a/s.sql\n+++ b/s.sql\n@@ -1,2 +1,1 @@\n--- note\n keep\n";
-        let parsed = ok(text);
+        let parsed = ok("diff --git a/s.sql b/s.sql\n--- a/s.sql\n+++ b/s.sql\n@@ -1,2 +1,1 @@\n--- note\n keep\n");
         assert_eq!(parsed.ops, vec![op("s.sql", Change::Update, 1)]);
+        assert_eq!(parsed.normalized, None, "the counts were right");
         // A removed line that looks like "+++ " is content as well.
         ok("diff --git a/s b/s\n--- a/s\n+++ b/s\n@@ -1,2 +1,1 @@\n-x\n-+++ y\n+z\n");
+        // A `--- a/...` line followed by `+++ ` does start the next file, even when the
+        // hunk above claims more lines than it has.
+        let two = ok("--- a/x\n+++ b/x\n@@ -1,9 +1,9 @@\n-a\n+b\n--- a/y\n+++ b/y\n@@ -1 +1 @@\n-c\n+d\n");
+        let paths: Vec<&str> = two.ops.iter().map(|o| o.path.as_str()).collect();
+        assert_eq!(paths, ["x", "y"]);
     }
 
     #[test]
@@ -460,36 +552,29 @@ mod tests {
     }
 
     #[test]
-    fn a_paste_cut_before_the_last_line_of_a_hunk_is_never_accepted() {
+    fn a_hunk_with_no_lines_is_truncated() {
         let full = MODIFY;
-        let body_start = full.find("@@").unwrap();
-        let last_line = full[..full.len() - 1].rfind('\n').unwrap() + 1;
-        // A diff has no end marker and a terminal paste ends without a line
-        // feed, so a cut inside the very last line (after its first character)
-        // cannot be told from a complete paste. Every earlier cut can.
-        for cut in body_start..=last_line {
-            let prefix = &full[..cut];
-            let result = parse_git_diff(prefix);
-            assert!(result.is_err(), "accepted a truncated diff: {prefix:?}");
+        let header_end = full.find("@@ -1,3 +1,3 @@").unwrap() + "@@ -1,3 +1,3 @@\n".len();
+        // Everything up to and including the header line (a cut inside the header
+        // is a malformed header; after it, no lines) is refused.
+        for cut in full.find("@@").unwrap()..header_end {
+            let result = parse_git_diff(&full[..cut]);
+            assert!(result.is_err(), "accepted a diff cut inside or right after a hunk header: {:?}", &full[..cut]);
         }
+        let ParseError::Truncated { line } = err(&full[..header_end]) else { panic!() };
+        assert_eq!(line, 5);
+        let message = err(&full[..header_end]).to_string();
+        assert!(message.starts_with("incomplete paste") && message.contains("4 MB"), "{message}");
         assert!(parse_git_diff(full).is_ok());
         assert!(parse_git_diff(&full[..full.len() - 1]).is_ok(), "no final line feed is normal");
     }
 
-    /// The limit above, pinned: this is why the review gate matters for diffs.
+    /// The price of not trusting counts, pinned: once a hunk has a line, a cut
+    /// later in it cannot be noticed. The review gate is the safety net.
     #[test]
-    fn a_cut_inside_the_last_line_is_the_known_blind_spot() {
-        let cut = "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b = compute(1, 2";
+    fn a_cut_after_the_first_line_of_a_hunk_is_the_known_blind_spot() {
+        let cut = "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1,4 +1,4 @@\n a\n-b\n+c = compute(1, 2";
         assert!(parse_git_diff(cut).is_ok());
-    }
-
-    #[test]
-    fn truncation_is_reported_as_an_incomplete_paste() {
-        let cut = &MODIFY[..MODIFY.len() - "three\n".len() - 1];
-        let ParseError::Truncated { line } = err(cut) else { panic!("{cut:?}") };
-        assert!(line >= 6, "{line}");
-        let message = err(cut).to_string();
-        assert!(message.starts_with("incomplete paste") && message.contains("4 MB"), "{message}");
     }
 
     #[test]
@@ -498,15 +583,79 @@ mod tests {
     }
 
     #[test]
-    fn wrong_counts_are_rejected() {
-        // More lines than the header says.
-        let ParseError::BadDiff { message, .. } =
-            err("diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n+c\n--- a/y\n+++ b/y\n@@ -1 +1 @@\n-d\n+e\n")
-        else {
-            panic!()
-        };
-        assert!(message.contains("unexpected") || message.contains("lines"), "{message}");
-        // A foreign line inside the hunk.
+    fn right_counts_leave_the_diff_untouched() {
+        let parsed = ok(MODIFY);
+        assert_eq!(parsed.normalized, None);
+        assert!(parsed.notes.is_empty());
+    }
+
+    #[test]
+    fn counts_that_are_too_small_are_corrected() {
+        // Reported case: the header says 7 and 7, the hunk has 8 and 8 lines.
+        let text = "diff --git a/f.zig b/f.zig\n--- a/f.zig\n+++ b/f.zig\n@@ -15,7 +15,7 @@ pub fn Pool(comptime T: type) type {\n a\n b\n-old\n+new\n c\n\n d\n e\n f\n";
+        let parsed = ok(text);
+        let fixed = parsed.normalized.as_deref().expect("corrected");
+        assert!(!fixed.contains("@@ -15,7 +15,7 @@"), "{fixed}");
+        assert!(fixed.contains("\n@@ -15,8 +15,8 @@ pub fn Pool(comptime T: type) type {\n"), "{fixed}");
+        assert_eq!(parsed.notes.len(), 1);
+        assert!(parsed.notes[0].contains("corrected the line counts of 1 hunk header "), "{:?}", parsed.notes);
+    }
+
+    #[test]
+    fn counts_that_are_too_large_are_corrected() {
+        // Reported case: the header says 9 old lines, there are 7 (new: 11, right).
+        let text = "diff --git a/t.zig b/t.zig\n--- a/t.zig\n+++ b/t.zig\n@@ -98,9 +98,11 @@ test \"x\" {\n     try a();\n     try b();\n\n+    // c\n+    try d();\n     var results: [2]u32 = undefined;\n-    try collect();\n+    for (&results) |*slot| {\n+        slot.* = 1;\n+    }\n     try e();\n }\n";
+        let parsed = ok(text);
+        let fixed = parsed.normalized.as_deref().expect("corrected");
+        assert!(fixed.contains("\n@@ -98,7 +98,11 @@ test \"x\" {\n"), "{fixed}");
+        assert_eq!(parsed.ops, vec![op("t.zig", Change::Update, 1)]);
+    }
+
+    #[test]
+    fn only_wrong_headers_are_rewritten_and_everything_else_is_kept_byte_for_byte() {
+        let text = "diff --git a/a b/a\nindex 1..2 100644\n--- a/a\n+++ b/a\n@@ -1,2 +1,2 @@\n x\n-y\n+z\n@@ -10,5 +10,5 @@ ctx\n-p\n+q\n";
+        let fixed = ok(text).normalized.expect("second header is wrong");
+        let expected = "diff --git a/a b/a\nindex 1..2 100644\n--- a/a\n+++ b/a\n@@ -1,2 +1,2 @@\n x\n-y\n+z\n@@ -10,1 +10,1 @@ ctx\n-p\n+q\n";
+        assert_eq!(fixed, expected);
+    }
+
+    #[test]
+    fn corrections_keep_crlf_line_endings() {
+        let text = "diff --git a/a b/a\r\n--- a/a\r\n+++ b/a\r\n@@ -1,5 +1,5 @@\r\n-y\r\n+z\r\n";
+        let fixed = ok(text).normalized.expect("corrected");
+        assert_eq!(fixed, "diff --git a/a b/a\r\n--- a/a\r\n+++ b/a\r\n@@ -1,1 +1,1 @@\r\n-y\r\n+z\r\n");
+    }
+
+    #[test]
+    fn blank_lines_at_the_end_of_a_hunk_are_context_only_when_the_header_has_room() {
+        // Header says 3 and 3: the stripped blank last line is a context line.
+        let kept = ok("diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1,3 +1,3 @@\n x\n-y\n+z\n\n");
+        assert_eq!(kept.normalized, None, "counts were right, the blank is context");
+        // Blank lines between two files are separators, not context.
+        let split = ok("diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-y\n+z\n\n\ndiff --git a/b b/b\n--- a/b\n+++ b/b\n@@ -1 +1 @@\n-p\n+q\n");
+        assert_eq!(split.ops.len(), 2);
+        assert_eq!(split.normalized, None, "the separators were dropped without changing a header");
+    }
+
+    #[test]
+    fn a_trailing_blank_needs_room_on_both_sides_of_the_header_to_count_as_context() {
+        // Old side has room (header 2, lines 1) but the new side has none (3 of 3):
+        // the blank is a separator, so the header becomes -1,1 +1,3, not -1,2 +1,4.
+        let fixed = ok("diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1,2 +1,3 @@\n x\n+z\n+w\n\n")
+            .normalized
+            .expect("old count was wrong");
+        assert!(fixed.contains("@@ -1,1 +1,3 @@"), "{fixed}");
+        assert!(!fixed.ends_with(" \n"), "{fixed:?}");
+    }
+
+    #[test]
+    fn a_blank_context_line_in_the_middle_is_written_as_a_space() {
+        let fixed = ok("diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1,9 +1,9 @@\n x\n\n-y\n+z\n").normalized.unwrap();
+        assert!(fixed.contains("\n x\n \n-y\n"), "{fixed:?}");
+    }
+
+    #[test]
+    fn a_foreign_line_inside_a_hunk_is_still_rejected() {
         assert!(matches!(
             err("diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n a\nhello\n"),
             ParseError::BadDiff { .. }
