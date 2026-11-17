@@ -530,6 +530,101 @@ def main():
         finally:
             s.close()
 
+        # ------------------------------------------------------------ review gate
+        gate = Session(work, "gate", {"CVB_PATCH_REVIEW": "on"})
+        try:
+            gate.write("g.txt", "one\ntwo\n")
+            gate.write("h.txt", "aa\nbb\n")
+            gate.settle()
+            patch_g = "*** Begin Patch\n*** Update File: g.txt\n@@\n-two\n+TWO\n*** End Patch"
+            patch_h = "*** Begin Patch\n*** Update File: h.txt\n@@\n-bb\n+BB\n*** End Patch"
+            clips = len(gate.captures())
+
+            gate.buffer.clear()
+            gate.paste(patch_g)
+            gate.settle()
+            screen = bytes(gate.buffer)
+            check("review gate: a pasted patch is shown, not applied",
+                  b"CVB patch REVIEW (apply_patch, 6 lines, 1 file): update g.txt" in screen
+                  and b"Not applied yet. Press Ctrl+B twice to apply" in screen
+                  and gate.read("g.txt") == "one\ntwo\n"
+                  and len(gate.captures()) == clips, screen[-400:])
+            check("review gate: the patch text itself is on the screen", b"+TWO" in screen)
+            check("review gate: the prompt is drawn again below the review", DOT in screen.rsplit(b"Not applied yet", 1)[-1])
+
+            gate.buffer.clear()
+            gate.send(b"\x02")
+            gate.settle()
+            check("review gate: the first Ctrl+B only arms",
+                  b"press Ctrl+B once more" in bytes(gate.buffer)
+                  and gate.read("g.txt") == "one\ntwo\n", bytes(gate.buffer)[-300:])
+
+            before = len(gate.captures())
+            gate.send(b"\x02")
+            capture = gate.wait_capture(before + 1)[before].decode()
+            check("review gate: the second Ctrl+B applies the patch and copies the report",
+                  gate.read("g.txt") == "one\nTWO\n" and capture.startswith("CVB patch APPLIED files=1\n"),
+                  (gate.read("g.txt"), capture))
+
+            # Any other key cancels, and is the shell's.
+            gate.write("g.txt", "one\ntwo\n")
+            gate.settle()
+            gate.paste(patch_g)
+            gate.settle()
+            gate.buffer.clear()
+            before = len(gate.captures())
+            gate.send(b"echo typed-after-review\n")
+            payload = gate.wait_capture(before + 1)[before].decode()
+            screen = bytes(gate.buffer)
+            check("review gate: another key cancels and still reaches the shell",
+                  b"cancelled, nothing was applied" in screen
+                  and "typed-after-review" in payload
+                  and gate.read("g.txt") == "one\ntwo\n", (payload, screen[-300:]))
+
+            # A key between the two presses cancels too.
+            gate.paste(patch_g)
+            gate.settle()
+            gate.send(b"\x02")
+            gate.settle()
+            before = len(gate.captures())
+            gate.send(b"echo between\n")
+            payload = gate.wait_capture(before + 1)[before].decode()
+            gate.send(b"\x02")  # a stray Ctrl+B at the prompt is just readline's
+            gate.settle()
+            check("review gate: a key between the presses cancels",
+                  "between" in payload and gate.read("g.txt") == "one\ntwo\n", payload)
+
+            # A second paste replaces the first.
+            gate.paste(patch_g)
+            gate.settle()
+            gate.paste(patch_h)
+            gate.settle()
+            before = len(gate.captures())
+            gate.send(b"\x02\x02")
+            capture = gate.wait_capture(before + 1)[before].decode()
+            check("review gate: a second paste replaces the first review",
+                  gate.read("h.txt") == "aa\nBB\n" and gate.read("g.txt") == "one\ntwo\n"
+                  and "h.txt" in capture, (capture, gate.read("h.txt")))
+
+            # A patch that cannot be parsed is rejected at once, as without the gate.
+            before = len(gate.captures())
+            capture = gate.paste_patch("*** Delete File: ../outside\n").decode()
+            check("review gate: an unusable patch is rejected without a review",
+                  capture.startswith("CVB patch REJECTED: line 2: unsafe path"), capture)
+
+            # Ordinary pastes are untouched by the gate.
+            gate.settle()
+            gate.buffer.clear()
+            gate.paste("echo plain paste")
+            gate.settle()
+            screen = bytes(gate.buffer)
+            gate.send(b"\x15")
+            gate.settle()
+            check("review gate: an ordinary paste goes straight to the shell",
+                  b"echo plain paste" in screen and b"REVIEW" not in screen, screen[-200:])
+        finally:
+            gate.close()
+
         # ------------------------------------------------------------ switched off
         off = Session(work, "off", {"CVB_PATCH_PASTE": "off"})
         try:

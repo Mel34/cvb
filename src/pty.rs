@@ -923,24 +923,45 @@ fn write_to_master(master: &OwnedFd, data: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-/// Carries out what the paste recognizer decided, in order.
+/// Carries out what the paste recognizer decided, in order. With the review
+/// gate on (`review_on`), a patch is shown and held in `review` instead of applied.
 fn dispatch_paste_events(
     events: Vec<crate::patch::paste::PasteEvent>,
     master: &OwnedFd,
     child: Pid,
     stdout: &io::Stdout,
     screen_terminal: &mut vt100::Parser,
+    review: &mut Option<crate::patch::review::Review>,
+    review_on: bool,
 ) -> Result<(), String> {
     use crate::patch::deliver;
     use crate::patch::paste::PasteEvent;
 
     for event in events {
         match event {
-            PasteEvent::Forward(bytes) => write_to_master(master, &bytes)?,
+            PasteEvent::Forward(bytes) => {
+                // Typed after a paste in the same read: it answers the review.
+                let bytes = review_input(review, bytes, master, child, stdout, screen_terminal)?;
+                if !bytes.is_empty() {
+                    write_to_master(master, &bytes)?;
+                }
+            }
             PasteEvent::Patch(text) => {
-                debug_log("patch_paste", &format!("bytes={}", text.len()));
-                let report = deliver::apply_for_shell(&text, child.as_raw());
-                present_patch_report(&report, master, stdout, screen_terminal)?;
+                debug_log("patch_paste", &format!("bytes={} review={review_on}", text.len()));
+                if review_on {
+                    match deliver::review_screen(&text) {
+                        Ok(shown) => {
+                            show_note(&shown, master, stdout, screen_terminal)?;
+                            *review = Some(crate::patch::review::Review::new(text));
+                        }
+                        Err(report) => {
+                            present_patch_report(&report, master, stdout, screen_terminal)?;
+                        }
+                    }
+                } else {
+                    let report = deliver::apply_for_shell(&text, child.as_raw());
+                    present_patch_report(&report, master, stdout, screen_terminal)?;
+                }
             }
             PasteEvent::Reject(reason) => {
                 debug_log("patch_paste_rejected", &format!("reason={reason:?}"));
@@ -956,6 +977,71 @@ fn dispatch_paste_events(
     Ok(())
 }
 
+/// Lets a patch waiting for review see the input first. Returns what is left for
+/// the shell: everything when nothing is waiting, what follows the key that
+/// answered the review otherwise, nothing while the review is still waiting.
+fn review_input(
+    review: &mut Option<crate::patch::review::Review>,
+    bytes: Vec<u8>,
+    master: &OwnedFd,
+    child: Pid,
+    stdout: &io::Stdout,
+    screen_terminal: &mut vt100::Parser,
+) -> Result<Vec<u8>, String> {
+    use crate::patch::review::{ARMED_NOTE, CANCELLED_NOTE, Step};
+
+    let Some(active) = review.as_mut() else {
+        return Ok(bytes);
+    };
+    match active.feed(&bytes) {
+        Step::Waiting { just_armed } => {
+            if just_armed {
+                show_note(ARMED_NOTE, master, stdout, screen_terminal)?;
+            }
+            Ok(Vec::new())
+        }
+        Step::Apply { text, rest } => {
+            *review = None;
+            debug_log("patch_review_apply", &format!("bytes={}", text.len()));
+            let report = crate::patch::deliver::apply_for_shell(&text, child.as_raw());
+            present_patch_report(&report, master, stdout, screen_terminal)?;
+            Ok(rest)
+        }
+        Step::Cancel { rest } => {
+            *review = None;
+            debug_log("patch_review_cancel", "");
+            show_note(CANCELLED_NOTE, master, stdout, screen_terminal)?;
+            Ok(rest)
+        }
+    }
+}
+
+/// Prints text on the terminal (and in CVB's screen model) without copying it.
+fn print_screen_text(
+    text: &str,
+    stdout: &io::Stdout,
+    screen_terminal: &mut vt100::Parser,
+) -> Result<(), String> {
+    let screen = crate::patch::deliver::screen_bytes(text);
+    screen_terminal.process(&screen);
+    let mut stdout = stdout.lock();
+    stdout
+        .write_all(&screen)
+        .and_then(|()| stdout.flush())
+        .map_err(|error| format!("CVB: stdout write failed: {error}"))
+}
+
+/// Prints text for the user only, then has the shell redraw its prompt.
+fn show_note(
+    text: &str,
+    master: &OwnedFd,
+    stdout: &io::Stdout,
+    screen_terminal: &mut vt100::Parser,
+) -> Result<(), String> {
+    print_screen_text(text, stdout, screen_terminal)?;
+    write_to_master(master, crate::patch::deliver::REDRAW_SEQUENCE)
+}
+
 /// Shows the result of a pasted patch, copies it, and has the shell redraw its
 /// prompt. The text never passes through the shell, so it is not part of any
 /// command's transcript and leaves no history entry.
@@ -965,15 +1051,7 @@ fn present_patch_report(
     stdout: &io::Stdout,
     screen_terminal: &mut vt100::Parser,
 ) -> Result<(), String> {
-    let screen = crate::patch::deliver::screen_bytes(text);
-    screen_terminal.process(&screen);
-    {
-        let mut stdout = stdout.lock();
-        stdout
-            .write_all(&screen)
-            .and_then(|()| stdout.flush())
-            .map_err(|error| format!("CVB: stdout write failed: {error}"))?;
-    }
+    print_screen_text(text, stdout, screen_terminal)?;
 
     // A clipboard problem must not end the session; say so and carry on.
     let buffer = crate::clipboard::ClipboardBuffer::new(text.as_bytes().to_vec());
@@ -1019,6 +1097,9 @@ fn proxy(
     // Recognizes a patch pasted at an idle prompt (see src/patch/). Everything
     // else typed or pasted goes to the shell unchanged.
     let mut patch_input = crate::patch::input::PatchInput::new(crate::patch::deliver::enabled());
+    // With CVB_PATCH_REVIEW=on a recognized patch waits here for Ctrl+B twice.
+    let review_on = crate::patch::review::enabled();
+    let mut review: Option<crate::patch::review::Review> = None;
     debug_log("proxy_start", &format!("pid={}", std::process::id()));
 
     loop {
@@ -1044,7 +1125,15 @@ fn proxy(
         // the shell once its deadline has passed.
         let due = patch_input.flush_if_due(Instant::now());
         if !due.is_empty() {
-            dispatch_paste_events(due, master, child, &stdout, &mut screen_terminal)?;
+            dispatch_paste_events(
+                due,
+                master,
+                child,
+                &stdout,
+                &mut screen_terminal,
+                &mut review,
+                review_on,
+            )?;
         }
 
         let stdin_events = poll_fds[0]
@@ -1166,8 +1255,27 @@ fn proxy(
             // A paste only counts as a patch when the shell is at a prompt: not
             // while a command (an editor, `cat`, ssh, surgery) is running.
             let idle = !capture.capturing && surgery_state == SurgeryProxyState::Ordinary;
-            let events = patch_input.feed(&buffer[..count], idle, Instant::now());
-            dispatch_paste_events(events, master, child, &stdout, &mut screen_terminal)?;
+            // A patch waiting for review sees the input first.
+            let incoming = review_input(
+                &mut review,
+                buffer[..count].to_vec(),
+                master,
+                child,
+                &stdout,
+                &mut screen_terminal,
+            )?;
+            if !incoming.is_empty() {
+                let events = patch_input.feed(&incoming, idle, Instant::now());
+                dispatch_paste_events(
+                    events,
+                    master,
+                    child,
+                    &stdout,
+                    &mut screen_terminal,
+                    &mut review,
+                    review_on,
+                )?;
+            }
         } else if stdin_events.intersects(
             nix::poll::PollFlags::POLLHUP | nix::poll::PollFlags::POLLERR,
         ) {

@@ -77,6 +77,16 @@ pub(crate) fn apply_for_shell(text: &str, shell_pid: i32) -> String {
     run_patch(text, &env).to_text()
 }
 
+/// What the review gate shows for a pasted patch: `Ok` is the screen text of a
+/// patch that parses (nothing is copied), `Err` is the rejection report for one
+/// that does not, which is shown and copied like any other result.
+pub(crate) fn review_screen(text: &str) -> Result<String, String> {
+    match crate::patch::parse::parse_any(text) {
+        Ok(parsed) => Ok(crate::patch::review::display(text, &parsed)),
+        Err(error) => Err(Report::Rejected(error.to_string()).to_text()),
+    }
+}
+
 /// Bytes to write to the terminal for a result: a fresh line, the text with
 /// control characters made visible, and carriage returns (the terminal is raw).
 /// The clipboard gets the plain text; only the screen is escaped.
@@ -153,6 +163,16 @@ mod tests {
         assert!(text.starts_with("CVB patch REJECTED: incomplete paste"), "{text}");
         assert!(text.contains("4 MB") && text.contains("split"), "{text}");
         assert!(rejection_text(RejectReason::NotUtf8).contains("not valid UTF-8"));
+    }
+
+    #[test]
+    fn review_text_for_a_good_patch_is_screen_only_and_for_a_bad_one_a_rejection() {
+        let good = "*** Begin Patch\n*** Delete File: a\n*** End Patch";
+        let shown = review_screen(good).unwrap();
+        assert!(shown.contains("CVB patch REVIEW (apply_patch, 3 lines, 1 file): delete a"), "{shown}");
+        let bad = "*** Begin Patch\n*** Delete File: ../a\n*** End Patch";
+        let report = review_screen(bad).unwrap_err();
+        assert!(report.starts_with("CVB patch REJECTED: line 2: unsafe path"), "{report}");
     }
 
     #[test]

@@ -243,6 +243,8 @@ A /home/you/project/src/new.rs
 
 This needs a terminal that sends bracketed paste (most do; Bash enables it by default). Set `CVB_PATCH_PASTE=off` to turn the feature off.
 
+**Review before applying.** With `CVB_PATCH_REVIEW=on` (also `1`, `true`, `yes`) a recognized patch is shown instead of applied: its text (the first and last 150 lines when it is longer than 300), a summary line naming the files and what happens to each, and any correction CVB made. Nothing is changed and the clipboard is untouched. Press `Ctrl+B` twice to apply it; any other key cancels, and that key goes on to the shell. Pasting another patch while one waits replaces it. Reading the end of the shown text is also how to notice a patch the clipboard cut short.
+
 ## External commands
 
 When the target is not an existing filesystem path, CVB executes it as an external command:

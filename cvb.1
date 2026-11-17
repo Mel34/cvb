@@ -333,6 +333,18 @@ set to
 or
 .B no
 disables the feature.
+.PP
+With
+.B CVB_PATCH_REVIEW
+set to
+.BR on ,
+.BR 1 ,
+.B true
+or
+.B yes
+a recognized patch is shown (its text, a summary of the files, and any correction CVB made) instead of applied, and nothing is copied. Pressing
+.B Ctrl+B
+twice applies it; any other key cancels it and is passed on to the shell. A patch pasted while another waits replaces it.
 .SH TARGET RESOLUTION
 Existing filesystem paths take precedence over external commands.
 .PP
