@@ -323,6 +323,14 @@ or
 a recognized patch is shown (its text, a summary of the files, and any correction CVB made) instead of applied, and nothing is copied. Pressing
 .B Ctrl+B
 twice applies it; any other key cancels it and is passed on to the shell. A patch pasted while another waits replaces it.
+.PP
+When a patch fails because hunks do not match the files, CVB reports the failure (nothing is modified) and offers, for each such hunk, the nearest places in the file. Pressing a number chooses a place,
+.B s
+skips (which cancels the whole patch) and
+.B q
+cancels. After the last choice the corrected patch is shown, with a warning when a line to be removed differs from the one the patch named; pressing
+.B Ctrl+B
+twice applies it. Any other key cancels and is passed on to the shell. The picker has no timeout.
 .SH TARGET RESOLUTION
 Existing filesystem paths take precedence over external commands.
 .PP

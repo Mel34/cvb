@@ -909,16 +909,30 @@ fn write_to_master(master: &OwnedFd, data: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// What the proxy holds about a pasted patch between keystrokes.
+struct PatchState {
+    /// `CVB_PATCH_REVIEW=on`: a recognized patch waits for Ctrl+B twice.
+    review_on: bool,
+    review: Option<crate::patch::review::Review>,
+    /// A failed patch whose non-matching hunks the user is placing.
+    picker: Option<crate::patch::picker::Picker>,
+}
+
+impl PatchState {
+    fn new() -> Self {
+        Self { review_on: crate::patch::review::enabled(), review: None, picker: None }
+    }
+}
+
 /// Carries out what the paste recognizer decided, in order. With the review
-/// gate on (`review_on`), a patch is shown and held in `review` instead of applied.
+/// gate on, a patch is shown and held instead of applied.
 fn dispatch_paste_events(
     events: Vec<crate::patch::paste::PasteEvent>,
     master: &OwnedFd,
     child: Pid,
     stdout: &io::Stdout,
     screen_terminal: &mut vt100::Parser,
-    review: &mut Option<crate::patch::review::Review>,
-    review_on: bool,
+    state: &mut PatchState,
 ) -> Result<(), String> {
     use crate::patch::deliver;
     use crate::patch::paste::PasteEvent;
@@ -926,27 +940,29 @@ fn dispatch_paste_events(
     for event in events {
         match event {
             PasteEvent::Forward(bytes) => {
-                // Typed after a paste in the same read: it answers the review.
-                let bytes = review_input(review, bytes, master, child, stdout, screen_terminal)?;
+                // Typed after a paste in the same read: it answers the review
+                // or the picker.
+                let bytes = gate_input(state, bytes, master, child, stdout, screen_terminal)?;
                 if !bytes.is_empty() {
                     write_to_master(master, &bytes)?;
                 }
             }
             PasteEvent::Patch(text) => {
-                debug_log("patch_paste", &format!("bytes={} review={review_on}", text.len()));
-                if review_on {
+                debug_log("patch_paste", &format!("bytes={} review={}", text.len(), state.review_on));
+                // A new patch replaces whatever was waiting.
+                state.picker = None;
+                if state.review_on {
                     match deliver::review_screen(&text) {
                         Ok(shown) => {
                             show_note(&shown, master, stdout, screen_terminal)?;
-                            *review = Some(crate::patch::review::Review::new(text));
+                            state.review = Some(crate::patch::review::Review::new(text));
                         }
                         Err(report) => {
                             present_patch_report(&report, master, stdout, screen_terminal)?;
                         }
                     }
                 } else {
-                    let report = deliver::apply_for_shell(&text, child.as_raw());
-                    present_patch_report(&report, master, stdout, screen_terminal)?;
+                    apply_and_present(&text, state, master, child, stdout, screen_terminal)?;
                 }
             }
             PasteEvent::Reject(reason) => {
@@ -963,11 +979,46 @@ fn dispatch_paste_events(
     Ok(())
 }
 
-/// Lets a patch waiting for review see the input first. Returns what is left for
-/// the shell: everything when nothing is waiting, what follows the key that
-/// answered the review otherwise, nothing while the review is still waiting.
+/// Applies a patch and shows the result. A failure caused by hunks that do not
+/// match opens the picker, whose first screen follows the report.
+fn apply_and_present(
+    text: &str,
+    state: &mut PatchState,
+    master: &OwnedFd,
+    child: Pid,
+    stdout: &io::Stdout,
+    screen_terminal: &mut vt100::Parser,
+) -> Result<(), String> {
+    let (report, picker) = crate::patch::deliver::apply_offering_picker(text, child.as_raw());
+    present_patch_report(&report, master, stdout, screen_terminal)?;
+    if let Some(picker) = picker {
+        debug_log("patch_picker_open", &format!("hunks={}", picker.hunk_count()));
+        show_note(&picker.first_view(), master, stdout, screen_terminal)?;
+        state.picker = Some(picker);
+    }
+    Ok(())
+}
+
+/// Lets a patch waiting for review, or a picker, see the input first. Returns
+/// what is left for the shell: everything when nothing is waiting, what follows
+/// the key that answered otherwise, nothing while still waiting.
+fn gate_input(
+    state: &mut PatchState,
+    bytes: Vec<u8>,
+    master: &OwnedFd,
+    child: Pid,
+    stdout: &io::Stdout,
+    screen_terminal: &mut vt100::Parser,
+) -> Result<Vec<u8>, String> {
+    let bytes = review_input(state, bytes, master, child, stdout, screen_terminal)?;
+    if bytes.is_empty() {
+        return Ok(bytes);
+    }
+    picker_input(state, bytes, master, child, stdout, screen_terminal)
+}
+
 fn review_input(
-    review: &mut Option<crate::patch::review::Review>,
+    state: &mut PatchState,
     bytes: Vec<u8>,
     master: &OwnedFd,
     child: Pid,
@@ -976,7 +1027,7 @@ fn review_input(
 ) -> Result<Vec<u8>, String> {
     use crate::patch::review::{ARMED_NOTE, CANCELLED_NOTE, Step};
 
-    let Some(active) = review.as_mut() else {
+    let Some(active) = state.review.as_mut() else {
         return Ok(bytes);
     };
     match active.feed(&bytes) {
@@ -987,15 +1038,76 @@ fn review_input(
             Ok(Vec::new())
         }
         Step::Apply { text, rest } => {
-            *review = None;
+            state.review = None;
             debug_log("patch_review_apply", &format!("bytes={}", text.len()));
-            let report = crate::patch::deliver::apply_for_shell(&text, child.as_raw());
+            apply_and_present(&text, state, master, child, stdout, screen_terminal)?;
+            Ok(rest)
+        }
+        Step::Cancel { rest } => {
+            state.review = None;
+            debug_log("patch_review_cancel", "");
+            show_note(CANCELLED_NOTE, master, stdout, screen_terminal)?;
+            Ok(rest)
+        }
+    }
+}
+
+fn picker_input(
+    state: &mut PatchState,
+    bytes: Vec<u8>,
+    master: &OwnedFd,
+    child: Pid,
+    stdout: &io::Stdout,
+    screen_terminal: &mut vt100::Parser,
+) -> Result<Vec<u8>, String> {
+    use crate::patch::deliver;
+    use crate::patch::picker::{ARMED_NOTE, CANCELLED_NOTE, CONFIRM_NOTE, Step};
+
+    let Some(active) = state.picker.as_mut() else {
+        return Ok(bytes);
+    };
+    match active.feed(&bytes) {
+        Step::Waiting { just_armed } => {
+            if just_armed {
+                show_note(ARMED_NOTE, master, stdout, screen_terminal)?;
+            }
+            Ok(Vec::new())
+        }
+        Step::Show(view) => {
+            show_note(&view, master, stdout, screen_terminal)?;
+            Ok(Vec::new())
+        }
+        Step::Confirm { view, patch } => {
+            // Show what the corrected patch is, then what applying it would do.
+            match deliver::preview_for_shell(&patch, child.as_raw()) {
+                Ok(outcome) => {
+                    let shown = format!("{view}{outcome}{CONFIRM_NOTE}\n");
+                    show_note(&shown, master, stdout, screen_terminal)?;
+                }
+                Err(report) => {
+                    // The corrected patch does not apply either: drop the picker.
+                    state.picker = None;
+                    debug_log("patch_picker_preview_failed", "");
+                    let shown = format!(
+                        "{view}CVB patch: the corrected patch does not apply either; nothing was changed.\n{report}"
+                    );
+                    present_patch_report(&shown, master, stdout, screen_terminal)?;
+                }
+            }
+            Ok(Vec::new())
+        }
+        Step::Apply { text, rest } => {
+            state.picker = None;
+            debug_log("patch_picker_apply", &format!("bytes={}", text.len()));
+            // A correction that fails again does not reopen the picker: the
+            // report is shown as it is.
+            let report = deliver::apply_for_shell(&text, child.as_raw());
             present_patch_report(&report, master, stdout, screen_terminal)?;
             Ok(rest)
         }
         Step::Cancel { rest } => {
-            *review = None;
-            debug_log("patch_review_cancel", "");
+            state.picker = None;
+            debug_log("patch_picker_cancel", "");
             show_note(CANCELLED_NOTE, master, stdout, screen_terminal)?;
             Ok(rest)
         }
@@ -1082,9 +1194,8 @@ fn proxy(
     // Recognizes a patch pasted at an idle prompt (see src/patch/). Everything
     // else typed or pasted goes to the shell unchanged.
     let mut patch_input = crate::patch::input::PatchInput::new(crate::patch::deliver::enabled());
-    // With CVB_PATCH_REVIEW=on a recognized patch waits here for Ctrl+B twice.
-    let review_on = crate::patch::review::enabled();
-    let mut review: Option<crate::patch::review::Review> = None;
+    // The review gate (CVB_PATCH_REVIEW=on) and the failed-hunk picker.
+    let mut patch_state = PatchState::new();
     debug_log("proxy_start", &format!("pid={}", std::process::id()));
 
     loop {
@@ -1116,8 +1227,7 @@ fn proxy(
                 child,
                 &stdout,
                 &mut screen_terminal,
-                &mut review,
-                review_on,
+                &mut patch_state,
             )?;
         }
 
@@ -1240,9 +1350,9 @@ fn proxy(
             // A paste only counts as a patch when the shell is at a prompt: not
             // while a command (an editor, `cat`, ssh) is running.
             let idle = !capture.capturing;
-            // A patch waiting for review sees the input first.
-            let incoming = review_input(
-                &mut review,
+            // A patch waiting for review, or a picker, sees the input first.
+            let incoming = gate_input(
+                &mut patch_state,
                 buffer[..count].to_vec(),
                 master,
                 child,
@@ -1257,8 +1367,7 @@ fn proxy(
                     child,
                     &stdout,
                     &mut screen_terminal,
-                    &mut review,
-                    review_on,
+                    &mut patch_state,
                 )?;
             }
         } else if stdin_events.intersects(

@@ -625,6 +625,92 @@ def main():
         finally:
             gate.close()
 
+        # ------------------------------------------------------------ picker
+        pick = Session(work, "picker")
+        try:
+            body = "*** Update File: x.txt\n@@\n alpha\n-betaa\n+BETA\n gamma\n"
+            original = "alpha\nbeta\ngamma\ndelta\n"
+            pick.write("x.txt", original)
+            capture = pick.paste_patch(body).decode()
+            check("picker: the failure report is copied as usual",
+                  capture.startswith("CVB patch FAILED") and capture.endswith("No files were modified.\n"), capture)
+            pick.settle()
+            screen = bytes(pick.buffer)
+            check("picker: the screen offers the nearest place",
+                  b"did not match the files" in screen and b"[1] lines 1-3" in screen
+                  and b"a line to remove differs" in screen and b"s to skip" in screen, screen[-500:])
+            check("picker: the prompt is drawn again below it", DOT in screen.rsplit(b"to cancel.", 1)[-1])
+
+            pick.buffer.clear()
+            pick.send(b"1")
+            pick.settle()
+            screen = bytes(pick.buffer)
+            check("picker: choosing shows the corrected patch, a warning and the preview",
+                  b"corrected patch" in screen and b"-beta" in screen and b"WARNING" in screen
+                  and b"would apply to 1 file(s)" in screen and b"Not applied yet" in screen, screen[-600:])
+            check("picker: nothing is changed before the confirmation", pick.read("x.txt") == original)
+
+            before = len(pick.captures())
+            pick.send(b"\x02")
+            pick.settle()
+            check("picker: the first Ctrl+B only arms", pick.read("x.txt") == original)
+            pick.send(b"\x02")
+            capture = pick.wait_capture(before + 1)[before].decode()
+            check("picker: the second Ctrl+B applies the corrected patch",
+                  capture.startswith("CVB patch APPLIED files=1") and pick.read("x.txt") == "alpha\nBETA\ngamma\ndelta\n",
+                  capture)
+            pick.settle()
+            pick.buffer.clear()
+            after = pick.run("printf 'AFTER_PICK\\n'").decode()
+            check("picker: the shell works normally afterwards", "AFTER_PICK" in after, after)
+
+            # Skip cancels the whole patch.
+            pick.write("x.txt", original)
+            pick.paste_patch(body)
+            pick.settle()
+            pick.buffer.clear()
+            pick.send(b"s")
+            pick.settle()
+            check("picker: s cancels and nothing changes",
+                  b"cancelled, nothing was applied" in bytes(pick.buffer) and pick.read("x.txt") == original,
+                  bytes(pick.buffer)[-300:])
+            # After cancelling, typing reaches the shell and the picker is gone.
+            after = pick.run("printf 'S_%s\\n' ok").decode()
+            check("picker: keys go to the shell after a cancel", "S_ok" in after, after)
+
+            # Another key cancels and is handed on.
+            pick.paste_patch(body)
+            pick.settle()
+            pick.buffer.clear()
+            pick.send(b"echo typed-after-picker\n")
+            pick.settle()
+            screen = bytes(pick.buffer)
+            check("picker: another key cancels and still reaches the shell",
+                  b"cancelled, nothing was applied" in screen and b"typed-after-picker" in screen
+                  and pick.read("x.txt") == original, screen[-300:])
+
+            # A patch no place resembles gets no picker, only the report.
+            pick.paste_patch("*** Update File: x.txt\n@@\n qqqqqq\n-wwwwww\n+eeeeee\n")
+            pick.settle()
+            check("picker: no suggestions, no picker", b"did not match the files" not in bytes(pick.buffer))
+            # A git diff gets the same treatment, with renumbered headers.
+            pick.write("y.txt", "one\ntwo\nthree\nfour\nfive\nsix\n")
+            diff = ("diff --git a/y.txt b/y.txt\n--- a/y.txt\n+++ b/y.txt\n@@ -9,5 +9,5 @@\n one\n two\n-thre\n+3\n four\n five\n")
+            capture = pick.paste_patch(diff, wrap=False).decode()
+            pick.settle()
+            screen = bytes(pick.buffer)
+            check("picker: a failed git diff opens the picker too",
+                  capture.startswith("CVB patch FAILED (git apply") and b"(the patch says line 9)" in screen, screen[-400:])
+            before = len(pick.captures())
+            pick.send(b"1\x02\x02")
+            capture = pick.wait_capture(before + 1)[before].decode()
+            check("picker: the corrected git diff applies",
+                  capture.startswith("CVB patch APPLIED files=1")
+                  and pick.read("y.txt") == "one\ntwo\n3\nfour\nfive\nsix\n", capture)
+            pick.settle()
+        finally:
+            pick.close()
+
         # ------------------------------------------------------------ switched off
         off = Session(work, "off", {"CVB_PATCH_PASTE": "off"})
         try:

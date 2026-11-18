@@ -6,7 +6,8 @@ use std::ffi::OsStr;
 use std::path::PathBuf;
 
 use crate::patch::paste::RejectReason;
-use crate::patch::run::{DEFAULT_TIMEOUT, Env, Report, run_patch};
+use crate::patch::picker::Picker;
+use crate::patch::run::{DEFAULT_TIMEOUT, Env, Report, open_picker, preview_patch, run_patch};
 use crate::commit::journal::resolve_state_dir;
 use crate::patch::text::is_escape_char;
 
@@ -54,17 +55,19 @@ pub(crate) fn shell_directory(shell_pid: i32) -> Result<PathBuf, String> {
         .map_err(|e| format!("cannot find the shell's current directory: {e}"))
 }
 
-/// Applies a pasted patch for the shell with process id `shell_pid`; returns the
-/// text to show and copy.
-pub(crate) fn apply_for_shell(text: &str, shell_pid: i32) -> String {
+/// Runs `work` with the runner's surroundings for the shell `shell_pid`, or says
+/// (as report text) why there are none.
+fn with_env<T>(shell_pid: i32, work: impl FnOnce(&Env) -> T) -> Result<T, String> {
     let root = match shell_directory(shell_pid) {
         Ok(root) => root,
-        Err(reason) => return Report::Rejected(reason).to_text(),
+        Err(reason) => return Err(Report::Rejected(reason).to_text()),
     };
     let state_base = match resolve_state_dir() {
         Ok(base) => base,
         Err(error) => {
-            return Report::Rejected(format!("cannot find CVB's state directory: {error}")).to_text();
+            return Err(
+                Report::Rejected(format!("cannot find CVB's state directory: {error}")).to_text()
+            );
         }
     };
     let env = Env {
@@ -74,7 +77,41 @@ pub(crate) fn apply_for_shell(text: &str, shell_pid: i32) -> String {
         git: OsStr::new(GIT_PROGRAM),
         timeout: DEFAULT_TIMEOUT,
     };
-    run_patch(text, &env).to_text()
+    Ok(work(&env))
+}
+
+/// Applies a pasted patch for the shell with process id `shell_pid`; returns the
+/// text to show and copy.
+pub(crate) fn apply_for_shell(text: &str, shell_pid: i32) -> String {
+    apply_offering_picker(text, shell_pid).0
+}
+
+/// Like [`apply_for_shell`]. When the patch failed because hunks do not match
+/// the files, also returns the picker that can place them.
+pub(crate) fn apply_offering_picker(text: &str, shell_pid: i32) -> (String, Option<Picker>) {
+    match with_env(shell_pid, |env| {
+        let report = run_patch(text, env);
+        let picker = match report {
+            Report::Failed { .. } => open_picker(text, env).ok(),
+            _ => None,
+        };
+        (report.to_text(), picker)
+    }) {
+        Ok(result) => result,
+        Err(text) => (text, None),
+    }
+}
+
+/// Dry run of a corrected patch: `Ok` with the text to show when it would apply,
+/// `Err` with the report text when it would not.
+pub(crate) fn preview_for_shell(text: &str, shell_pid: i32) -> Result<String, String> {
+    match with_env(shell_pid, |env| preview_patch(text, env)) {
+        Ok(Report::Applied { files, output }) => {
+            Ok(format!("CVB patch would apply to {files} file(s):\n{output}"))
+        }
+        Ok(other) => Err(other.to_text()),
+        Err(text) => Err(text),
+    }
 }
 
 /// What the review gate shows for a pasted patch: `Ok` is the screen text of a
