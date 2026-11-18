@@ -43,17 +43,8 @@ pub(crate) fn initialize() {
         return;
     };
 
-    let token = match env::var("CVB_TOKEN") {
-        Ok(token) if !token.trim().is_empty() => token,
-        _ => {
-            eprintln!("{NOT_PREPARED_MESSAGE}: CVB_TOKEN is not set");
-            return;
-        }
-    };
-
     match prepare_context_with(
         Path::new(&bash_source),
-        &token,
         clipboard::needs_chunking,
         clipboard::process_with_outcome,
     ) {
@@ -66,14 +57,13 @@ pub(crate) fn initialize() {
 
 fn prepare_context_with(
     bash_source: &Path,
-    token: &str,
     will_chunk: impl FnOnce(&ClipboardBuffer) -> bool,
     process: impl FnOnce(
         &ClipboardBuffer,
     ) -> Result<clipboard::ChunkSequenceOutcome, String>,
 ) -> Result<Outcome, String> {
     let manual = load_manual_text(Some(bash_source))?;
-    let context = assemble_context(&manual, token)?;
+    let context = assemble_context(&manual)?;
     let buffer = ClipboardBuffer::new(context.into_bytes());
     let chunked = will_chunk(&buffer);
 
@@ -84,16 +74,12 @@ fn prepare_context_with(
     }
 }
 
-pub(crate) fn assemble_context(manual: &str, token: &str) -> Result<String, String> {
-    assemble_context_with_limit(manual, token, CONTEXT_MAX_CHARS)
+pub(crate) fn assemble_context(manual: &str) -> Result<String, String> {
+    assemble_context_with_limit(manual, CONTEXT_MAX_CHARS)
 }
 
-pub(crate) fn assemble_context_with_limit(
-    manual: &str,
-    token: &str,
-    limit: usize,
-) -> Result<String, String> {
-    let context = manual.replace("{TOKEN}", token);
+pub(crate) fn assemble_context_with_limit(manual: &str, limit: usize) -> Result<String, String> {
+    let context = manual.to_string();
     let chars = context.chars().count();
 
     if chars > limit {
@@ -141,49 +127,10 @@ pub(crate) fn load_manual_text(bash_source: Option<&Path>) -> Result<String, Str
 }
 
 /// The single source of truth for launch context and `cvb context`.
-pub(crate) fn get_context_initialization(token: &str) -> Result<String, String> {
+pub(crate) fn get_context_initialization() -> Result<String, String> {
     let manual = load_manual_text(None)?;
-    assemble_context(&manual, token)
+    assemble_context(&manual)
 }
-
-/// Extracts Section 8 (the surgery specification) from `manual.md` with `{TOKEN}` replaced.
-pub(crate) fn get_spec_text(token: &str) -> Result<String, String> {
-    let manual = load_manual_text(None)?;
-    const SPEC_HEADER: &str = "CVB Surgery Language (CSL), protocol version 1";
-    let spec_start = manual.find(SPEC_HEADER).ok_or_else(|| {
-        "CVB: surgery specification header not found in manual.md".to_string()
-    })?;
-    let raw = manual[spec_start..].replace("{TOKEN}", token);
-    let unindented = raw
-        .lines()
-        .map(|line| line.strip_prefix("  ").unwrap_or(line))
-        .collect::<Vec<_>>()
-        .join("\n")
-        + "\n";
-    Ok(unindented)
-}
-
-/// Prints the surgery specification (Section 8) populated with the session token.
-pub(crate) fn print_spec() -> ! {
-    let token = match std::env::var("CVB_TOKEN") {
-        Ok(token) if !token.trim().is_empty() => token,
-        _ => {
-            eprintln!("CVB: E-NOSESSION: no active surgery session (CVB_TOKEN not set).");
-            std::process::exit(2);
-        }
-    };
-    match get_spec_text(&token) {
-        Ok(text) => {
-            print!("{text}");
-            std::process::exit(0);
-        }
-        Err(error) => {
-            eprintln!("{error}");
-            std::process::exit(2);
-        }
-    }
-}
-
 
 /// Finds `manual.md` next to the loaded `cvb.bash` (installed layout), falling
 /// back to the directory above it (development layout, `data/cvb.bash`).
@@ -300,7 +247,6 @@ mod tests {
 
         let error = prepare_context_with(
             &bash,
-            "ContextToken1234",
             |_| false,
             |_| {
                 copied.set(true);
@@ -321,7 +267,6 @@ mod tests {
 
         let error = prepare_context_with(
             &bash,
-            "ContextToken1234",
             |_| false,
             |_| {
                 copied.set(true);
@@ -342,7 +287,6 @@ mod tests {
 
         let outcome = prepare_context_with(
             &bash,
-            "ContextToken1234",
             |_| false,
             |buffer| {
                 seen.borrow_mut().extend_from_slice(buffer.as_bytes());
@@ -356,31 +300,24 @@ mod tests {
     }
 
     #[test]
-    fn launch_context_contains_workflow_spec_and_session_token() {
+    fn launch_context_is_the_manual_unchanged() {
         let manual = "MANUAL_SENTINEL {TOKEN} END";
-        let token = "ContextToken1234";
-        let context = assemble_context(manual, token).expect("build launch context");
+        let context = assemble_context(manual).expect("build launch context");
 
-        assert!(
-            context.contains("MANUAL_SENTINEL ContextToken1234 END"),
-            "launch context is missing required content; actual context: {context:?}"
-        );
+        assert_eq!(context, manual);
     }
 
     #[test]
     fn launch_context_respects_exact_character_limit() {
-        let manual = "MANUAL_SENTINEL {TOKEN}";
-        let token = "ContextToken1234";
-        let context = assemble_context_with_limit(manual, token, usize::MAX)
-            .expect("build context with generous limit");
-        let exact_limit = context.chars().count();
+        let manual = "MANUAL_SENTINEL";
+        let exact_limit = manual.chars().count();
 
         assert!(
-            assemble_context_with_limit(manual, token, exact_limit).is_ok(),
+            assemble_context_with_limit(manual, exact_limit).is_ok(),
             "context should fit when the limit equals its character count"
         );
 
-        let error = assemble_context_with_limit(manual, token, exact_limit - 1)
+        let error = assemble_context_with_limit(manual, exact_limit - 1)
             .expect_err("context should exceed a limit one character too small");
         assert!(
             error.contains(&format!("configured limit of {}", exact_limit - 1)),
@@ -389,34 +326,16 @@ mod tests {
     }
 
     #[test]
-    fn context_initialization_within_20000_char_budget_and_token_placement() {
+    fn the_manual_in_the_repository_fits_the_launch_budget() {
         let manual_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(MANUAL_FILE);
         let manual = fs::read_to_string(&manual_path).expect("read manual.md");
-        let test_token = "TestToken1234567";
-        let context = assemble_context(&manual, test_token).expect("assemble context within budget");
+        let context = assemble_context(&manual).expect("assemble context within budget");
 
         assert!(
             context.chars().count() <= CONTEXT_MAX_CHARS,
             "Context initialization exceeds 20,000 chars: {} chars",
             context.chars().count()
         );
-
-        let expected_token_line = format!("CVB SESSION TOKEN: {test_token}");
-        assert_eq!(context.lines().last(), Some(expected_token_line.as_str()));
-        assert!(context.contains(&format!("CVB::{test_token}::BEGIN")));
-
-        // Assert token is not in the un-interpolated template
-        assert!(!manual.contains(test_token));
-    }
-
-    #[test]
-    fn context_assembly_is_byte_identical_between_calls() {
-        let manual_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(MANUAL_FILE);
-        let manual = fs::read_to_string(&manual_path).expect("read manual.md");
-        let token = "TestToken1234567";
-        let first = assemble_context(&manual, token).unwrap();
-        let second = assemble_context(&manual, token).unwrap();
-        assert_eq!(first, second);
     }
 
     #[test]
@@ -428,8 +347,7 @@ mod tests {
             let seen = RefCell::new(Vec::new());
             prepare_context_with(
                 &bash,
-                "ContextToken1234",
-                |_| false,
+                    |_| false,
                 |buffer| {
                     seen.borrow_mut().extend_from_slice(buffer.as_bytes());
                     Ok(clipboard::ChunkSequenceOutcome::Completed)
@@ -451,7 +369,6 @@ mod tests {
 
         let error = prepare_context_with(
             &bash,
-            "ContextToken1234",
             |_| false,
             |_| Err("CVB: unable to start wl-copy: not found".to_string()),
         )
@@ -466,7 +383,6 @@ mod tests {
         let bash = installed_layout(dir.path(), "manual {TOKEN}");
         let outcome = prepare_context_with(
             &bash,
-            "ContextToken1234",
             |_| true,
             |_| Ok(clipboard::ChunkSequenceOutcome::Cancelled),
         );
@@ -479,7 +395,7 @@ mod tests {
         let dir = TempDir::new("parts");
         let bash = installed_layout(dir.path(), "manual");
 
-        let outcome = prepare_context_with(&bash, "ContextToken1234", |_| true, |_| Ok(clipboard::ChunkSequenceOutcome::Completed)).unwrap();
+        let outcome = prepare_context_with(&bash, |_| true, |_| Ok(clipboard::ChunkSequenceOutcome::Completed)).unwrap();
 
         assert_eq!(outcome, Outcome::SentInParts);
     }
@@ -505,24 +421,11 @@ mod tests {
     }
 
     #[test]
-    fn spec_text_contains_token_and_unindented_control_lines() {
-        let token = "TestToken1234567";
-        let spec = get_spec_text(token).expect("get spec text");
-
-        assert!(spec.starts_with("CVB Surgery Language (CSL), protocol version 1"));
-        assert!(spec.contains(&format!("CVB::{token}::BEGIN")));
-        assert!(!spec.lines().any(|l| l.starts_with("  CVB::")));
-        let expected_token_line = format!("CVB SESSION TOKEN: {token}");
-        assert_eq!(spec.lines().last(), Some(expected_token_line.as_str()));
-    }
-
-    #[test]
     fn context_text_equals_launch_text_byte_for_byte() {
         let manual_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(MANUAL_FILE);
         let manual = fs::read_to_string(&manual_path).expect("read manual.md");
-        let token = "TestToken1234567";
-        let launch_text = assemble_context(&manual, token).unwrap();
-        let context_cmd_text = get_context_initialization(token).unwrap();
+        let launch_text = assemble_context(&manual).unwrap();
+        let context_cmd_text = get_context_initialization().unwrap();
         assert_eq!(launch_text, context_cmd_text);
     }
 }

@@ -17,7 +17,6 @@ mod pull;
 mod shell;
 mod sound;
 mod commit;
-mod surgery;
 
 const DEFAULT_IGNORE_LIST: &str = "\
 # This file contains directory names that CVB excludes from directory inventories.
@@ -37,20 +36,6 @@ fn main() {
     match cli::parse() {
         cli::Command::Start => match shell::create_rcfile() {
             Ok(rcfile) => {
-                let token = match std::env::var("CVB_TOKEN") {
-                    Ok(token) if !token.trim().is_empty() => token,
-                    _ => match surgery::token::generate_token() {
-                        Ok(token) => token,
-                        Err(error) => {
-                            eprintln!("CVB: unable to initialize session token: {error}");
-                            let _ = std::fs::remove_file(&rcfile);
-                            std::process::exit(2);
-                        }
-                    },
-                };
-                // SAFETY: this runs before the PTY child is created.
-                unsafe { std::env::set_var("CVB_TOKEN", token) };
-
                 context::initialize();
 
                 let result = pty::run(&rcfile);
@@ -87,37 +72,16 @@ A capture session ends with:
     exit"
         ),
         cli::Command::Version => println!("cvb {}", env!("CARGO_PKG_VERSION")),
-        cli::Command::Token => {
-            let token = match std::env::var("CVB_TOKEN") {
-                Ok(token) if !token.trim().is_empty() => token,
-                _ => {
-                    eprintln!("CVB: E-NOSESSION: no active surgery session (CVB_TOKEN not set).");
-                    std::process::exit(2);
-                }
-            };
-            println!("{token}");
-            std::process::exit(0);
-        }
-        cli::Command::Spec => context::print_spec(),
-        cli::Command::Context => {
-            let token = match std::env::var("CVB_TOKEN") {
-                Ok(token) if !token.trim().is_empty() => token,
-                _ => {
-                    eprintln!("CVB: E-NOSESSION: no active surgery session (CVB_TOKEN not set).");
-                    std::process::exit(2);
-                }
-            };
-            match context::get_context_initialization(&token) {
-                Ok(text) => {
-                    print!("{text}");
-                    std::process::exit(0);
-                }
-                Err(error) => {
-                    eprintln!("{error}");
-                    std::process::exit(2);
-                }
+        cli::Command::Context => match context::get_context_initialization() {
+            Ok(text) => {
+                print!("{text}");
+                std::process::exit(0);
             }
-        }
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        },
         cli::Command::Pull(args) => {
             if args.is_empty() {
                 eprintln!("Usage: cvb pull [file:PATH] [cascade:N] <search-term>...");
@@ -125,9 +89,6 @@ A capture session ends with:
             }
 
             std::process::exit(pull::run(&args));
-        }
-        cli::Command::Surgery(args) => {
-            surgery::run(args.dry_run, args.stdin, args.root, args.spec);
         }
         cli::Command::Target(args) => {
             if std::env::var_os("CVB_INTERNAL_TARGET").is_some() {

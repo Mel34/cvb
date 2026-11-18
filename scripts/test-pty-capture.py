@@ -244,51 +244,10 @@ number = len(files) + 1
                 if launch_captures
                 else ""
             )
-            final_line = (
-                launch_text.strip().splitlines()[-1]
-                if launch_text.strip()
-                else ""
-            )
-            token_prefix = "CVB SESSION TOKEN: "
-            launch_token = (
-                final_line[len(token_prefix):].strip()
-                if final_line.startswith(token_prefix)
-                else ""
-            )
             check(
-                "launch clipboard contains surgery spec with token and ends with session token line",
-                bool(
-                    launch_token
-                    and len(launch_token) == 16
-                    and launch_token.isalnum()
-                    and f"CVB::{launch_token}::BEGIN" in launch_text
-                ),
-                f"final_line={final_line!r}",
-            )
-
-            token_capture_one = run_command(
-                "first command sees launch session token",
-                "printf 'CVB_TOKEN=%s\\n' \"${CVB_TOKEN:-MISSING}\"",
-                clipboard_dir,
-                (f"\nCVB_TOKEN={launch_token}\n".encode(),),
-                (b"CVB_TOKEN=MISSING",),
-            )
-            token_capture_two = run_command(
-                "second command reuses launch session token",
-                "printf 'CVB_TOKEN=%s\\n' \"${CVB_TOKEN:-MISSING}\"",
-                clipboard_dir,
-                (f"\nCVB_TOKEN={launch_token}\n".encode(),),
-                (b"CVB_TOKEN=MISSING",),
-            )
-            expected_token_line = f"\nCVB_TOKEN={launch_token}\n".encode()
-            check(
-                "session token remains stable across commands",
-                len(launch_token) == 16
-                and launch_token.isalnum()
-                and expected_token_line in token_capture_one
-                and expected_token_line in token_capture_two,
-                f"token={launch_token!r}; first={token_capture_one!r}; "
-                f"second={token_capture_two!r}",
+                "launch clipboard holds the manual",
+                bool(launch_text.strip()),
+                f"launch_text={launch_text[:80]!r}",
             )
 
             run_command(
@@ -932,61 +891,6 @@ fi""",
                 f"cvb {fixture}",
                 clipboard_dir,
                 (b"PTY_FILE_BRIDGE_OK",),
-            )
-
-            # Interactive surgery mode: out-of-band diff dispatch and transcript suppression
-            drain_terminal()
-            buffer.clear()
-
-            surgery_project = work / "surgery-project"
-            surgery_project.mkdir()
-            test_file = surgery_project / "hello.txt"
-            test_file.write_text("Hello World\n")
-
-            envelope = f"""CVB::{launch_token}::BEGIN v=1 id=test-pty-surgery
-CVB::{launch_token}::FILE path=hello.txt
-CVB::{launch_token}::OP replace lines=1-1
-CVB::{launch_token}::OLD n=1
-Hello World
-CVB::{launch_token}::NEW n=1
-Hello PTY
-CVB::{launch_token}::ENDOP
-CVB::{launch_token}::END ops=1
-"""
-            envelope_file = work / "envelope.csl"
-            envelope_file.write_text(envelope)
-
-            clipboard_before_surgery = len(clipboard_files(clipboard_dir))
-            os.write(
-                master,
-                f"cd {surgery_project} && cvb surgery --stdin < {envelope_file}\n".encode("utf-8")
-            )
-            read_until(b"Apply these changes? [y/N]: ")
-
-            surgery_payloads = wait_for_payload(clipboard_dir, clipboard_before_surgery + 1)
-            diff_payload = surgery_payloads[clipboard_before_surgery]
-            check(
-                "surgery diff is dispatched to clipboard while waiting for confirmation",
-                b"-Hello World" in diff_payload and b"+Hello PTY" in diff_payload,
-                diff_payload,
-            )
-
-            os.write(master, b"n\n")
-            read_until(END)
-
-            latest_payloads = clipboard_files(clipboard_dir)
-            check(
-                "terminal UI never reaches the clipboard on surgery abort",
-                len(latest_payloads) == clipboard_before_surgery + 1,
-                f"captures count={len(latest_payloads)}",
-            )
-
-            run_command(
-                "ordinary command capture still behaves as before",
-                "printf 'PTY_AFTER_SURGERY_OK\n'",
-                clipboard_dir,
-                (b"PTY_AFTER_SURGERY_OK",),
-                (b"Apply these changes", b"Hello World"),
             )
 
             os.write(master, b"exit\n")

@@ -7,13 +7,13 @@ use std::process::{Command, Output};
 
 use crate::cascade;
 
-const SURGERY_REMINDER: &str =
-    "Edit with: cvb surgery (use the surgery format and the session token from the start of the conversation; cvb token prints it again).";
+const PATCH_REMINDER: &str =
+    "Edit with a patch: apply_patch format or git diff, pasted at the prompt of this session.";
 
 type FileScope = (Option<String>, Vec<(usize, usize)>, Vec<String>);
 
-fn append_surgery_reminder(stdout: &mut String) {
-    stdout.push_str(SURGERY_REMINDER);
+fn append_patch_reminder(stdout: &mut String) {
+    stdout.push_str(PATCH_REMINDER);
     stdout.push('\n');
 }
 
@@ -918,7 +918,7 @@ pub fn run_capture(args: &[String], dir: Option<&Path>) -> (i32, String, String)
                 stdout.push_str(&format!("{path}:{number}: {}\n", lines[number - 1]));
             }
         }
-        append_surgery_reminder(&mut stdout);
+        append_patch_reminder(&mut stdout);
         return (0, stdout, stderr);
     }
 
@@ -1191,12 +1191,12 @@ pub fn run_capture(args: &[String], dir: Option<&Path>) -> (i32, String, String)
                 &matching_units,
                 dir,
                 depth,
-                SURGERY_REMINDER.chars().count() + 1,
+                PATCH_REMINDER.chars().count() + 1,
             );
             stdout.push_str(&cascade_bundle);
         }
 
-    append_surgery_reminder(&mut stdout);
+    append_patch_reminder(&mut stdout);
     (0, stdout, stderr)
 }
 
@@ -2784,12 +2784,12 @@ fn other() {
     }
 
     #[test]
-    fn surgery_reminder_only_appears_once_on_successful_content_captures() {
+    fn patch_reminder_only_appears_once_on_successful_content_captures() {
         const REMINDER: &str =
-            "Edit with: cvb surgery (use the surgery format and the session token from the start of the conversation; cvb token prints it again).";
+            "Edit with a patch: apply_patch format or git diff, pasted at the prompt of this session.";
 
         let dir = std::env::temp_dir()
-            .join(format!("cvb-pull-surgery-reminder-{}", std::process::id()));
+            .join(format!("cvb-pull-patch-reminder-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).unwrap();
 
@@ -2852,10 +2852,11 @@ fn other() {
         let _ = std::fs::remove_dir_all(&dir);
     }
     #[test]
-    fn surgery_reminder_has_no_token_and_references_session_token_and_cvb_token() {
-        assert!(SURGERY_REMINDER.contains("session token from the start of the conversation"));
-        assert!(SURGERY_REMINDER.contains("cvb token"));
-        assert!(!SURGERY_REMINDER.contains("{TOKEN}"));
+    fn patch_reminder_names_both_patch_formats() {
+        assert!(PATCH_REMINDER.contains("apply_patch"));
+        assert!(PATCH_REMINDER.contains("git diff"));
+        assert!(!PATCH_REMINDER.contains("surgery"));
+        assert!(!PATCH_REMINDER.contains("token"));
     }
 
 
