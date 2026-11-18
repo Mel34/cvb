@@ -4,14 +4,14 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::surgery::journal::{
+use crate::commit::journal::{
     check_replay_id, find_unfinished_journal, read_journal_ext, transition_journal_state,
     write_journal_with_ext_atomic, EntryExt, Journal, JournalExt, JournalFileEntry, JournalState,
     ProjectState,
 };
-use crate::surgery::lock::{LockError, ProjectLock};
-use crate::surgery::validate_relative_path;
-use crate::surgery::{Plan, PlannedFile};
+use crate::commit::lock::{LockError, ProjectLock};
+use crate::commit::plan::validate_relative_path;
+use crate::commit::plan::{Plan, PlannedFile};
 
 /// The digest recorded for "this file does not exist". It can never equal a
 /// real SHA-256 hex digest, so a file's state is always either this sentinel
@@ -77,14 +77,14 @@ pub(crate) enum RecoveryOutcome {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
-pub(crate) enum SurgeryExitStatus {
+pub(crate) enum ExitStatus {
     Applied = 0,
     RejectedBeforeCommit = 2,
     UserDeclined = 3,
     CommitFailure = 4,
 }
 
-impl SurgeryExitStatus {
+impl ExitStatus {
     pub(crate) fn code(&self) -> i32 {
         *self as i32
     }
@@ -149,15 +149,15 @@ pub(crate) enum ApplyError {
 }
 
 impl ApplyError {
-    pub(crate) fn exit_status(&self) -> SurgeryExitStatus {
+    pub(crate) fn exit_status(&self) -> ExitStatus {
         match self {
             ApplyError::Lock(_)
             | ApplyError::Recover { .. }
             | ApplyError::Replay { .. }
-            | ApplyError::Stale { .. } => SurgeryExitStatus::RejectedBeforeCommit,
+            | ApplyError::Stale { .. } => ExitStatus::RejectedBeforeCommit,
             ApplyError::Io { .. }
             | ApplyError::CommitFailed(_)
-            | ApplyError::FaultInjected(_) => SurgeryExitStatus::CommitFailure,
+            | ApplyError::FaultInjected(_) => ExitStatus::CommitFailure,
         }
     }
 }
@@ -1217,10 +1217,10 @@ pub(crate) fn recover_project(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::surgery::journal::{
+    use crate::commit::journal::{
         init_project_state, read_journal, transition_journal_state, write_journal_atomic,
     };
-    use crate::surgery::PlannedFile;
+    use crate::commit::plan::PlannedFile;
     use std::fs;
 
     fn make_test_plan(id: &str, files: Vec<(&str, &str, &str)>) -> Plan {
@@ -1240,12 +1240,10 @@ mod tests {
                 original_digest: orig_dig,
                 proposed: prop.to_string(),
                 proposed_digest: prop_dig,
-                operations: Vec::new(),
             });
         }
 
         Plan {
-            token: "tok".to_string(),
             id: id.to_string(),
             digest: "plan-digest".to_string(),
             files: planned_files,
@@ -2482,7 +2480,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&file_a).unwrap(), orig_a);
         assert_eq!(fs::read_to_string(&file_b).unwrap(), orig_b);
 
-        let journal = crate::surgery::journal::read_journal(
+        let journal = crate::commit::journal::read_journal(
             &state.dir.join("ordinary-rename-fail.journal"),
         )
         .unwrap();
@@ -2565,7 +2563,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&file_a).unwrap(), "new a\n");
         assert_eq!(fs::read_to_string(&file_b).unwrap(), orig_b);
 
-        let journal = crate::surgery::journal::read_journal(
+        let journal = crate::commit::journal::read_journal(
             &state.dir.join("ordinary-restore-fail.journal"),
         )
         .unwrap();
@@ -2852,10 +2850,10 @@ mod tests {
 
     #[test]
     fn test_exit_status_codes() {
-        assert_eq!(SurgeryExitStatus::Applied.code(), 0);
-        assert_eq!(SurgeryExitStatus::RejectedBeforeCommit.code(), 2);
-        assert_eq!(SurgeryExitStatus::UserDeclined.code(), 3);
-        assert_eq!(SurgeryExitStatus::CommitFailure.code(), 4);
+        assert_eq!(ExitStatus::Applied.code(), 0);
+        assert_eq!(ExitStatus::RejectedBeforeCommit.code(), 2);
+        assert_eq!(ExitStatus::UserDeclined.code(), 3);
+        assert_eq!(ExitStatus::CommitFailure.code(), 4);
     }
 
     #[test]
@@ -2863,7 +2861,7 @@ mod tests {
         let lock_err = ApplyError::Lock(LockError::Locked);
         assert_eq!(
             lock_err.exit_status(),
-            SurgeryExitStatus::RejectedBeforeCommit
+            ExitStatus::RejectedBeforeCommit
         );
 
         let recover_err = ApplyError::Recover {
@@ -2872,7 +2870,7 @@ mod tests {
         };
         assert_eq!(
             recover_err.exit_status(),
-            SurgeryExitStatus::RejectedBeforeCommit
+            ExitStatus::RejectedBeforeCommit
         );
 
         let replay_err = ApplyError::Replay {
@@ -2880,7 +2878,7 @@ mod tests {
         };
         assert_eq!(
             replay_err.exit_status(),
-            SurgeryExitStatus::RejectedBeforeCommit
+            ExitStatus::RejectedBeforeCommit
         );
 
         let stale_err = ApplyError::Stale {
@@ -2890,14 +2888,14 @@ mod tests {
         };
         assert_eq!(
             stale_err.exit_status(),
-            SurgeryExitStatus::RejectedBeforeCommit
+            ExitStatus::RejectedBeforeCommit
         );
 
         let fail_err = ApplyError::CommitFailed(CommitFailureReport {
             message: "I/O error".to_string(),
             files: vec![],
         });
-        assert_eq!(fail_err.exit_status(), SurgeryExitStatus::CommitFailure);
+        assert_eq!(fail_err.exit_status(), ExitStatus::CommitFailure);
     }
 
     #[test]
@@ -2950,7 +2948,7 @@ mod tests {
     // Added and deleted files
     // ---------------------------------------------------------------------
 
-    use crate::surgery::journal::{encode_journal, list_project_journals};
+    use crate::commit::journal::{encode_journal, list_project_journals};
 
     /// Entries are `(path, original, proposed)`. `None` means the file is absent
     /// on that side: an added file has no original, a deleted file no proposed.
@@ -2962,7 +2960,6 @@ mod tests {
             }
         }
         Plan {
-            token: "tok".to_string(),
             id: id.to_string(),
             digest: "plan-digest".to_string(),
             files: files
@@ -2973,7 +2970,6 @@ mod tests {
                     original_digest: digest(original),
                     proposed: proposed.unwrap_or("").to_string(),
                     proposed_digest: digest(proposed),
-                    operations: Vec::new(),
                 })
                 .collect(),
         }

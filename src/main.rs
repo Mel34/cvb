@@ -16,6 +16,7 @@ mod pty;
 mod pull;
 mod shell;
 mod sound;
+mod commit;
 mod surgery;
 
 const DEFAULT_IGNORE_LIST: &str = "\

@@ -25,10 +25,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::patch::guard::check_tree;
 use crate::patch::parse::{Change, Format, ParsedPatch, parse_any};
-use crate::surgery::apply::{ABSENT_DIGEST, ApplyError, apply_plan_with_modes, sha256_hex};
-use crate::surgery::journal::{ProjectState, init_project_state};
-use crate::surgery::load::{MAX_AGGREGATE_BYTES, MAX_TARGET_BYTES};
-use crate::surgery::{Plan, PlannedFile, detect_newline};
+use crate::commit::apply::{ABSENT_DIGEST, ApplyError, apply_plan_with_modes, sha256_hex};
+use crate::commit::journal::{ProjectState, init_project_state};
+use crate::commit::{MAX_AGGREGATE_BYTES, MAX_TARGET_BYTES};
+use crate::commit::plan::{Plan, PlannedFile, detect_newline};
 
 /// How long `apply_patch` may run before it is killed.
 pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -516,7 +516,6 @@ fn build_plan(
             original_digest: sha256_hex(original.as_bytes()),
             proposed_digest: sha256_hex(proposed.as_bytes()),
             proposed,
-            operations: Vec::new(),
         })
     };
     let deleted = |path: &str| -> PlannedFile {
@@ -527,7 +526,6 @@ fn build_plan(
             original,
             proposed: String::new(),
             proposed_digest: ABSENT_DIGEST.to_string(),
-            operations: Vec::new(),
         }
     };
     let added = |path: &str, proposed: String| PlannedFile {
@@ -536,7 +534,6 @@ fn build_plan(
         original_digest: ABSENT_DIGEST.to_string(),
         proposed_digest: sha256_hex(proposed.as_bytes()),
         proposed,
-        operations: Vec::new(),
     };
 
     for op in &parsed.ops {
@@ -631,7 +628,6 @@ fn build_plan(
     }
 
     let plan = Plan {
-        token: "patch".to_string(),
         id,
         digest: sha256_hex(patch_text.as_bytes()),
         files,
@@ -1444,7 +1440,7 @@ printf '%s\n' "${changed[@]}"
     fn a_locked_project_is_refused_without_changes() {
         let f = Fixture::new("locked");
         f.write("a.txt", "x\n");
-        let _lock = crate::surgery::lock::ProjectLock::acquire(&f.project_dir()).unwrap();
+        let _lock = crate::commit::lock::ProjectLock::acquire(&f.project_dir()).unwrap();
         let before = f.snapshot();
 
         let report = f.run("*** Update File: a.txt\n@@\n-x\n+y\n");

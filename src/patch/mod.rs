@@ -13,3 +13,4 @@ pub(crate) mod parse;
 pub(crate) mod paste;
 pub(crate) mod review;
 pub(crate) mod run;
+pub(crate) mod text;

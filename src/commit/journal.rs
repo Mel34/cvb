@@ -229,7 +229,7 @@ pub(crate) fn init_project_state(
     })
 }
 
-use crate::surgery::validate_relative_path;
+use crate::commit::plan::validate_relative_path;
 
 const JOURNAL_MAGIC: &[u8; 8] = b"CVBJRNL1";
 

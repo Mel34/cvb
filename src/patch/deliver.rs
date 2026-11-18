@@ -7,8 +7,8 @@ use std::path::PathBuf;
 
 use crate::patch::paste::RejectReason;
 use crate::patch::run::{DEFAULT_TIMEOUT, Env, Report, run_patch};
-use crate::surgery::journal::resolve_state_dir;
-use crate::surgery::render::is_escape_char;
+use crate::commit::journal::resolve_state_dir;
+use crate::patch::text::is_escape_char;
 
 /// A key sequence nobody types. `data/cvb-control.bash` binds it to readline's
 /// `redraw-current-line`; the proxy sends it after printing a result so the

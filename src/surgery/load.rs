@@ -6,9 +6,6 @@ use std::path::Path;
 ///
 /// Paths must be safe relative paths. Symlinks are rejected so a target cannot
 /// redirect a read outside the supplied root.
-pub(crate) const MAX_TARGET_BYTES: u64 = 8 * 1024 * 1024;
-pub(crate) const MAX_AGGREGATE_BYTES: u64 = 32 * 1024 * 1024;
-
 pub(crate) fn load_originals(
     root: &Path,
     envelope: &Envelope,

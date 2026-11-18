@@ -19,7 +19,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::surgery::validate_relative_path;
+use crate::commit::plan::validate_relative_path;
 
 const BEGIN: &str = "*** Begin Patch";
 const END: &str = "*** End Patch";

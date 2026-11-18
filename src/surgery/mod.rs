@@ -1,11 +1,8 @@
 #![allow(dead_code)]
 
-use std::path::{Component, Path};
+use std::path::Path;
 
-pub(crate) mod apply;
 pub(crate) mod confirm;
-pub(crate) mod journal;
-pub(crate) mod lock;
 pub(crate) mod load;
 pub(crate) mod parse;
 pub(crate) mod plan;
@@ -16,13 +13,16 @@ pub(crate) mod mode;
 pub(crate) mod pager;
 pub(crate) mod token;
 #[allow(unused_imports)]
-pub(crate) use apply::*;
+pub(crate) use crate::commit::apply::*;
 #[allow(unused_imports)]
 pub(crate) use confirm::*;
 #[allow(unused_imports)]
-pub(crate) use journal::*;
+pub(crate) use crate::commit::journal::*;
 #[allow(unused_imports)]
-pub(crate) use lock::*;
+pub(crate) use crate::commit::lock::*;
+#[allow(unused_imports)]
+pub(crate) use crate::commit::plan::{Newline, NewlineError, detect_newline};
+pub(crate) use crate::commit::{MAX_AGGREGATE_BYTES, MAX_TARGET_BYTES};
 pub(crate) use load::*;
 pub(crate) use parse::*;
 pub(crate) use plan::*;
@@ -523,6 +523,27 @@ pub(crate) struct PlannedFile {
     pub operations: Vec<Operation>,
 }
 
+impl Plan {
+    /// The part of the plan the commit engine needs.
+    pub(crate) fn to_commit(&self) -> crate::commit::plan::Plan {
+        crate::commit::plan::Plan {
+            id: self.id.clone(),
+            digest: self.digest.clone(),
+            files: self
+                .files
+                .iter()
+                .map(|f| crate::commit::plan::PlannedFile {
+                    path: f.path.clone(),
+                    original: f.original.clone(),
+                    original_digest: f.original_digest.clone(),
+                    proposed: f.proposed.clone(),
+                    proposed_digest: f.proposed_digest.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
 /// Failures the pure planner can report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PlanError {
@@ -556,95 +577,9 @@ impl PlanError {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Newline {
-    Lf,
-    Crlf,
-}
-
-impl Newline {
-    pub(crate) fn as_str(&self) -> &'static str {
-        match self {
-            Newline::Lf => "\n",
-            Newline::Crlf => "\r\n",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NewlineError {
-    LoneCr,
-    Mixed,
-}
-
-pub(crate) fn detect_newline(contents: &str) -> Result<Newline, NewlineError> {
-    let bytes = contents.as_bytes();
-    let mut has_lf = false;
-    let mut has_crlf = false;
-    let mut index = 0;
-
-    while index < bytes.len() {
-        match bytes[index] {
-            b'\r' => {
-                if bytes.get(index + 1) == Some(&b'\n') {
-                    has_crlf = true;
-                    index += 2;
-                } else {
-                    return Err(NewlineError::LoneCr);
-                }
-            }
-            b'\n' => {
-                has_lf = true;
-                index += 1;
-            }
-            _ => index += 1,
-        }
-    }
-
-    if has_lf && has_crlf {
-        return Err(NewlineError::Mixed);
-    }
-
-    if has_crlf {
-        Ok(Newline::Crlf)
-    } else {
-        Ok(Newline::Lf)
-    }
-}
-
-/// Validates relative paths: rejects empty, backslashes, absolute paths,
-/// non-normal components (`.` / `..`), and `.git` components (case-insensitive).
+/// Validates relative paths (see `commit::plan::validate_relative_path`).
 pub(crate) fn validate_relative_path(path: &str) -> Result<(), PlanError> {
-    if path.is_empty() || path.contains('\\') || path.starts_with('/') || path.ends_with('/') {
-        return Err(PlanError::InvalidPath);
-    }
-
-    let p = Path::new(path);
-    if p.is_absolute() {
-        return Err(PlanError::InvalidPath);
-    }
-
-    for segment in path.split('/') {
-        if segment.is_empty() || segment == "." || segment == ".." {
-            return Err(PlanError::InvalidPath);
-        }
-        if segment.eq_ignore_ascii_case(".git") {
-            return Err(PlanError::InvalidPath);
-        }
-    }
-
-    for component in p.components() {
-        match component {
-            Component::Normal(c) => {
-                if c.to_str().is_some_and(|s| s.eq_ignore_ascii_case(".git")) {
-                    return Err(PlanError::InvalidPath);
-                }
-            }
-            _ => return Err(PlanError::InvalidPath),
-        }
-    }
-
-    Ok(())
+    crate::commit::plan::validate_relative_path(path).map_err(|_| PlanError::InvalidPath)
 }
 
 /// Error from parsing, loading, or planning a surgery envelope.
@@ -1171,7 +1106,7 @@ fn run_surgery_mode(root: std::path::PathBuf, session_token: String) -> i32 {
                                 );
                                 return 2;
                             }
-                            return SurgeryExitStatus::RejectedBeforeCommit.code();
+                            return ExitStatus::RejectedBeforeCommit.code();
                         }
                     };
 
@@ -1203,11 +1138,11 @@ fn run_surgery_mode(root: std::path::PathBuf, session_token: String) -> i32 {
                                 );
                                 return 2;
                             }
-                            return SurgeryExitStatus::RejectedBeforeCommit.code();
+                            return ExitStatus::RejectedBeforeCommit.code();
                         }
                     };
 
-                    match apply_plan(&project_state, &plan) {
+                    match apply_plan(&project_state, &plan.to_commit()) {
                         Ok(_) => {
                             let outcome = format_applied_outcome(&envelope.id, &plan);
                             if let Err(send_error) = control.send(&ControlMessage::SurgeryEnd {
@@ -1220,7 +1155,7 @@ fn run_surgery_mode(root: std::path::PathBuf, session_token: String) -> i32 {
                                 return 2;
                             }
                             eprint!("\r\x1b[2K{outcome}");
-                            return SurgeryExitStatus::Applied.code();
+                            return ExitStatus::Applied.code();
                         }
                         Err(error) => {
                             let is_stale = match &error {
@@ -1415,7 +1350,7 @@ fn run_surgery_mode(root: std::path::PathBuf, session_token: String) -> i32 {
                         );
                         return 2;
                     }
-                    return SurgeryExitStatus::UserDeclined.code();
+                    return ExitStatus::UserDeclined.code();
                 }
             }
         }
@@ -1615,7 +1550,7 @@ pub(crate) fn run(
                 std::process::exit(2);
             }
         }
-        std::process::exit(SurgeryExitStatus::UserDeclined.code());
+        std::process::exit(ExitStatus::UserDeclined.code());
     }
 
     let state_base = match resolve_state_dir() {
@@ -1635,7 +1570,7 @@ pub(crate) fn run(
                 }
             }
             eprintln!("{error}");
-            std::process::exit(SurgeryExitStatus::RejectedBeforeCommit.code());
+            std::process::exit(ExitStatus::RejectedBeforeCommit.code());
         }
     };
 
@@ -1656,11 +1591,11 @@ pub(crate) fn run(
                 }
             }
             eprintln!("{error}");
-            std::process::exit(SurgeryExitStatus::RejectedBeforeCommit.code());
+            std::process::exit(ExitStatus::RejectedBeforeCommit.code());
         }
     };
 
-    match apply_plan(&state, &plan) {
+    match apply_plan(&state, &plan.to_commit()) {
         Ok(_) => {
             if let Some(ref mut c) = control {
                 let outcome = format_applied_outcome(&envelope.id, &plan);
@@ -1674,7 +1609,7 @@ pub(crate) fn run(
                     std::process::exit(2);
                 }
             }
-            std::process::exit(SurgeryExitStatus::Applied.code());
+            std::process::exit(ExitStatus::Applied.code());
         }
         Err(error) => {
             let status = error.exit_status().code();
