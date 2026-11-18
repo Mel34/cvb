@@ -66,7 +66,8 @@ pub(crate) struct ProjectState {
     pub ino: u64,
 }
 
-/// Resolves the user surgery state directory:
+/// Resolves the user state directory (named `surgery` for historical reasons;
+/// existing journals live there):
 /// $XDG_STATE_HOME/cvb/surgery/ falling back to $HOME/.local/state/cvb/surgery/
 pub(crate) fn resolve_state_dir() -> Result<PathBuf, StateError> {
     if let Some(xdg) = std::env::var_os("XDG_STATE_HOME")
@@ -367,7 +368,7 @@ pub(crate) fn decode_journal(data: &[u8]) -> Result<Journal, JournalError> {
 const EXT_MAGIC: &[u8; 8] = b"CVBXTRA1";
 
 /// Extra per-file data a journal can carry for transactions that create or
-/// delete files. Surgery's ordinary edits never write it, so their journals
+/// delete files. Plain edits never write it, so their journals
 /// stay byte-for-byte what they have always been.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct JournalExt {

@@ -618,26 +618,12 @@ extern "C" fn handle_sigwinch(_: libc::c_int) {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(crate) enum SurgeryProxyState {
-    #[default]
-    Ordinary,
-    Active {
-        token: String,
-    },
-    Completed {
-        outcome: String,
-    },
-    Aborted,
-}
-
 fn capture_terminal_output(
     capture: &mut CaptureState,
     transcript: &mut Transcript,
-    state: &SurgeryProxyState,
     output: &[u8],
 ) {
-    if capture.capturing && *state == SurgeryProxyState::Ordinary {
+    if capture.capturing {
         transcript.push_terminal(output);
         capture.push(output);
     }
@@ -1093,7 +1079,6 @@ fn proxy(
     // Set by the SKIP marker: the finished command line consisted only of
     // commands from the skip list. Consumed by the next END marker.
     let mut skip_requested = false;
-    let mut surgery_state = SurgeryProxyState::Ordinary;
     // Recognizes a patch pasted at an idle prompt (see src/patch/). Everything
     // else typed or pasted goes to the shell unchanged.
     let mut patch_input = crate::patch::input::PatchInput::new(crate::patch::deliver::enabled());
@@ -1253,8 +1238,8 @@ fn proxy(
             }
 
             // A paste only counts as a patch when the shell is at a prompt: not
-            // while a command (an editor, `cat`, ssh, surgery) is running.
-            let idle = !capture.capturing && surgery_state == SurgeryProxyState::Ordinary;
+            // while a command (an editor, `cat`, ssh) is running.
+            let idle = !capture.capturing;
             // A patch waiting for review sees the input first.
             let incoming = review_input(
                 &mut review,
@@ -1317,12 +1302,7 @@ fn proxy(
             for event in events {
                 match event {
                     MarkerEvent::Data(output) => {
-                        capture_terminal_output(
-                            &mut capture,
-                            &mut transcript,
-                            &surgery_state,
-                            &output,
-                        );
+                        capture_terminal_output(&mut capture, &mut transcript, &output);
                     }
 
                     MarkerEvent::Pathop => {
@@ -1346,9 +1326,6 @@ fn proxy(
                     MarkerEvent::Start => {
                         let capturing_before = capture.capturing;
                         skip_requested = false;
-                        if !matches!(surgery_state, SurgeryProxyState::Active { .. }) {
-                            surgery_state = SurgeryProxyState::Ordinary;
-                        }
                         capture.start();
 
                         debug_log(
@@ -1376,22 +1353,6 @@ fn proxy(
                         }
 
                         let _captured = capture.end();
-
-                        match std::mem::replace(&mut surgery_state, SurgeryProxyState::Ordinary) {
-                            SurgeryProxyState::Completed { outcome } => {
-                                debug_log("surgery_dispatch_outcome", &outcome);
-                                let buffer = crate::clipboard::ClipboardBuffer::new(outcome.into_bytes());
-                                crate::clipboard::copy_to_clipboard(&buffer)?;
-                                transcript = Transcript::default();
-                                continue;
-                            }
-                            SurgeryProxyState::Active { .. } | SurgeryProxyState::Aborted => {
-                                debug_log("surgery_aborted_or_abrupt_end", "suppressing clipboard update");
-                                transcript = Transcript::default();
-                                continue;
-                            }
-                            SurgeryProxyState::Ordinary => {}
-                        }
 
                         // A skip-listed command line with no visible output
                         // leaves the clipboard untouched. Any output, such as
@@ -1440,7 +1401,7 @@ fn proxy(
                 | nix::poll::PollFlags::POLLERR,
         ) {
             for message in control.receive()? {
-                handle_control_message(message, control, &mut transcript, &mut surgery_state)?;
+                handle_control_message(message, control, &mut transcript)?;
             }
 
             if control_events.contains(nix::poll::PollFlags::POLLERR) {
@@ -1463,30 +1424,7 @@ fn handle_control_message(
     message: ControlMessage,
     control: &ControlChannel,
     transcript: &mut Transcript,
-    surgery_state: &mut SurgeryProxyState,
 ) -> Result<(), String> {
-    let expected_token = std::env::var("CVB_TOKEN").ok();
-    handle_control_message_with(
-        message,
-        control,
-        transcript,
-        surgery_state,
-        expected_token.as_deref(),
-        crate::clipboard::copy_to_clipboard,
-    )
-}
-
-fn handle_control_message_with<F>(
-    message: ControlMessage,
-    control: &ControlChannel,
-    transcript: &mut Transcript,
-    surgery_state: &mut SurgeryProxyState,
-    expected_token: Option<&str>,
-    mut copy: F,
-) -> Result<(), String>
-where
-    F: FnMut(&crate::clipboard::ClipboardBuffer) -> Result<(), String>,
-{
     match message {
         ControlMessage::Exit => {}
 
@@ -1526,35 +1464,6 @@ where
         }
 
         ControlMessage::TargetResponse { .. } => {}
-
-        ControlMessage::SurgeryBegin { token } => {
-            if matches!(surgery_state, SurgeryProxyState::Ordinary) {
-                if let Some(expected) = expected_token {
-                    if !expected.trim().is_empty() && token == expected {
-                        *surgery_state = SurgeryProxyState::Active { token };
-                        *transcript = Transcript::default();
-                    }
-                }
-            }
-        }
-
-        ControlMessage::ClipboardWrite { text } => {
-            if matches!(surgery_state, SurgeryProxyState::Active { .. }) {
-                let buffer = crate::clipboard::ClipboardBuffer::new(text.into_bytes());
-                copy(&buffer)?;
-            }
-        }
-
-        ControlMessage::SurgeryEnd { status, outcome } => {
-            if matches!(surgery_state, SurgeryProxyState::Active { .. }) {
-                if status == 0 {
-                    *surgery_state = SurgeryProxyState::Completed { outcome };
-                } else {
-                    *surgery_state = SurgeryProxyState::Aborted;
-                }
-                *transcript = Transcript::default();
-            }
-        }
     }
 
     Ok(())
@@ -1764,279 +1673,10 @@ mod tests {
     }
 
     #[test]
-    fn surgery_begin_sets_active_state_and_clears_transcript() {
-        let (parent, _child) = super::control_socketpair().unwrap();
-        let control = super::ControlChannel::new(parent);
-        let mut transcript = super::Transcript::default();
-        transcript.push_terminal(b"dirty modal terminal output");
-        let mut state = super::SurgeryProxyState::Ordinary;
+    fn terminal_capture_and_transcript_follow_capture_state() {
+        let sample_data = b"some command output";
 
-        super::handle_control_message_with(
-            super::ControlMessage::SurgeryBegin {
-                token: "token123".to_string(),
-            },
-            &control,
-            &mut transcript,
-            &mut state,
-            Some("token123"),
-            |_| Ok(()),
-        )
-        .unwrap();
-
-        assert_eq!(
-            state,
-            super::SurgeryProxyState::Active {
-                token: "token123".to_string()
-            }
-        );
-        assert!(transcript.segments.is_empty());
-    }
-
-    #[test]
-    fn clipboard_write_in_active_state_copies_payload() {
-        let (parent, _child) = super::control_socketpair().unwrap();
-        let control = super::ControlChannel::new(parent);
-        let mut transcript = super::Transcript::default();
-        let mut state = super::SurgeryProxyState::Active {
-            token: "tok".to_string(),
-        };
-        let mut copied = Vec::new();
-
-        super::handle_control_message_with(
-            super::ControlMessage::ClipboardWrite {
-                text: "diff candidate".to_string(),
-            },
-            &control,
-            &mut transcript,
-            &mut state,
-            Some("tok"),
-            |buffer| {
-                copied.push(buffer.as_bytes().to_vec());
-                Ok(())
-            },
-        )
-        .unwrap();
-
-        assert_eq!(copied, vec![b"diff candidate".to_vec()]);
-    }
-
-    #[test]
-    fn surgery_end_completed_sets_completed_state() {
-        let (parent, _child) = super::control_socketpair().unwrap();
-        let control = super::ControlChannel::new(parent);
-        let mut transcript = super::Transcript::default();
-        let mut state = super::SurgeryProxyState::Active {
-            token: "tok".to_string(),
-        };
-
-        super::handle_control_message_with(
-            super::ControlMessage::SurgeryEnd {
-                status: 0,
-                outcome: "CVB surgery APPLIED id=xyz files=2\n".to_string(),
-            },
-            &control,
-            &mut transcript,
-            &mut state,
-            Some("tok"),
-            |_| Ok(()),
-        )
-        .unwrap();
-
-        assert_eq!(
-            state,
-            super::SurgeryProxyState::Completed {
-                outcome: "CVB surgery APPLIED id=xyz files=2\n".to_string()
-            }
-        );
-        assert!(transcript.segments.is_empty());
-    }
-
-    #[test]
-    fn surgery_end_aborted_sets_aborted_state() {
-        let (parent, _child) = super::control_socketpair().unwrap();
-        let control = super::ControlChannel::new(parent);
-        let mut transcript = super::Transcript::default();
-        let mut state = super::SurgeryProxyState::Active {
-            token: "tok".to_string(),
-        };
-
-        super::handle_control_message_with(
-            super::ControlMessage::SurgeryEnd {
-                status: 1,
-                outcome: String::new(),
-            },
-            &control,
-            &mut transcript,
-            &mut state,
-            Some("tok"),
-            |_| Ok(()),
-        )
-        .unwrap();
-
-        assert_eq!(state, super::SurgeryProxyState::Aborted);
-        assert!(transcript.segments.is_empty());
-    }
-
-    #[test]
-    fn fatal_error_clipboard_write_then_surgery_end_aborts() {
-        let (parent, _child) = super::control_socketpair().unwrap();
-        let control = super::ControlChannel::new(parent);
-        let mut transcript = super::Transcript::default();
-        let mut state = super::SurgeryProxyState::Active {
-            token: "tok".to_string(),
-        };
-        let mut copied = Vec::new();
-
-        super::handle_control_message_with(
-            super::ControlMessage::ClipboardWrite {
-                text: "CVB: fatal error report\n".to_string(),
-            },
-            &control,
-            &mut transcript,
-            &mut state,
-            Some("tok"),
-            |buffer| {
-                copied.push(buffer.as_bytes().to_vec());
-                Ok(())
-            },
-        )
-        .unwrap();
-
-        assert_eq!(copied, vec![b"CVB: fatal error report\n".to_vec()]);
-
-        super::handle_control_message_with(
-            super::ControlMessage::SurgeryEnd {
-                status: 1,
-                outcome: String::new(),
-            },
-            &control,
-            &mut transcript,
-            &mut state,
-            Some("tok"),
-            |_| Ok(()),
-        )
-        .unwrap();
-
-        assert_eq!(state, super::SurgeryProxyState::Aborted);
-        assert!(transcript.segments.is_empty());
-    }
-
-    #[test]
-    fn clipboard_write_failure_is_propagated_without_changing_surgery_state() {
-        let (parent, _child) = super::control_socketpair().unwrap();
-        let control = super::ControlChannel::new(parent);
-        let mut transcript = super::Transcript::default();
-        transcript.push_terminal(b"existing transcript");
-        let transcript_before = transcript.clone();
-        let mut state = super::SurgeryProxyState::Active {
-            token: "tok".to_string(),
-        };
-
-        let result = super::handle_control_message_with(
-            super::ControlMessage::ClipboardWrite {
-                text: "diff candidate".to_string(),
-            },
-            &control,
-            &mut transcript,
-            &mut state,
-            Some("tok"),
-            |_| Err("test clipboard failure".to_string()),
-        );
-
-        assert_eq!(result.unwrap_err(), "test clipboard failure");
-        assert_eq!(
-            state,
-            super::SurgeryProxyState::Active {
-                token: "tok".to_string(),
-            }
-        );
-        assert_eq!(transcript.segments, transcript_before.segments);
-    }
-
-    #[test]
-    fn surgery_begin_rejects_mismatched_token() {
-        let (parent, _child) = super::control_socketpair().unwrap();
-        let control = super::ControlChannel::new(parent);
-        let mut transcript = super::Transcript::default();
-        transcript.push_terminal(b"dirty modal terminal output");
-        let mut state = super::SurgeryProxyState::Ordinary;
-
-        super::handle_control_message_with(
-            super::ControlMessage::SurgeryBegin {
-                token: "wrong-token".to_string(),
-            },
-            &control,
-            &mut transcript,
-            &mut state,
-            Some("valid-token"),
-            |_| Ok(()),
-        )
-        .unwrap();
-
-        assert_eq!(state, super::SurgeryProxyState::Ordinary);
-        assert!(!transcript.segments.is_empty());
-    }
-
-    #[test]
-    fn surgery_begin_rejects_when_already_active() {
-        let (parent, _child) = super::control_socketpair().unwrap();
-        let control = super::ControlChannel::new(parent);
-        let mut transcript = super::Transcript::default();
-        let mut state = super::SurgeryProxyState::Active {
-            token: "first-token".to_string(),
-        };
-
-        super::handle_control_message_with(
-            super::ControlMessage::SurgeryBegin {
-                token: "second-token".to_string(),
-            },
-            &control,
-            &mut transcript,
-            &mut state,
-            Some("second-token"),
-            |_| Ok(()),
-        )
-        .unwrap();
-
-        assert_eq!(
-            state,
-            super::SurgeryProxyState::Active {
-                token: "first-token".to_string()
-            }
-        );
-    }
-
-    #[test]
-    fn surgery_end_ignored_when_ordinary() {
-        let (parent, _child) = super::control_socketpair().unwrap();
-        let control = super::ControlChannel::new(parent);
-        let mut transcript = super::Transcript::default();
-        transcript.push_terminal(b"ordinary command output");
-        let mut state = super::SurgeryProxyState::Ordinary;
-
-        super::handle_control_message_with(
-            super::ControlMessage::SurgeryEnd {
-                status: 0,
-                outcome: "stray outcome".to_string(),
-            },
-            &control,
-            &mut transcript,
-            &mut state,
-            Some("token"),
-            |_| Ok(()),
-        )
-        .unwrap();
-
-        assert_eq!(state, super::SurgeryProxyState::Ordinary);
-        assert!(!transcript.segments.is_empty());
-    }
-
-    #[test]
-    fn terminal_capture_and_transcript_follow_surgery_state() {
-        let sample_data = b"some modal surgery output";
-        let ordinary = super::SurgeryProxyState::Ordinary;
-
-        // Ordinary + enabled: both capture and transcript record output.
+        // Capturing: both capture and transcript record output.
         let mut capture = super::CaptureState::default();
         capture.start();
         let mut transcript = super::Transcript::default();
@@ -2044,7 +1684,6 @@ mod tests {
         super::capture_terminal_output(
             &mut capture,
             &mut transcript,
-            &ordinary,
             sample_data,
         );
 
@@ -2054,76 +1693,17 @@ mod tests {
             vec![super::TranscriptSegment::Terminal(sample_data.to_vec())]
         );
 
-        // Ordinary + disabled: neither records output.
+        // Not capturing: neither records output.
         let mut capture = super::CaptureState::default();
         let mut transcript = super::Transcript::default();
 
         super::capture_terminal_output(
             &mut capture,
             &mut transcript,
-            &ordinary,
             sample_data,
         );
 
         assert!(capture.end().is_empty());
         assert!(transcript.segments.is_empty());
-
-        // Interactive surgery states suppress both outputs.
-        for state in [
-            super::SurgeryProxyState::Active {
-                token: "test-token".to_string(),
-            },
-            super::SurgeryProxyState::Completed {
-                outcome: "test-outcome".to_string(),
-            },
-            super::SurgeryProxyState::Aborted,
-        ] {
-            let mut capture = super::CaptureState::default();
-            capture.start();
-            let mut transcript = super::Transcript::default();
-
-            super::capture_terminal_output(
-                &mut capture,
-                &mut transcript,
-                &state,
-                sample_data,
-            );
-
-            assert!(
-                capture.end().is_empty(),
-                "capture must not accumulate data while in state {state:?}"
-            );
-            assert!(
-                transcript.segments.is_empty(),
-                "transcript must not accumulate data while in state {state:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn clipboard_write_ignored_when_not_active() {
-        let (parent, _child) = super::control_socketpair().unwrap();
-        let control = super::ControlChannel::new(parent);
-        let mut transcript = super::Transcript::default();
-        let mut state = super::SurgeryProxyState::Ordinary;
-        let mut copied = false;
-
-        super::handle_control_message_with(
-            super::ControlMessage::ClipboardWrite {
-                text: "stray payload".to_string(),
-            },
-            &control,
-            &mut transcript,
-            &mut state,
-            Some("token"),
-            |_| {
-                copied = true;
-                Ok(())
-            },
-        )
-        .unwrap();
-
-        assert_eq!(state, super::SurgeryProxyState::Ordinary);
-        assert!(!copied);
     }
 }

@@ -7,7 +7,7 @@
 //! 1. copy the files the patch names into a scratch directory,
 //! 2. run `apply_patch` there, patch on stdin, scratch directory as its cwd,
 //! 3. on failure report its output and stop: nothing real was touched,
-//! 4. on success read the scratch results back and commit them as one surgery
+//! 4. on success read the scratch results back and commit them as one
 //!    transaction (journal, project lock, digest re-check, rollback), which adds,
 //!    updates and deletes files together or not at all.
 //!
@@ -42,7 +42,7 @@ const SCRATCH_PREFIX: &str = "patch-scratch-";
 pub(crate) struct Env<'a> {
     /// The shell's current directory (the patch root).
     pub root: &'a Path,
-    /// CVB's surgery state directory (journals and scratch live under it).
+    /// CVB's state directory (journals and scratch live under it).
     pub state_base: &'a Path,
     /// The `apply_patch` program: a bare name is looked up in `PATH`.
     pub program: &'a OsStr,

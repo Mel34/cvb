@@ -3,7 +3,7 @@
 //! The parser already guarantees every path is relative, clean and unique. This
 //! step looks at the filesystem under the root (the shell's directory):
 //!
-//! * no path may pass through a symlink (surgery's rule),
+//! * no path may pass through a symlink (CVB's rule),
 //! * files to update, move or delete must exist and be regular files,
 //! * files to add, and move destinations, must not exist (decision D8: the LLM
 //!   meant "new file"; to replace a file it must use Update),

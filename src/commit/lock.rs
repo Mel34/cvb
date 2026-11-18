@@ -17,7 +17,7 @@ impl std::fmt::Display for LockError {
         match self {
             LockError::Locked => write!(
                 f,
-                "CVB: project is currently locked by another surgery operation (E-LOCK)"
+                "CVB: project is currently locked by another CVB operation (E-LOCK)"
             ),
             LockError::Io(msg) => write!(f, "CVB: lock file I/O error: {msg}"),
         }

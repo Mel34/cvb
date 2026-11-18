@@ -110,7 +110,7 @@ pub(crate) struct CommitFailureReport {
 
 impl std::fmt::Display for CommitFailureReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "CVB: surgery failed during commit (E-IO): {}", self.message)?;
+        writeln!(f, "CVB: commit failed (E-IO): {}", self.message)?;
         for file in &self.files {
             match &file.status {
                 FileRestorationStatus::Restored => {
@@ -169,14 +169,14 @@ impl std::fmt::Display for ApplyError {
             ApplyError::Recover { journal_path, id } => {
                 write!(
                     f,
-                    "CVB: unfinished surgery transaction '{id}' found in '{}' (E-RECOVER); run recovery or resolve before continuing",
+                    "CVB: unfinished transaction '{id}' found in '{}' (E-RECOVER); run recovery or resolve before continuing",
                     journal_path.display()
                 )
             }
             ApplyError::Replay { id } => {
                 write!(
                     f,
-                    "CVB: surgery id '{id}' has already been applied to this project (E-REPLAY)"
+                    "CVB: patch id '{id}' has already been applied to this project (E-REPLAY)"
                 )
             }
             ApplyError::Stale {
@@ -199,7 +199,7 @@ impl std::fmt::Display for ApplyError {
                 path: None,
                 message,
             } => {
-                write!(f, "CVB: surgery I/O error: {message}")
+                write!(f, "CVB: I/O error: {message}")
             }
             ApplyError::CommitFailed(report) => {
                 write!(f, "{report}")
@@ -397,7 +397,7 @@ fn ensure_expected_state(
 
 /// Checks pipeline Step 4 preconditions before any mutations occur:
 /// 1. Unfinished earlier transaction (E-RECOVER)
-/// 2. Replay of previously applied surgery id (E-REPLAY)
+/// 2. Replay of previously applied patch id (E-REPLAY)
 /// 3. Target file freshness against original plan digests (E-STALE); a file
 ///    the plan adds must not exist yet
 pub(crate) fn check_pipeline_preconditions(
@@ -2915,7 +2915,7 @@ mod tests {
         };
 
         let formatted = report.to_string();
-        assert!(formatted.contains("CVB: surgery failed during commit (E-IO): write failed on second target"));
+        assert!(formatted.contains("CVB: commit failed (E-IO): write failed on second target"));
         assert!(formatted.contains("src/a.rs: restored to original bytes"));
         assert!(formatted.contains("src/b.rs: restored to original bytes"));
     }
