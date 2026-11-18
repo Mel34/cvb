@@ -689,6 +689,29 @@ fn resolve_unit(path: &str, line: usize, source: &str) -> SearchUnit {
                 )),
             },
         }
+    } else if let Some(lang) = crate::units::language_for(path) {
+        match crate::units::unit_range(lang, source, line) {
+            Ok(((start, end), label)) => SearchUnit {
+                key: UnitKey {
+                    path: path.to_string(),
+                    start,
+                    end,
+                },
+                label,
+                warning: None,
+            },
+            Err(()) => SearchUnit {
+                key: UnitKey {
+                    path: path.to_string(),
+                    start: line,
+                    end: line,
+                },
+                label: "Line",
+                warning: Some(format!(
+                    "skipping unparseable file {path}; falling back to line-level matching"
+                )),
+            },
+        }
     } else if is_markdown {
         let ((start, end), label) = markdown_unit_range(source, line);
         SearchUnit {
@@ -2251,6 +2274,37 @@ fn target() {
         std::fs::write(dir.join("target/out.rs"), "fn c() {}\n").unwrap();
         std::fs::write(dir.join("debug.log"), "x\n").unwrap();
         dir
+    }
+
+    #[test]
+    fn a_search_finds_units_in_other_languages_and_in_untracked_files() {
+        let dir = scratch_repo("langs");
+        std::fs::write(
+            dir.join("fresh.zig"),
+            "const std = @import(\"std\");\npub fn compute() u32 {\n    return 7;\n}\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("tool.py"), "import os\n\ndef compute():\n    return 8\n\nX = 1\n").unwrap();
+        std::fs::write(dir.join("lib.c"), "int compute(void) {\n  return 9;\n}\n").unwrap();
+        let (code, out, err) = run_capture(&["compute".into()], Some(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(code, 0, "{err}");
+        assert!(out.contains("Zig function: fresh.zig:2-4"), "{out}");
+        assert!(out.contains("Python function: tool.py:3-4"), "{out}");
+        assert!(out.contains("C function: lib.c:1-3"), "{out}");
+        // The whole unit is printed, not only the matching line.
+        assert!(out.contains("return 7;") && out.contains("return 8") && out.contains("return 9;"), "{out}");
+    }
+
+    #[test]
+    fn a_broken_file_in_another_language_falls_back_to_lines_with_a_warning() {
+        let dir = scratch_repo("broken");
+        std::fs::write(dir.join("bad.py"), "def f(:\n    needle = (\n").unwrap();
+        let (code, out, err) = run_capture(&["needle".into()], Some(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(code, 0, "{err}");
+        assert!(err.contains("skipping unparseable file bad.py") || out.contains("skipping unparseable file bad.py"), "{out}{err}");
+        assert!(out.contains("needle"), "{out}");
     }
 
     #[test]

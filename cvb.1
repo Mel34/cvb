@@ -44,7 +44,7 @@ End the active CVB Bash session.
 When used outside an active session, CVB reports that no session is running.
 .TP
 .B pull R[Bfile:IPATHR] [Bcascade:INR] Isearch-term...R
-Search source files: Git-tracked ones and untracked ones that .gitignore does not hide. Rust is parsed syntactically by item, Bash by function, and Markdown by heading.
+Search source files: Git-tracked ones and untracked ones that .gitignore does not hide. Rust is parsed syntactically by item, Bash by function, Python (.py, .pyi) by function and class, Zig (.zig) by function, test and type, C (.c, .h) and C++ (.cc, .cpp, .cxx, .hh, .hpp, .hxx) by function and type, and Markdown by heading. Other files are searched by line. Callers and cascade work on Rust only.
 .TP
 .B context
 Print the launch context text (the manual), byte-identical to the launch clipboard.
