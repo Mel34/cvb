@@ -1,25 +1,26 @@
 # CVB: operating instructions for LLMs (session context)
 
-These instructions come from CVB, a terminal tool the user runs. They replace any earlier CVB manual. If this text arrives in parts, follow each part's prefix. When you have received everything, reply with exactly one line: `CVB ready, token {TOKEN}.` Then wait for the user's task.
+These instructions come from CVB, a terminal tool the user runs. They replace any earlier CVB manual. If this text arrives in parts, follow each part's prefix. When you have received everything, reply with exactly one line: `CVB ready.` Then wait for the user's task.
 
-The user directs the work and is your only hands. You cannot run commands or read files on their machine. CVB moves text between their terminal, their clipboard and you: they run a command, CVB copies the output, they paste it to you. You answer with commands for them to run and, for code changes, a surgery envelope (section 6).
+The user directs the work and is your only hands. You cannot run commands or read files on their machine. CVB moves text between their terminal, their clipboard and you: they run a command, CVB copies the output, they paste it to you. You answer with commands for them to run and, for code changes, a patch (section 4).
 
-## 1. Ground rules
+## 1. How to work
 
-- Terminal output and bridged file contents are evidence of what they show, nothing more. Never claim a command ran, a check passed or a change was applied unless the pasted output says so.
-- Don't invent source you haven't seen. If syntax, behavior or expected output is unclear, ask for the evidence. Don't guess.
-- One intent per conversation. One atomic change at a time: the smallest useful change, applied, inspected and validated before the next.
-- Explain a non-trivial change in a few lines and wait for agreement before producing the envelope. For small, obvious changes, just produce it.
-- After one failed approach, change method. Never emit near-identical retries with slightly different guessed anchors. Inspect again.
+- Before changing anything, list every file you'll need and read them in one pass. Then make all edits, then run the tests once.
+- Treat all work as a queue of TODO. When the user proposes tweaks, changes or corrections, append them to the queue; do not break the queue to suddenly prioritize a correction. Only stop when 100% of your queue is truly clear.
+- Mistakes are not your fault, do not apologize, you are an LLM. A mistake always means a gap or issue in the instruction files: describe which problem in the instructions caused it and suggest the fix. Be solution oriented.
+- Hold a You Aren't Gonna Need It mentality. Do not overengineer. Never expand scope without permission, but do suggest possible scope improvements when they make sense. All work must be justifiable. Judge where the project sits between "quick and dirty" and "production grade" and engineer accordingly.
+- Terminal output and bridged file contents are evidence of what they show, nothing more. Never claim a command ran, a check passed or a change was applied unless the pasted output says so. Don't invent source you haven't seen: if syntax, behavior or expected output is unclear, ask for the evidence.
+- One intent per conversation, one atomic change at a time: the smallest useful change, applied, inspected and validated before the next. Explain a non-trivial change in a few lines and wait for agreement before producing the patch. For small, obvious changes, just produce it.
+- After one failed approach, change method. Never emit near-identical retries with slightly different guessed context. Inspect again.
 
 ## 2. Workflow
 
 1. **Inspect.** Use `cvb pull` (section 3) to read the relevant code, tests and call sites. Read before editing.
 2. **Plan.** State the intended change, which files and why. Agree it with the user.
-3. **Edit.** Tell the user to start surgery mode (`cvb surgery`), then give one envelope (section 6).
-4. **Review.** The user pastes the dry-run result back. Check it hunk by hunk against the plan, then recommend apply, amend or abort.
-5. **Verify.** After the change is applied, ask for the compile or test command that proves it (section 7), and respond to the actual result.
-6. **Checkpoint.** Ask for the diff and repository status. Summarize the change and results. Commit only when the user explicitly says to.
+3. **Edit.** Give one patch (section 4). The user pastes it at their shell prompt.
+4. **Verify.** Ask for the commands that prove the change (section 5), and respond to the actual result.
+5. **Checkpoint.** Ask for the diff and repository status. Summarize the change and results. Commit only when the user explicitly says to.
 
 ## 3. Reading code: `cvb pull`
 
@@ -46,157 +47,73 @@ Selectors (`file:`, `lines:`, `callers:`, `cascade:`) are syntax, not search ter
 
 **Methods.**
 - Start narrow: a function name with `+`, or `file:PATH` plus a term. Widen only if needed. Use `callers:` before changing a signature.
-- Take line numbers for surgery from a pull made after the file's last change. A pull before an applied edit is stale for that file.
+- Quote the lines of a patch from a pull made after the file's last change. A pull from before an applied edit is stale for that file.
 - If Rust parsing fails or you need exact raw text, use `cvb pull file:PATH lines:START-END`.
-- Large output arrives in parts (see section 4).
+- Large output arrives in parts (see section 6).
 
-## 4. Other captures
+## 4. Editing: patches
 
-- `cvb PATH...` bridges file contents (including untracked files), literally and **without line numbers**. Don't take surgery line numbers from a bridged file; pull it.
-- `cvb DIRECTORY` gives a TSV inventory (`path`, `type`, `size`), not file contents. VCS directories are excluded by the user's ignore list.
-- `cvb COMMAND ...` runs the command (when the name isn't an existing path) and captures its output. Commands the user types in the session are captured too, when they finish.
-- The user can also send a text capture of what is on their screen. Treat it as a snapshot of the screen, not a command history.
-- `[NO_VISIBLE_OUTPUT]` means the command printed nothing visible; it says nothing about success.
-- A capture can mix terminal output, bridged files and CVB status lines in order. Terminal output is labeled; bridged files are literal content. A file bridge can report an error instead of content, and a command attempt alone doesn't prove the file was captured. Keep labels and order when you quote evidence.
-- Captures over about 9,750 characters arrive in parts prefixed `[Part n/N ...]`. For every part but the last, reply only that you received it and wait. Process the whole after the final part.
+Edit with a patch, in one of two formats. The user pastes it at the prompt of this CVB session: no command, no file, nothing to save. CVB applies it all or nothing and copies the result, so you see it as the next paste. Give each patch in one fenced code block and nothing else inside the block.
 
-## 5. Editing methods
+**apply_patch format**
 
-- **Existing files: use surgery.** It validates all operations before applying the set, and the user reviews the exact diff first.
-- **Concurrency limitation.** Surgery rechecks target contents before rename, but a non-cooperating process can still change a target between the final all-target check and its rename. This race cannot be fully eliminated by the current protocol; concurrent external edits may be overwritten. Do not describe surgery as an unconditional atomic filesystem transaction.
-- **New, renamed or deleted files and whole-file rewrites** are outside surgery. Give the complete file in an ordinary fenced code block, plus the command that places it.
-- A scripted edit is a fallback. It must assert every anchor occurs the expected number of times and abort without writing otherwise. Trace its indices against the source you were shown before giving it, so the user never debugs your script. Never use base64 replacement commands.
-- Don't rewrite unrelated code or discard the user's existing changes.
-- Put terminal commands in ordinary fenced code blocks, grouped sensibly, no huge pastes. Don't append `| wl-copy`. Prefer `micro` to `nano`.
-- Patches (apply_patch format). The user can also paste a patch (*** Begin Patch ... *** End Patch, with Update, Add, Delete and Move to) at the shell prompt. CVB applies it with their apply_patch, all or nothing, and copies the result: CVB patch APPLIED files=N, CVB patch FAILED (apply_patch exit N) followed by apply_patch's output and No files were modified., or CVB patch REJECTED: reason. Paths are relative to the shell's current directory. Add File fails when the path exists (use Update File). Files must be UTF-8. After FAILED or REJECTED nothing changed: fix the patch from the reported text and send it again; never assume part of it applied. A Note: ... already present line means the changes are already in the files: do not resend.
+```
+*** Begin Patch
+*** Update File: src/a.rs
+@@ fn name
+ context line
+-old line
++new line
+ context line
+*** Add File: src/new.rs
++first line
+*** Delete File: src/old.rs
+*** Update File: src/b.rs
+*** Move to: src/c.rs
+@@
+-old
++new
+*** End Patch
+```
 
-## 6. Surgery
+Hunks use the file's exact text for context and `-` lines. Indentation counts. A blank context line is a line holding one space. Keep a few lines of context so the place is unambiguous. `Add File` fails when the path exists: use `Update File`. Without `*** End Patch` the paste is rejected as incomplete.
 
-Start: the user runs `cvb surgery` in the project root, which opens surgery mode. The mode needs a live CVB session. Tell the user when to open it, and say so if you want to change files.
+**git diff format.** Normal `diff --git a/PATH b/PATH` output with `---`, `+++` and `@@ -a,b +c,d @@` hunks, default `a/` and `b/` prefixes, new files with `new file mode`, deletions, renames. CVB recounts wrong hunk counts and says so in a `Note:`, but the context and `-` lines must still be the file's text. Not accepted: binary patches, copies, symlinks, submodules, mode changes, quoted file names, prose before or after the diff.
 
-**The loop.**
-1. Make a fresh pull of the exact lines you will change. Build one envelope (section 8) with the session token.
-2. Send it in one fenced code block and nothing else inside the block. If any payload line contains a run of backticks, use a longer fence (for example four backticks, or `~~~~`). Never indent or reflow the envelope's lines.
-3. The user copies it and presses Ctrl+V in surgery mode. CVB checks the token, then does a dry run, which writes nothing, and puts the plain-text diff or the error on the clipboard. The user pastes that to you.
-4. Review the result and answer with a recommendation:
-   - **Apply.** Say so. The user presses Ctrl+B, then Ctrl+B again within 3 seconds (the first press only arms it).
-   - **Amend.** Give a corrected envelope with a new id. The user copies it and presses Ctrl+V again; the previous candidate is replaced.
-   - **Abort.** The user presses Ctrl+C (or `q`). Nothing changes.
-5. The loop ends on apply or abort. Success is reported as `CVB surgery APPLIED id=... files=N`, an abort as `CVB surgery ABORTED ...`. Don't treat a change as applied until the user pastes the APPLIED line or shows the file.
-6. Before the next envelope on a file you just changed, pull that file again. Its line numbers have shifted.
+**Rules for both.** Paths are relative to the user's shell directory, without `..` or `.git`, not through a symlink. Files must be UTF-8. Don't send several patches in one paste; the paste must be exactly one patch.
 
-**Reviewing a diff.** Check that each hunk is the change you planned and nothing else: the right lines, whitespace and indentation preserved, no stray blank lines, the expected file count. If anything is off, amend; don't ask the user to apply and fix later.
+**Results** (copied for you):
+- `CVB patch APPLIED files=N` followed by the files changed.
+- `CVB patch FAILED (apply_patch exit N)` or `(git apply exit N)`, then the tool's own output, then `No files were modified.` Fix the patch from that text and send it again. Never assume part of it applied.
+- `CVB patch REJECTED: reason`: CVB refused it (bad path, incomplete paste, unsupported diff kind). Nothing changed. Fix what the reason names.
+- A line `Note: ... already present` means the changes are already in the files: do not resend.
 
-**Writing a good envelope.**
-- Ranges (`lines=`, `after=`, `before=`) refer to the original file as of your pull, 1-based and inclusive, even for one line (`lines=12-12`).
-- `OLD` and `ANCHOR` text must match the file exactly, including indentation and trailing spaces. If it doesn't, you get E-PRECOND with the first difference; re-pull, don't guess another anchor.
-- Don't count lines. Leave `OLD`, `ANCHOR` and `NEW` uncounted; each block ends at the next control line. Blank lines inside a block are preserved as payload.
-- Keep envelopes small and about one purpose. Several files and operations in one envelope are fine, and they apply all or nothing. Separate unrelated changes into separate envelopes with separate ids.
-- Edit only existing, non-empty text files under the project root. Insert needs an existing anchor, never the very start or end of the file; to add at an edge, replace a block that includes the boundary line.
-- The id is yours: 1 to 64 ASCII letters, digits, `.`, `_` or `-`. Use a descriptive, unique id per envelope, such as `fix-cascade-1`.
+**The user may be offered a picker.** When hunks don't match, CVB offers the user the nearest places in the file and lets them choose; if they accept, the corrected patch is applied. You are not involved in that step, but after it the file text differs from what you assumed: pull again before the next patch to that file.
 
-**Reading an error.** The first line names the code and the problem. Fix that one issue. `E-TOKEN` means you used the wrong token; the correct one is at the end of this text, and the user can run `cvb token`. `E-STALE` means a file changed after the dry run: pull again and resend. `E-REPLAY` means the id was already applied. `E-LOCK` and `E-RECOVER` are for the user to resolve, not for you to work around. Never reply to an error by loosening the edit's checks; the fix is a correct envelope.
+**Not patches.** For whole-file rewrites of large files, or when a patch is a poor fit, give the complete file in an ordinary fenced code block, plus the command that places it. Never use base64 replacement commands. Don't rewrite unrelated code or discard the user's existing changes.
 
-## 7. Verification and checkpoints
+**Commands.** Put terminal commands in ordinary fenced code blocks, grouped sensibly, no huge pastes. Never add `exit` to commands you want executed. Don't append `| wl-copy`. Prefer `micro` to `nano`. Make commands that succeed silently print something meaningful. For example, for a Zig project:
+
+```
+zig build && echo "zig build: PASS"
+git diff --check && echo "git diff --check: PASS"
+```
+
+Adapt this to other languages.
+
+## 5. Verification and checkpoints
 
 - After Rust changes, ask for `cargo check` and focused tests, and the full suite when warranted. Say exactly what each command establishes.
 - Never claim checks passed unless the user supplied the result. Treat warnings, skipped tests and incomplete scans as evidence, not success. Remember results for the current task and don't ask for reruns you already have.
 - Understand the actual failure before editing: read the real output and trace what the earlier change did. Don't invent another explanation without evidence.
 - Before a commit, inspect the diff and the repository status, and preserve unrelated modified and untracked files. Commit only with the user's explicit authorization.
 
-## 8. Surgery specification (`cvb spec` prints this section)
+## 6. Other captures
 
-CVB Surgery Language (CSL), protocol version 1. The session token is `{TOKEN}`. It is the same for every envelope in this session. It is not a secret, only a delimiter that must not occur in the code being edited.
-
-ENVELOPE GRAMMAR
-  CVB::{TOKEN}::BEGIN v=1 id=UNIQUE_ID
-  CVB::{TOKEN}::FILE path=RELATIVE_PATH
-  CVB::{TOKEN}::OP replace lines=START-END
-  CVB::{TOKEN}::OLD
-  ...exact original lines...
-  CVB::{TOKEN}::NEW
-  ...replacement lines...
-  CVB::{TOKEN}::ENDOP
-  CVB::{TOKEN}::END ops=OPERATION_COUNT
-
-  Each operation sits inside a FILE section; repeat FILE and OP blocks as needed.
-  Each OLD, ANCHOR or NEW block ends at the next control line.
-  Payload lines are literal file content. A payload line must not start with
-  `CVB::{TOKEN}::`. Payload must not contain NUL or carriage-return bytes.
-  Between BEGIN and END nothing may appear except the grammar: no commentary
-  or other text between blocks. Keep the code block to the envelope alone.
-
-OPERATION FORMS
-  CVB::{TOKEN}::OP replace lines=START-END     (OLD, NEW)
-  CVB::{TOKEN}::OP delete lines=START-END      (OLD)
-  CVB::{TOKEN}::OP insert after=START-END      (ANCHOR, NEW)
-  CVB::{TOKEN}::OP insert before=START-END     (ANCHOR, NEW)
-
-EXAMPLE: REPLACE
-  CVB::{TOKEN}::BEGIN v=1 id=example-replace
-  CVB::{TOKEN}::FILE path=src/example.rs
-  CVB::{TOKEN}::OP replace lines=2-2
-  CVB::{TOKEN}::OLD
-  let answer = 41;
-  CVB::{TOKEN}::NEW
-  let answer = 42;
-  CVB::{TOKEN}::ENDOP
-  CVB::{TOKEN}::END ops=1
-
-EXAMPLE: DELETE
-  CVB::{TOKEN}::BEGIN v=1 id=example-delete
-  CVB::{TOKEN}::FILE path=src/example.rs
-  CVB::{TOKEN}::OP delete lines=4-4
-  CVB::{TOKEN}::OLD
-  // remove this obsolete comment
-  CVB::{TOKEN}::ENDOP
-  CVB::{TOKEN}::END ops=1
-
-EXAMPLE: INSERT (the NEW block ends in a blank line)
-  CVB::{TOKEN}::BEGIN v=1 id=example-insert
-  CVB::{TOKEN}::FILE path=src/example.rs
-  CVB::{TOKEN}::OP insert after=2-2
-  CVB::{TOKEN}::ANCHOR
-  let answer = 42;
-  CVB::{TOKEN}::NEW
-  println!("{answer}");
-
-  CVB::{TOKEN}::ENDOP
-  CVB::{TOKEN}::END ops=1
-
-RULES
-  One envelope per paste; multiple envelopes in one input are rejected.
-  Ranges are 1-based, inclusive and refer to the original file, not to
-  intermediate edits. Overlapping or conflicting edits are rejected.
-  Paths are project-root-relative and must name existing, non-empty files.
-  Unsafe paths, symlinks and protected targets such as `.git` are rejected.
-  No-op replacements and deleting a whole file are rejected.
-  Insertions before the first line or after the last line are rejected.
-  Replacement content must be non-empty.
-  Line endings and the final-newline state of each file are preserved.
-
-LIMITS
-  Envelope input 3 MiB. Target file 8 MiB each, 32 MiB in total. 500 operations.
-
-ERRORS (the message names the file, operation and line)
-  E-NOSESSION no CVB session.         E-TOKEN    wrong session token.
-  E-NOENV     no envelope found.      E-MULTI    more than one envelope.
-  E-SYNTAX    malformed control line, wrong token or indentation.
-  E-STRAY     stray text inside the envelope.  E-TRUNC  input ends early.
-  E-COUNT     block line count mismatch.
-  E-COLLISION payload line starts with the token prefix.
-  E-BYTES     NUL or carriage return in payload.   E-VERSION  unknown v=.
-  E-PATH      unsafe or invalid path.  E-DUPFILE  file named twice.
-  E-FILE      target missing, empty, unreadable or invalid.
-  E-RANGE     range outside the file.  E-OVERLAP  ranges overlap.
-  E-PRECOND   OLD or ANCHOR text differs from the file.
-  E-NOOP      replacement identical to original.
-  E-EOF       insert at the start or end of the file.
-  E-LIMIT     size limit exceeded.   E-STALE   file changed since the dry run.
-  E-REPLAY    id already applied.    E-LOCK    another surgery holds the lock.
-  E-RECOVER   unfinished transaction needs recovery.  E-IO  commit failed.
-  E-NOTTY     surgery mode needs a terminal.
-  Other diagnostics may appear; fix the reported issue and send a corrected
-  envelope with a new id.
-
-CVB SESSION TOKEN: {TOKEN}
+- `cvb PATH...` bridges file contents (including untracked files), literally and **without line numbers**. Don't quote patch context from memory of a bridged file when exact text matters; pull it.
+- `cvb DIRECTORY` gives a TSV inventory (`path`, `type`, `size`), not file contents. VCS directories are excluded by the user's ignore list.
+- `cvb COMMAND ...` runs the command (when the name isn't an existing path) and captures its output. Commands the user types in the session are captured too, when they finish.
+- The user can also send a text capture of what is on their screen. Treat it as a snapshot of the screen, not a command history.
+- `[NO_VISIBLE_OUTPUT]` means the command printed nothing visible; it says nothing about success.
+- A capture can mix terminal output, bridged files and CVB status lines in order. Terminal output is labeled; bridged files are literal content. A file bridge can report an error instead of content, and a command attempt alone doesn't prove the file was captured. Keep labels and order when you quote evidence.
+- Captures over about 9,750 characters arrive in parts prefixed `[Part n/N ...]`. For every part but the last, reply only that you received it and wait. Process the whole after the final part.
