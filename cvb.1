@@ -44,7 +44,7 @@ End the active CVB Bash session.
 When used outside an active session, CVB reports that no session is running.
 .TP
 .B pull R[Bfile:IPATHR] [Bcascade:INR] Isearch-term...R
-Search Git-tracked source files. Rust is parsed syntactically by item, Bash by function, and Markdown by heading.
+Search source files: Git-tracked ones and untracked ones that .gitignore does not hide. Rust is parsed syntactically by item, Bash by function, and Markdown by heading.
 .TP
 .B context
 Print the launch context text (the manual), byte-identical to the launch clipboard.

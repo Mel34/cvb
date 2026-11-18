@@ -19,7 +19,9 @@ fn append_patch_reminder(stdout: &mut String) {
 
 pub fn tracked_files(dir: Option<&Path>) -> Result<Vec<OsString>, String> {
     let mut cmd = Command::new("git");
-    cmd.args(["ls-files", "-z"]);
+    // Tracked files plus untracked ones that .gitignore does not hide, so a file
+    // that has not been added or committed yet can be pulled.
+    cmd.args(["ls-files", "-z", "--cached", "--others", "--exclude-standard"]);
     if let Some(d) = dir {
         cmd.current_dir(d);
     }
@@ -30,7 +32,7 @@ pub fn tracked_files(dir: Option<&Path>) -> Result<Vec<OsString>, String> {
 
     if !output.status.success() {
         return Err(
-            "CVB pull: unable to list Git-tracked files; run inside a Git repository.".to_string(),
+            "CVB pull: unable to list files; run inside a Git repository.".to_string(),
         );
     }
 
@@ -51,7 +53,7 @@ pub fn tracked_files(dir: Option<&Path>) -> Result<Vec<OsString>, String> {
         .collect::<Vec<_>>();
 
     if files.is_empty() {
-        return Err("CVB pull: no Git-tracked files found.".to_string());
+        return Err("CVB pull: no files found (tracked, or untracked and not ignored).".to_string());
     }
 
     Ok(files)
@@ -207,7 +209,7 @@ pub fn filter_file_scope(
 
     if matching.is_empty() {
         return Err(format!(
-            "CVB pull: file scope matches no Git-tracked file: {scope}"
+            "CVB pull: file scope matches no searchable file (tracked, or untracked and not ignored by Git): {scope}"
         ));
     }
 
@@ -2223,11 +2225,62 @@ fn target() {
         assert_eq!(filter_file_scope(files.clone(), None, None).unwrap(), files);
     }
 
+    fn scratch_repo(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("cvb-pull-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .env("GIT_CEILING_DIRECTORIES", dir.parent().unwrap())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        std::fs::write(dir.join(".gitignore"), "target/\n*.log\n").unwrap();
+        std::fs::write(dir.join("tracked.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(dir.join("gone.rs"), "fn g() {}\n").unwrap();
+        git(&["add", ".gitignore", "tracked.rs", "gone.rs"]);
+        std::fs::remove_file(dir.join("gone.rs")).unwrap();
+        std::fs::write(dir.join("fresh.rs"), "fn b() {}\n").unwrap();
+        std::fs::create_dir_all(dir.join("target")).unwrap();
+        std::fs::write(dir.join("target/out.rs"), "fn c() {}\n").unwrap();
+        std::fs::write(dir.join("debug.log"), "x\n").unwrap();
+        dir
+    }
+
+    #[test]
+    fn untracked_files_that_are_not_ignored_are_listed() {
+        let dir = scratch_repo("list");
+        let mut names: Vec<String> = tracked_files(Some(&dir))
+            .unwrap()
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        let _ = std::fs::remove_dir_all(&dir);
+        // Tracked and fresh files are in; ignored files and a deleted file are not.
+        assert_eq!(names, vec![".gitignore", "fresh.rs", "tracked.rs"]);
+    }
+
+    #[test]
+    fn a_file_scope_can_name_an_untracked_file() {
+        let dir = scratch_repo("scope");
+        let files = tracked_files(Some(&dir)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let matching = filter_file_scope(files, Some("fresh.rs"), None).unwrap();
+        assert_eq!(matching, vec![OsString::from("fresh.rs")]);
+    }
+
     #[test]
     fn filter_file_scope_rejects_untracked_path() {
         let files = vec![OsString::from("src/pull.rs")];
         let error = filter_file_scope(files, Some("manual.md"), None).unwrap_err();
-        assert!(error.contains("no Git-tracked file"));
+        assert!(error.contains("no searchable file"));
         assert!(error.contains("manual.md"));
     }
 

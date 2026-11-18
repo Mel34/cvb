@@ -62,7 +62,7 @@ Usage:
 Modes:
     cvb                      Start a terminal capture session
     cvb <PATH>...            Capture files or directory inventories
-    cvb pull [file:PATH] <search-term>... Search Git-tracked source files
+    cvb pull [file:PATH] <search-term>... Search source files (tracked, or untracked and not ignored)
 
 Options:
     -h, --help       Show this help message

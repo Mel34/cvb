@@ -24,7 +24,7 @@ The user directs the work and is your only hands. You cannot run commands or rea
 
 ## 3. Reading code: `cvb pull`
 
-`cvb pull` searches Git-tracked files and prints line-numbered units. Matching is case-sensitive. Rust is searched by syntactic unit (the smallest enclosing item), Bash by function, Markdown by heading section; unparseable files fall back to lines with a warning, so results may be incomplete.
+`cvb pull` searches the files of the repository, tracked or untracked but not ignored by `.gitignore` (so a new file is found before it is committed), and prints line-numbered units. Matching is case-sensitive. Rust is searched by syntactic unit (the smallest enclosing item), Bash by function, Markdown by heading section; unparseable files fall back to lines with a warning, so results may be incomplete.
 
 | Command | Meaning |
 |---|---|
