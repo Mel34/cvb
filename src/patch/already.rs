@@ -74,7 +74,7 @@ fn read_hunks(text: &str) -> Vec<(String, Vec<Hunk>)> {
 
 /// Is `needle` a contiguous run of `file`, the way `apply_patch` compares:
 /// exactly, then ignoring trailing white space, then ignoring all of it?
-fn found(file: &[&str], needle: &[String]) -> bool {
+pub(crate) fn found(file: &[&str], needle: &[String]) -> bool {
     if needle.is_empty() {
         return false;
     }
