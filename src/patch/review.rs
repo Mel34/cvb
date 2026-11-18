@@ -82,6 +82,20 @@ impl Review {
 /// it is long), what it will do, and how to go on. The pasted text is used as
 /// the user pasted it; `pty.rs` makes control characters visible.
 pub(crate) fn display(text: &str, parsed: &ParsedPatch) -> String {
+    let mut out = clip(text);
+    let lines: Vec<&str> = text.lines().collect();
+    out.push_str(&summary(parsed, lines.len()));
+    out.push('\n');
+    for note in &parsed.notes {
+        out.push_str(note);
+        out.push('\n');
+    }
+    out.push_str("Not applied yet. Press Ctrl+B twice to apply; any other key cancels.\n");
+    out
+}
+
+/// The text, or its head and tail when it is long.
+pub(crate) fn clip(text: &str) -> String {
     let mut out = String::new();
     let lines: Vec<&str> = text.lines().collect();
     if lines.len() > MAX_SHOWN_LINES {
@@ -101,13 +115,6 @@ pub(crate) fn display(text: &str, parsed: &ParsedPatch) -> String {
             out.push('\n');
         }
     }
-    out.push_str(&summary(parsed, lines.len()));
-    out.push('\n');
-    for note in &parsed.notes {
-        out.push_str(note);
-        out.push('\n');
-    }
-    out.push_str("Not applied yet. Press Ctrl+B twice to apply; any other key cancels.\n");
     out
 }
 

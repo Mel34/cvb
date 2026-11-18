@@ -1,0 +1,542 @@
+//! The failed-hunk picker.
+//!
+//! When a pasted patch fails because some hunks do not match the files, the
+//! picker offers, for each such hunk, the nearest places in the file where it
+//! could belong. The user chooses one place per hunk; the patch is then
+//! corrected (see `reanchor`), previewed, and applied only after Ctrl+B twice.
+//!
+//! The rules (decided 2026-11-18): all or nothing, so skipping a hunk cancels
+//! the whole patch; there is no timeout; any key the picker does not know
+//! cancels it and is handed on to the shell. The state machine is pure (bytes
+//! in, decision out); `pty.rs` does the printing, the preview and the applying.
+
+use std::collections::HashMap;
+
+use crate::patch::hunks::{FilePatch, Hunk, LineKind, matches, read};
+use crate::patch::near::{Candidate, Pair, candidates};
+use crate::patch::parse::Format;
+use crate::patch::reanchor::{Choice, reanchor};
+use crate::patch::review::{CONFIRM_KEY, clip};
+
+/// Lines of the patch's own text shown for a hunk, and of each candidate.
+const MAX_EXPECTED_LINES: usize = 14;
+const MAX_CANDIDATE_LINES: usize = 24;
+/// Longest line shown whole.
+const MAX_LINE_CHARS: usize = 110;
+
+/// One hunk that does not match, with the places it could belong.
+#[derive(Debug)]
+struct Item {
+    file: usize,
+    hunk: usize,
+    candidates: Vec<Candidate>,
+}
+
+/// A picker in progress.
+#[derive(Debug)]
+pub(crate) struct Picker {
+    text: String,
+    format: Format,
+    files: Vec<FilePatch>,
+    originals: HashMap<String, String>,
+    items: Vec<Item>,
+    /// Candidate chosen for `items[i]`, for each `i` already decided.
+    picks: Vec<usize>,
+    armed: bool,
+}
+
+/// What input did to a picker.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Step {
+    /// Nothing to show; `just_armed` is true when this input was the first
+    /// Ctrl+B of the confirmation.
+    Waiting { just_armed: bool },
+    /// Show this text (the next hunk to decide).
+    Show(String),
+    /// Every hunk has a choice. Show `view`, run a preview of `patch`, show
+    /// its outcome, and wait for Ctrl+B twice.
+    Confirm { view: String, patch: String },
+    /// Confirmed. Apply `text`, then treat `rest` as ordinary input.
+    Apply { text: String, rest: Vec<u8> },
+    /// Cancelled. `rest` is input to hand on (empty when the user cancelled
+    /// with a key the picker owns, `s` or `q`).
+    Cancel { rest: Vec<u8> },
+}
+
+impl Picker {
+    /// A picker for `text` (a complete patch) over the current `originals`, or
+    /// the reason there is nothing to offer.
+    pub(crate) fn new(
+        text: &str,
+        format: Format,
+        originals: HashMap<String, String>,
+    ) -> Result<Self, String> {
+        let files = read(text, format);
+        let mut items = Vec::new();
+        for (file_index, file) in files.iter().enumerate() {
+            let Some(original) = originals.get(&file.path) else { continue };
+            let lines: Vec<&str> = original.lines().collect();
+            for (hunk_index, hunk) in file.hunks.iter().enumerate() {
+                if matches(hunk, &lines) {
+                    continue;
+                }
+                let found = candidates(hunk, &lines).map_err(|refusal| {
+                    format!("no suggestions for {}: {}", file.path, refusal.describe())
+                })?;
+                if found.is_empty() {
+                    return Err(format!(
+                        "no suggestions: hunk {} of {} is not similar to any text in the file",
+                        hunk_index + 1,
+                        file.path
+                    ));
+                }
+                items.push(Item { file: file_index, hunk: hunk_index, candidates: found });
+            }
+        }
+        if items.is_empty() {
+            return Err("no suggestions: no hunk of this patch can be placed".to_string());
+        }
+        Ok(Self {
+            text: text.to_string(),
+            format,
+            files,
+            originals,
+            items,
+            picks: Vec::new(),
+            armed: false,
+        })
+    }
+
+    /// How many hunks need a decision.
+    pub(crate) fn hunk_count(&self) -> usize {
+        self.items.len()
+    }
+
+    /// The first screen.
+    pub(crate) fn first_view(&self) -> String {
+        format!(
+            "CVB patch: {} hunk{} did not match the files. Nothing was modified.\n{}",
+            self.items.len(),
+            if self.items.len() == 1 { "" } else { "s" },
+            self.view_item(0)
+        )
+    }
+
+    fn confirming(&self) -> bool {
+        self.picks.len() == self.items.len()
+    }
+
+    /// Feeds input read from the terminal, byte by byte.
+    pub(crate) fn feed(&mut self, bytes: &[u8]) -> Step {
+        let mut shown = String::new();
+        let mut just_armed = false;
+        for (at, &byte) in bytes.iter().enumerate() {
+            if self.confirming() {
+                if byte != CONFIRM_KEY {
+                    return Step::Cancel { rest: bytes[at..].to_vec() };
+                }
+                if self.armed {
+                    return Step::Apply { text: self.corrected(), rest: bytes[at + 1..].to_vec() };
+                }
+                self.armed = true;
+                just_armed = true;
+                continue;
+            }
+            let current = self.picks.len();
+            match byte {
+                b's' | b'q' => return Step::Cancel { rest: Vec::new() },
+                b'1'..=b'9' => {
+                    let choice = usize::from(byte - b'1');
+                    if choice >= self.items[current].candidates.len() {
+                        continue;
+                    }
+                    self.picks.push(choice);
+                    if self.confirming() {
+                        // Input after the last choice still counts: a Ctrl+B
+                        // in the same read arms the confirmation.
+                        let tail = &bytes[at + 1..];
+                        if tail.is_empty() {
+                            return self.confirm_step();
+                        }
+                        return match self.feed(tail) {
+                            Step::Waiting { .. } => self.confirm_step(),
+                            other => other,
+                        };
+                    }
+                    shown.push_str(&self.view_item(self.picks.len()));
+                }
+                _ => return Step::Cancel { rest: bytes[at..].to_vec() },
+            }
+        }
+        if shown.is_empty() {
+            Step::Waiting { just_armed }
+        } else {
+            Step::Show(shown)
+        }
+    }
+
+    fn confirm_step(&self) -> Step {
+        Step::Confirm { view: self.confirm_view(), patch: self.corrected() }
+    }
+
+    /// The patch with every chosen hunk moved to its chosen place.
+    pub(crate) fn corrected(&self) -> String {
+        let choices: Vec<Choice> = self
+            .picks
+            .iter()
+            .enumerate()
+            .map(|(i, &pick)| Choice {
+                file: self.items[i].file,
+                hunk: self.items[i].hunk,
+                candidate: &self.items[i].candidates[pick],
+            })
+            .collect();
+        reanchor(&self.text, self.format, &self.files, &choices, &self.originals)
+    }
+
+    fn any_loose(&self) -> bool {
+        self.picks
+            .iter()
+            .enumerate()
+            .any(|(i, &pick)| self.items[i].candidates[pick].loose)
+    }
+
+    fn confirm_view(&self) -> String {
+        let mut out = String::from("CVB patch: corrected patch (hunks moved to the chosen places):\n");
+        out.push_str(&clip(&self.corrected()));
+        if self.any_loose() {
+            out.push_str(
+                "WARNING: for at least one hunk the line to be removed differs from what the patch named;\n\
+                 the real line in the file is the one that will be removed. Check the lines above.\n",
+            );
+        }
+        out
+    }
+
+    /// The decision screen for `items[index]`.
+    fn view_item(&self, index: usize) -> String {
+        let item = &self.items[index];
+        let file = &self.files[item.file];
+        let hunk = &file.hunks[item.hunk];
+        let lines: Vec<&str> = self.originals[&file.path].lines().collect();
+        let mut out = format!(
+            "Hunk {} of {} to decide: {}, hunk {} of {}",
+            index + 1,
+            self.items.len(),
+            file.path,
+            item.hunk + 1,
+            file.hunks.len()
+        );
+        if let Some(start) = hunk.old_start {
+            out.push_str(&format!(" (the patch says line {start})"));
+        }
+        out.push_str(".\nThe patch expects:\n");
+        out.push_str(&expected_view(hunk));
+        for (number, candidate) in item.candidates.iter().enumerate() {
+            out.push_str(&candidate_view(number + 1, candidate, hunk, &lines));
+        }
+        let top = item.candidates.len();
+        let keys = if top == 1 { "1".to_string() } else { format!("1-{top}") };
+        out.push_str(&format!(
+            "Press {keys} to choose, s to skip (cancels the whole patch), q to cancel.\n"
+        ));
+        out
+    }
+}
+
+/// The hunk's old side, one line each, marked as in a patch.
+fn expected_view(hunk: &Hunk) -> String {
+    let old = hunk.old_side();
+    let mut out = String::new();
+    for (kind, text) in old.iter().take(MAX_EXPECTED_LINES) {
+        let mark = if *kind == LineKind::Remove { '-' } else { ' ' };
+        out.push_str(&format!("  {mark} {}\n", cut(text)));
+    }
+    if old.len() > MAX_EXPECTED_LINES {
+        out.push_str(&format!("    ... {} more lines\n", old.len() - MAX_EXPECTED_LINES));
+    }
+    out
+}
+
+/// One candidate: where it is, how it differs, and its lines side by side.
+fn candidate_view(number: usize, candidate: &Candidate, hunk: &Hunk, file: &[&str]) -> String {
+    let old = hunk.old_side();
+    let first = candidate.start + 1;
+    let last = candidate.start + candidate.len;
+    let how = if candidate.changed == 0 {
+        "identical apart from white space".to_string()
+    } else {
+        let plural = if candidate.changed == 1 { "" } else { "s" };
+        format!("{} line{plural} differ", candidate.changed)
+    };
+    let loose = if candidate.loose { "; a line to remove differs" } else { "" };
+    let mut out = format!("[{number}] lines {first}-{last}: {how}{loose}\n");
+    for (shown, pair) in candidate.pairs.iter().enumerate() {
+        if shown == MAX_CANDIDATE_LINES {
+            out.push_str("      ...\n");
+            break;
+        }
+        match *pair {
+            Pair::Both { old: o, line } => {
+                let expected = old[o].1;
+                if expected.trim() == file[line].trim() {
+                    out.push_str(&format!("      {}\n", cut(file[line])));
+                } else {
+                    out.push_str(&format!("    ! expected: {}\n", cut(expected)));
+                    out.push_str(&format!("    !   actual: {}\n", cut(file[line])));
+                }
+            }
+            Pair::Extra { line } => {
+                out.push_str(&format!("    + only in file: {}\n", cut(file[line])));
+            }
+            Pair::Missing { old: o } => {
+                out.push_str(&format!("    - not in file: {}\n", cut(old[o].1)));
+            }
+        }
+    }
+    out
+}
+
+fn cut(text: &str) -> String {
+    if text.chars().count() <= MAX_LINE_CHARS {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(MAX_LINE_CHARS).collect();
+    format!("{head}...")
+}
+
+/// Printed when the first Ctrl+B of the confirmation arrives.
+pub(crate) const ARMED_NOTE: &str =
+    "CVB patch: press Ctrl+B once more to apply the corrected patch; any other key cancels.";
+
+/// Printed when a picker is dropped.
+pub(crate) const CANCELLED_NOTE: &str = "CVB patch: cancelled, nothing was applied.";
+
+/// Printed under the corrected patch's preview, before the confirmation.
+pub(crate) const CONFIRM_NOTE: &str =
+    "Not applied yet. Press Ctrl+B twice to apply the corrected patch; any other key cancels.";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FILE: &str = "fn main() {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n    run(a, b, c);\n}\n";
+
+    fn originals() -> HashMap<String, String> {
+        HashMap::from([("f".to_string(), FILE.to_string())])
+    }
+
+    fn envelope(body: &str) -> String {
+        format!("*** Begin Patch\n{body}*** End Patch\n")
+    }
+
+    /// Misquotes a context line: one candidate, strict.
+    fn one_hunk() -> String {
+        envelope("*** Update File: f\n@@\n fn main() {\n     let a = 11;\n-    let b = 2;\n+    let b = 5;\n     let c = 3;\n")
+    }
+
+    fn picker(text: &str) -> Picker {
+        Picker::new(text, Format::ApplyPatch, originals()).expect("picker")
+    }
+
+    #[test]
+    fn nothing_is_offered_when_every_hunk_matches() {
+        let text = envelope("*** Update File: f\n@@\n fn main() {\n     let a = 1;\n-    let b = 2;\n+    let b = 5;\n");
+        let error = Picker::new(&text, Format::ApplyPatch, originals()).unwrap_err();
+        assert!(error.starts_with("no suggestions"), "{error}");
+    }
+
+    #[test]
+    fn nothing_is_offered_when_a_hunk_resembles_nothing() {
+        let text = envelope("*** Update File: f\n@@\n qqqqqqq\n-wwwwwww\n+eeeeeee\n");
+        let error = Picker::new(&text, Format::ApplyPatch, originals()).unwrap_err();
+        assert!(error.contains("not similar"), "{error}");
+    }
+
+    #[test]
+    fn a_hunk_too_short_to_place_is_refused_with_the_reason() {
+        let text = envelope("*** Update File: f\n@@\n-zz\n+yy\n");
+        let error = Picker::new(&text, Format::ApplyPatch, originals()).unwrap_err();
+        assert!(error.contains("too few lines"), "{error}");
+    }
+
+    #[test]
+    fn the_first_view_shows_the_expectation_and_the_difference() {
+        let p = picker(&one_hunk());
+        assert_eq!(p.hunk_count(), 1);
+        let view = p.first_view();
+        assert!(view.contains("1 hunk did not match"), "{view}");
+        assert!(view.contains("The patch expects:"), "{view}");
+        assert!(view.contains("expected:      let a = 11;") || view.contains("expected: "), "{view}");
+        assert!(view.contains("let a = 1;"), "{view}");
+        assert!(view.contains("[1] lines 1-4"), "{view}");
+        assert!(view.contains("Press 1 to choose, s to skip (cancels the whole patch), q to cancel."), "{view}");
+    }
+
+    #[test]
+    fn choosing_the_only_candidate_asks_for_confirmation() {
+        let mut p = picker(&one_hunk());
+        match p.feed(b"1") {
+            Step::Confirm { view, patch } => {
+                assert!(view.contains("corrected patch"), "{view}");
+                assert!(!view.contains("WARNING"), "{view}");
+                assert!(patch.contains(" let a = 1;"), "{patch}");
+                assert!(!patch.contains("let a = 11;"), "{patch}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn two_presses_apply_the_corrected_patch() {
+        let mut p = picker(&one_hunk());
+        let Step::Confirm { patch, .. } = p.feed(b"1") else { panic!() };
+        assert_eq!(p.feed(&[CONFIRM_KEY]), Step::Waiting { just_armed: true });
+        assert_eq!(p.feed(&[CONFIRM_KEY]), Step::Apply { text: patch, rest: vec![] });
+    }
+
+    #[test]
+    fn both_presses_in_one_read_apply_and_keep_what_follows() {
+        let mut p = picker(&one_hunk());
+        let Step::Confirm { patch, .. } = p.feed(b"1") else { panic!() };
+        assert_eq!(p.feed(b"\x02\x02ls\n"), Step::Apply { text: patch, rest: b"ls\n".to_vec() });
+    }
+
+    #[test]
+    fn the_choice_and_the_confirmation_may_arrive_in_one_read() {
+        let mut p = picker(&one_hunk());
+        // "1", then Ctrl+B: the confirmation is shown and already armed.
+        assert!(matches!(p.feed(b"1\x02"), Step::Confirm { .. }));
+        assert!(matches!(p.feed(&[CONFIRM_KEY]), Step::Apply { .. }));
+        let mut p = picker(&one_hunk());
+        assert!(matches!(p.feed(b"1\x02\x02x"), Step::Apply { rest, .. } if rest == b"x"));
+    }
+
+    #[test]
+    fn another_key_while_confirming_cancels_and_is_handed_on() {
+        let mut p = picker(&one_hunk());
+        let _ = p.feed(b"1");
+        assert_eq!(p.feed(b"x"), Step::Cancel { rest: b"x".to_vec() });
+        let mut p = picker(&one_hunk());
+        let _ = p.feed(b"1");
+        let _ = p.feed(&[CONFIRM_KEY]);
+        assert_eq!(p.feed(b"\r"), Step::Cancel { rest: b"\r".to_vec() });
+    }
+
+    #[test]
+    fn skip_and_quit_cancel_the_whole_patch_and_consume_the_key() {
+        for key in [b"s", b"q"] {
+            let mut p = picker(&one_hunk());
+            assert_eq!(p.feed(key), Step::Cancel { rest: vec![] });
+        }
+    }
+
+    #[test]
+    fn an_unknown_key_cancels_and_is_handed_on_whole() {
+        let mut p = picker(&one_hunk());
+        assert_eq!(p.feed(b"\x1b[A"), Step::Cancel { rest: b"\x1b[A".to_vec() });
+        let mut p = picker(&one_hunk());
+        assert_eq!(p.feed(b"\r"), Step::Cancel { rest: b"\r".to_vec() });
+        let mut p = picker(&one_hunk());
+        assert_eq!(p.feed(&[CONFIRM_KEY]), Step::Cancel { rest: vec![CONFIRM_KEY] });
+    }
+
+    #[test]
+    fn a_digit_without_a_candidate_is_ignored() {
+        let mut p = picker(&one_hunk());
+        assert_eq!(p.feed(b"2"), Step::Waiting { just_armed: false });
+        assert_eq!(p.feed(b"0"), Step::Cancel { rest: b"0".to_vec() });
+        let mut p = picker(&one_hunk());
+        assert_eq!(p.feed(b"9"), Step::Waiting { just_armed: false });
+        assert!(matches!(p.feed(b"1"), Step::Confirm { .. }));
+    }
+
+    const TWO_FILE: &str = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\no\n";
+
+    fn two_hunks() -> (String, HashMap<String, String>) {
+        let text = envelope("*** Update File: f\n@@\n a\n bb\n-c\n+C\n d\n@@\n l\n mm\n-n\n+N\n o\n");
+        (text, HashMap::from([("f".to_string(), TWO_FILE.to_string())]))
+    }
+
+    #[test]
+    fn each_failing_hunk_gets_its_turn_in_order() {
+        let (text, originals) = two_hunks();
+        let mut p = Picker::new(&text, Format::ApplyPatch, originals).unwrap();
+        assert_eq!(p.hunk_count(), 2);
+        assert!(p.first_view().contains("Hunk 1 of 2 to decide: f, hunk 1 of 2"));
+        match p.feed(b"1") {
+            Step::Show(view) => assert!(view.contains("Hunk 2 of 2 to decide: f, hunk 2 of 2"), "{view}"),
+            other => panic!("{other:?}"),
+        }
+        match p.feed(b"1") {
+            Step::Confirm { patch, .. } => {
+                assert!(patch.contains(" b\n-c\n+C\n"), "{patch}");
+                assert!(patch.contains(" m\n-n\n+N\n"), "{patch}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn skipping_the_second_hunk_cancels_everything() {
+        let (text, originals) = two_hunks();
+        let mut p = Picker::new(&text, Format::ApplyPatch, originals).unwrap();
+        let _ = p.feed(b"1");
+        assert_eq!(p.feed(b"s"), Step::Cancel { rest: vec![] });
+    }
+
+    #[test]
+    fn matching_hunks_are_left_alone_and_not_asked_about() {
+        let text = envelope("*** Update File: f\n@@\n a\n-b\n+B\n c\n@@\n l\n mm\n-n\n+N\n o\n");
+        let originals = HashMap::from([("f".to_string(), TWO_FILE.to_string())]);
+        let mut p = Picker::new(&text, Format::ApplyPatch, originals).unwrap();
+        assert_eq!(p.hunk_count(), 1);
+        let Step::Confirm { patch, .. } = p.feed(b"1") else { panic!() };
+        assert!(patch.contains(" a\n-b\n+B\n c\n"), "{patch}");
+    }
+
+    #[test]
+    fn a_loose_choice_is_warned_about_on_the_confirmation_screen() {
+        // The line to remove is misquoted: the real line would be removed.
+        let text = envelope("*** Update File: f\n@@\n fn main() {\n     let a = 1;\n-    let b = 20;\n+    let b = 5;\n     let c = 3;\n");
+        let mut p = picker(&text);
+        let Step::Confirm { view, patch } = p.feed(b"1") else { panic!() };
+        assert!(view.contains("WARNING"), "{view}");
+        assert!(patch.contains("-    let b = 2;"), "{patch}");
+    }
+
+    #[test]
+    fn a_diff_is_corrected_with_renumbered_headers() {
+        let file = "one\ntwo\nthree\nfour\nfive\nsix\n";
+        let diff = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -9,3 +9,3 @@ ctx\n two\n-thre\n+3\n four\n";
+        let originals = HashMap::from([("f".to_string(), file.to_string())]);
+        let mut p = Picker::new(diff, Format::GitDiff, originals).unwrap();
+        assert!(p.first_view().contains("(the patch says line 9)"));
+        let Step::Confirm { patch, .. } = p.feed(b"1") else { panic!() };
+        assert!(patch.contains("@@ -2,3 +2,3 @@ ctx"), "{patch}");
+        assert!(patch.contains("-three"), "{patch}");
+    }
+
+    #[test]
+    fn the_view_marks_removed_lines_and_says_how_a_candidate_differs() {
+        let view = picker(&one_hunk()).first_view();
+        assert!(view.contains("  -     let b = 2;"), "{view}");
+        assert!(view.contains("1 line differ"), "{view}");
+        assert!(view.contains("! expected:     let a = 11;"), "{view}");
+        assert!(view.contains("!   actual:     let a = 1;"), "{view}");
+    }
+
+    #[test]
+    fn the_last_choice_with_trailing_input_keeps_the_input() {
+        let mut p = picker(&one_hunk());
+        // A stray key after the choice cancels and is handed on.
+        assert_eq!(p.feed(b"1x"), Step::Cancel { rest: b"x".to_vec() });
+    }
+
+    #[test]
+    fn long_lines_and_long_candidates_are_cut() {
+        let long = "x".repeat(300);
+        assert_eq!(cut(&long).chars().count(), MAX_LINE_CHARS + 3);
+        assert_eq!(cut("short"), "short");
+    }
+}

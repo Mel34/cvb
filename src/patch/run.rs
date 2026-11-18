@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::patch::guard::check_tree;
+use crate::patch::picker::Picker;
 use crate::patch::parse::{Change, Format, ParsedPatch, parse_any};
 use crate::commit::apply::{ABSENT_DIGEST, ApplyError, apply_plan_with_modes, sha256_hex};
 use crate::commit::journal::{ProjectState, init_project_state};
@@ -122,6 +123,26 @@ fn new_id() -> String {
 
 /// Parses, checks and applies one pasted patch (`text` is a complete envelope).
 pub(crate) fn run_patch(text: &str, env: &Env) -> Report {
+    run_patch_with(text, env, true)
+}
+
+/// Everything `run_patch` does except the commit: the program runs in the scratch
+/// copy and the report says what would happen. `Applied` then means "would apply".
+pub(crate) fn preview_patch(text: &str, env: &Env) -> Report {
+    run_patch_with(text, env, false)
+}
+
+/// For a patch that failed: the picker that can suggest where its failing hunks
+/// belong, or the reason there is none.
+pub(crate) fn open_picker(text: &str, env: &Env) -> Result<Picker, String> {
+    let parsed = parse_any(text).map_err(|error| error.to_string())?;
+    let state = init_project_state(env.state_base, env.root)
+        .map_err(|error| format!("cannot prepare CVB state: {error}"))?;
+    let originals = read_originals(&parsed, &state.canonical_root)?;
+    Picker::new(parsed.normalized.as_deref().unwrap_or(text), parsed.format, originals)
+}
+
+fn run_patch_with(text: &str, env: &Env, commit: bool) -> Report {
     let parsed = match parse_any(text) {
         Ok(parsed) => parsed,
         Err(error) => return rejected(error.to_string()),
@@ -181,6 +202,9 @@ pub(crate) fn run_patch(text: &str, env: &Env) -> Report {
         Format::GitDiff => git_summary(&parsed, &state.canonical_root),
     };
     let output = with_notes(output, &parsed.notes);
+    if !commit {
+        return Report::Applied { files, output };
+    }
     match apply_plan_with_modes(&state, &plan, &modes) {
         Ok(_) => Report::Applied { files, output },
         Err(ApplyError::Stale { path, .. }) => rejected(format!(
@@ -1497,5 +1521,61 @@ printf '%s\n' "${changed[@]}"
             Report::Rejected("bad".into()).to_text(),
             "CVB patch REJECTED: bad\n"
         );
+    }
+
+    // ---- preview and picker ----
+
+    const PICK_FILE: &str = "fn main() {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n}\n";
+    const PICK_PATCH: &str = "*** Update File: f.rs\n@@\n fn main() {\n     let a = 1;\n-    let b = 20;\n+    let b = 5;\n     let c = 3;\n";
+
+    #[test]
+    fn a_preview_runs_the_program_but_commits_nothing() {
+        let fx = Fixture::new("preview");
+        fx.write("f.rs", PICK_FILE);
+        let patch = format!("*** Begin Patch\n{}*** End Patch\n", PICK_PATCH.replace("b = 20", "b = 2"));
+        let before = fx.snapshot();
+        let report = preview_patch(&patch, &fx.env(Duration::from_secs(30)));
+        assert!(matches!(report, Report::Applied { files: 1, .. }), "{report:?}");
+        assert_eq!(fx.snapshot(), before);
+        assert!(fx.leftovers().is_empty(), "{:?}", fx.leftovers());
+        // The same text applied for real changes the file.
+        assert!(matches!(run_patch(&patch, &fx.env(Duration::from_secs(30))), Report::Applied { .. }));
+        assert!(fx.read("f.rs").contains("let b = 5;"));
+    }
+
+    #[test]
+    fn a_preview_of_a_failing_patch_fails_the_same_way() {
+        let fx = Fixture::new("preview-fail");
+        fx.write("f.rs", PICK_FILE);
+        let patch = format!("*** Begin Patch\n{PICK_PATCH}*** End Patch\n");
+        let report = preview_patch(&patch, &fx.env(Duration::from_secs(30)));
+        assert!(matches!(report, Report::Failed { .. }), "{report:?}");
+    }
+
+    #[test]
+    fn a_failed_patch_opens_a_picker_and_the_corrected_patch_applies() {
+        let fx = Fixture::new("picker");
+        fx.write("f.rs", PICK_FILE);
+        let patch = format!("*** Begin Patch\n{PICK_PATCH}*** End Patch\n");
+        let env = fx.env(Duration::from_secs(30));
+        assert!(matches!(run_patch(&patch, &env), Report::Failed { .. }));
+        let mut picker = open_picker(&patch, &env).expect("picker");
+        let crate::patch::picker::Step::Confirm { patch: fixed, .. } = picker.feed(b"1") else {
+            panic!("expected a confirmation")
+        };
+        // The preview shows what will happen; nothing changed yet.
+        assert!(matches!(preview_patch(&fixed, &env), Report::Applied { .. }));
+        assert_eq!(fx.read("f.rs"), PICK_FILE);
+        assert!(matches!(run_patch(&fixed, &env), Report::Applied { files: 1, .. }));
+        assert_eq!(fx.read("f.rs"), "fn main() {\n    let a = 1;\n    let b = 5;\n    let c = 3;\n}\n");
+    }
+
+    #[test]
+    fn no_picker_for_a_patch_that_does_not_parse_or_touches_a_missing_file() {
+        let fx = Fixture::new("picker-none");
+        let env = fx.env(Duration::from_secs(30));
+        assert!(open_picker("not a patch", &env).is_err());
+        let patch = format!("*** Begin Patch\n{PICK_PATCH}*** End Patch\n");
+        assert!(open_picker(&patch, &env).is_err());
     }
 }

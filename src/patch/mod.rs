@@ -13,6 +13,7 @@ pub(crate) mod input;
 pub(crate) mod near;
 pub(crate) mod parse;
 pub(crate) mod paste;
+pub(crate) mod picker;
 pub(crate) mod reanchor;
 pub(crate) mod review;
 pub(crate) mod run;
