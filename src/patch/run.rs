@@ -397,14 +397,14 @@ fn run_program(
             command
         }
     };
-    let mut child = command
+    command
         .current_dir(&scratch.dir)
         // A program that trusts $PWD must not be sent back to the real tree.
         .env("PWD", &scratch.dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::from(out_file))
-        .stderr(Stdio::from(err_file))
-        .spawn()
+        .stderr(Stdio::from(err_file));
+    let mut child = spawn_retrying(&mut command)
         .map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => format!("{} not found in PATH", match tool {
                 Tool::ApplyPatch => "apply_patch",
@@ -454,6 +454,23 @@ fn run_program(
         output.push_str("\n[output truncated]\n");
     }
     Ok((status, output))
+}
+
+/// `Command::spawn`, retried a few times when the program is "text file busy".
+/// That error means another thread of this process had the executable open for
+/// writing (or a forked child still holds that descriptor) at the moment of
+/// `exec`; it passes within milliseconds and nothing has run yet.
+fn spawn_retrying(command: &mut Command) -> std::io::Result<std::process::Child> {
+    let mut attempt = 0u64;
+    loop {
+        match command.spawn() {
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && attempt < 20 => {
+                attempt += 1;
+                std::thread::sleep(Duration::from_millis(5 * attempt));
+            }
+            other => return other,
+        }
+    }
 }
 
 /// Replaces the scratch directory with the real root in `output`.
@@ -1423,7 +1440,7 @@ printf '%s\n' "${changed[@]}"
         let real = format!("{fake}.real");
         fs::rename(&f.program, &real).unwrap();
         f.install(&format!(
-            "#!/usr/bin/env bash\n{real}\nrc=$?\necho stray > extra.txt\nexit $rc\n"
+            "#!/usr/bin/env bash\nbash {real}\nrc=$?\necho stray > extra.txt\nexit $rc\n"
         ));
         let before = f.snapshot();
 
@@ -1444,7 +1461,7 @@ printf '%s\n' "${changed[@]}"
         let real = format!("{}.real", f.program.display());
         fs::rename(&f.program, &real).unwrap();
         f.install(&format!(
-            "#!/usr/bin/env bash\n{real}\nrc=$?\necho 'edited by someone' > '{}/b.txt'\nexit $rc\n",
+            "#!/usr/bin/env bash\nbash {real}\nrc=$?\necho 'edited by someone' > '{}/b.txt'\nexit $rc\n",
             f.root.display()
         ));
 
@@ -1558,16 +1575,46 @@ printf '%s\n' "${changed[@]}"
         fx.write("f.rs", PICK_FILE);
         let patch = format!("*** Begin Patch\n{PICK_PATCH}*** End Patch\n");
         let env = fx.env(Duration::from_secs(30));
-        assert!(matches!(run_patch(&patch, &env), Report::Failed { .. }));
+        let report = run_patch(&patch, &env);
+        assert!(matches!(report, Report::Failed { .. }), "{report:?}");
         let mut picker = open_picker(&patch, &env).expect("picker");
         let crate::patch::picker::Step::Confirm { patch: fixed, .. } = picker.feed(b"1") else {
             panic!("expected a confirmation")
         };
         // The preview shows what will happen; nothing changed yet.
-        assert!(matches!(preview_patch(&fixed, &env), Report::Applied { .. }));
+        let report = preview_patch(&fixed, &env);
+        assert!(matches!(report, Report::Applied { .. }), "{report:?}");
         assert_eq!(fx.read("f.rs"), PICK_FILE);
-        assert!(matches!(run_patch(&fixed, &env), Report::Applied { files: 1, .. }));
+        let report = run_patch(&fixed, &env);
+        assert!(matches!(report, Report::Applied { files: 1, .. }), "{report:?}");
         assert_eq!(fx.read("f.rs"), "fn main() {\n    let a = 1;\n    let b = 5;\n    let c = 3;\n}\n");
+    }
+
+    /// An executable that another thread (or a forked child) still has open for
+    /// writing cannot be exec'd yet ("text file busy"). The spawn waits it out.
+    #[test]
+    fn a_program_that_is_briefly_open_for_writing_is_still_started() {
+        let fx = Fixture::new("busy");
+        fx.install("#!/usr/bin/env bash\nexit 0\n");
+        let writer = fs::OpenOptions::new().write(true).open(&fx.program).unwrap();
+        let program = fx.program.clone();
+        let spawner = std::thread::spawn(move || {
+            let mut command = Command::new(&program);
+            spawn_retrying(&mut command).map(|mut child| child.wait().unwrap().success())
+        });
+        std::thread::sleep(Duration::from_millis(40));
+        drop(writer);
+        let started = spawner.join().unwrap();
+        assert!(started.expect("the program started once the file was closed"));
+    }
+
+    #[test]
+    fn a_missing_program_is_reported_at_once_not_retried() {
+        let mut command = Command::new("/nonexistent/cvb-no-such-program");
+        let started = Instant::now();
+        let error = spawn_retrying(&mut command).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert!(started.elapsed() < Duration::from_millis(500));
     }
 
     #[test]
