@@ -1,6 +1,7 @@
 CVB_START_MARKER=$'\e]777;CVB;START\a'
 CVB_END_MARKER_PREFIX=$'\e]777;CVB;END;'
 CVB_SKIP_MARKER=$'\e]777;CVB;SKIP\a'
+CVB_COMMAND_MARKER_PREFIX=$'\e]777;CVB;COMMAND;'
 
 # Top-level simple commands run since the last prompt, recorded by the DEBUG
 # trap. Used to decide whether an empty capture may be skipped (see
@@ -77,6 +78,21 @@ cvb_control_skip_listed() {
     return 0
 }
 
+cvb_control_emit_commands() {
+    local command byte hex index
+    local LC_CTYPE=C
+
+    for command in "${CVB_TRACED_COMMANDS[@]}"; do
+        hex=
+        for ((index = 0; index < ${#command}; index++)); do
+            printf -v byte '%02x' "'${command:index:1}"
+            hex+=$byte
+        done
+
+        printf '%s%s\a' "$CVB_COMMAND_MARKER_PREFIX" "$hex"
+    done
+}
+
 cvb_control_restore_status() {
     return "$1"
 }
@@ -90,6 +106,8 @@ cvb_control_prompt() {
     if cvb_control_skip_listed; then
         printf '%s' "$CVB_SKIP_MARKER"
     fi
+
+    cvb_control_emit_commands
     CVB_TRACED_COMMANDS=()
 
     printf '%s%03d\a' "$CVB_END_MARKER_PREFIX" "$status"

@@ -62,6 +62,7 @@ enum MarkerEvent {
     Start,
     Pathop,
     Skip,
+    Command(String),
     End(i32),
 }
 
@@ -70,6 +71,7 @@ struct MarkerScanner {
     end_prefix: Vec<u8>,
     pathop: Vec<u8>,
     skip: Vec<u8>,
+    command_prefix: Vec<u8>,
     pending: Vec<u8>,
 }
 
@@ -212,7 +214,13 @@ fn transcript_is_visibly_empty(transcript: &Transcript, rows: u16, cols: u16) ->
     })
 }
 
-fn render_transcript(transcript: &Transcript, rows: u16, cols: u16, status: i32) -> Vec<u8> {
+fn render_transcript(
+    transcript: &Transcript,
+    rows: u16,
+    cols: u16,
+    status: i32,
+    commands: &[String],
+) -> Vec<u8> {
     let mut output = Vec::new();
 
     for segment in &transcript.segments {
@@ -235,13 +243,32 @@ fn render_transcript(transcript: &Transcript, rows: u16, cols: u16, status: i32)
     }
 
     if output.is_empty() {
-        let message = if status == 0 {
+        let message = if commands.len() == 1 {
+            let command = &commands[0];
+            if status == 0 {
+                format!(
+                    "The command `{command}` completed successfully (exit 0) and produced no visible output."
+                )
+            } else {
+                format!(
+                    "The command `{command}` failed (exit {status}) and produced no visible output."
+                )
+            }
+        } else if commands.len() > 1 {
+            let mut message = format!(
+                "The command block finished with exit {status} and produced no visible output.\nCommands observed:\n"
+            );
+            for command in commands {
+                message.push_str("- ");
+                message.push_str(command);
+                message.push('\n');
+            }
+            message.trim_end().to_string()
+        } else if status == 0 {
             "The command completed successfully (exit 0) and produced no visible output."
                 .to_string()
         } else {
-            format!(
-                "The command failed (exit {status}) and produced no visible output."
-            )
+            format!("The command failed (exit {status}) and produced no visible output.")
         };
         output.extend_from_slice(message.as_bytes());
     }
@@ -251,7 +278,9 @@ fn render_transcript(transcript: &Transcript, rows: u16, cols: u16, status: i32)
 
 #[cfg(test)]
 mod transcript_tests {
-    use super::{Transcript, TranscriptSegment, render_transcript, transcript_is_visibly_empty};
+    use super::{
+        Transcript, TranscriptSegment, render_transcript, transcript_is_visibly_empty,
+    };
 
     #[test]
     fn renders_terminal_and_preserves_literal_bytes_in_order() {
@@ -261,7 +290,7 @@ mod transcript_tests {
         transcript.push_literal(b"[file.txt]\n--------\n\x1b[31mRAW\x1b[0m\n");
         transcript.push_terminal(b"NEXT\r\n");
 
-        let rendered = render_transcript(&transcript, 24, 80, 0);
+        let rendered = render_transcript(&transcript, 24, 80, 0, &[]);
 
         assert_eq!(
             rendered,
@@ -306,8 +335,34 @@ mod transcript_tests {
         let transcript = Transcript::default();
 
         assert_eq!(
-            render_transcript(&transcript, 24, 80, 0),
+            render_transcript(&transcript, 24, 80, 0, &[]),
             b"The command completed successfully (exit 0) and produced no visible output."
+        );
+    }
+
+    #[test]
+    fn renders_empty_transcript_with_single_command() {
+        let transcript = Transcript::default();
+        let commands = vec!["git diff --check".to_string()];
+
+        assert_eq!(
+            render_transcript(&transcript, 24, 80, 0, &commands),
+            b"The command `git diff --check` completed successfully (exit 0) and produced no visible output."
+        );
+    }
+
+    #[test]
+    fn renders_empty_transcript_with_multiple_commands_and_final_status() {
+        let transcript = Transcript::default();
+        let commands = vec![
+            "zig build test".to_string(),
+            "zig build".to_string(),
+            "git diff --check".to_string(),
+        ];
+
+        assert_eq!(
+            render_transcript(&transcript, 24, 80, 0, &commands),
+            b"The command block finished with exit 0 and produced no visible output.\nCommands observed:\n- zig build test\n- zig build\n- git diff --check"
         );
     }
 
@@ -316,7 +371,7 @@ mod transcript_tests {
         let transcript = Transcript::default();
 
         assert_eq!(
-            render_transcript(&transcript, 24, 80, 7),
+            render_transcript(&transcript, 24, 80, 7, &[]),
             b"The command failed (exit 7) and produced no visible output."
         );
     }
@@ -370,6 +425,7 @@ impl MarkerScanner {
             end_prefix: b"\x1b]777;CVB;END;".to_vec(),
             pathop: b"\x1b]777;CVB;PATHOP\x07".to_vec(),
             skip: b"\x1b]777;CVB;SKIP\x07".to_vec(),
+            command_prefix: b"\x1b]777;CVB;COMMAND;".to_vec(),
             pending: Vec::new(),
         }
     }
@@ -380,6 +436,7 @@ impl MarkerScanner {
         let mut events = Vec::new();
 
         loop {
+            let command_position = find_subslice(&self.pending, &self.command_prefix);
             let marker = [
                 (
                     find_subslice(&self.pending, &self.start),
@@ -404,6 +461,40 @@ impl MarkerScanner {
             .min_by_key(|(position, _, _)| *position);
 
             let end_position = find_subslice(&self.pending, &self.end_prefix);
+
+            if let Some(command_position) = command_position {
+                if marker
+                    .as_ref()
+                    .is_none_or(|(position, _, _)| command_position <= *position)
+                    && end_position.is_none_or(|position| command_position <= position)
+                {
+                    if command_position > 0 {
+                        events.push(MarkerEvent::Data(
+                            self.pending.drain(..command_position).collect(),
+                        ));
+                        continue;
+                    }
+
+                    let payload_start = self.command_prefix.len();
+                    let Some(payload_end) = self.pending[payload_start..]
+                        .iter()
+                        .position(|byte| *byte == b'\x07')
+                        .map(|position| payload_start + position)
+                    else {
+                        break;
+                    };
+
+                    let decoded = decode_hex(&self.pending[payload_start..payload_end]);
+                    self.pending.drain(..=payload_end);
+
+                    if let Some(command) = decoded {
+                        events.push(MarkerEvent::Command(
+                            String::from_utf8_lossy(&command).into_owned(),
+                        ));
+                    }
+                    continue;
+                }
+            }
 
             if let Some(end_position) = end_position {
                 if marker.as_ref().map_or(true, |(position, _, _)| end_position <= *position) {
@@ -449,7 +540,11 @@ impl MarkerScanner {
         }
 
         if !self.pending.is_empty() {
-            let keep = if self.pending.starts_with(&self.end_prefix)
+            let keep = if self.pending.starts_with(&self.command_prefix)
+                && !self.pending[self.command_prefix.len()..].contains(&b'\x07')
+            {
+                self.pending.len()
+            } else if self.pending.starts_with(&self.end_prefix)
                 && self.pending.len() < self.end_prefix.len() + 4
             {
                 self.pending.len()
@@ -459,6 +554,7 @@ impl MarkerScanner {
                     self.end_prefix.as_slice(),
                     self.pathop.as_slice(),
                     self.skip.as_slice(),
+                    self.command_prefix.as_slice(),
                 ]
                 .iter()
                 .map(|marker| {
@@ -479,6 +575,20 @@ impl MarkerScanner {
 
         events
     }
+}
+
+fn decode_hex(bytes: &[u8]) -> Option<Vec<u8>> {
+    if bytes.len() % 2 != 0 {
+        return None;
+    }
+
+    let mut decoded = Vec::with_capacity(bytes.len() / 2);
+    for pair in bytes.chunks_exact(2) {
+        let high = (pair[0] as char).to_digit(16)?;
+        let low = (pair[1] as char).to_digit(16)?;
+        decoded.push(((high << 4) | low) as u8);
+    }
+    Some(decoded)
 }
 
 #[cfg(test)]
@@ -538,6 +648,39 @@ mod marker_scanner_tests {
 
         assert_eq!(scanner.process(&marker[..10]), Vec::<MarkerEvent>::new());
         assert_eq!(scanner.process(&marker[10..]), vec![MarkerEvent::Skip]);
+    }
+
+    #[test]
+    fn recognizes_command_metadata() {
+        let mut scanner = MarkerScanner::new();
+
+        assert_eq!(
+            scanner.process(
+                b"\x1b]777;CVB;COMMAND;6769742064696666202d2d636865636b\x07"
+            ),
+            vec![MarkerEvent::Command("git diff --check".to_string())]
+        );
+    }
+
+    #[test]
+    fn recognizes_command_metadata_split_across_reads() {
+        let marker = b"\x1b]777;CVB;COMMAND;7072696e7466202768656c6c6f2727\x07";
+        let mut scanner = MarkerScanner::new();
+
+        assert!(scanner.process(&marker[..23]).is_empty());
+        assert_eq!(
+            scanner.process(&marker[23..]),
+            vec![MarkerEvent::Command("printf 'hello''".to_string())]
+        );
+    }
+
+    #[test]
+    fn ignores_malformed_command_metadata() {
+        let mut scanner = MarkerScanner::new();
+
+        assert!(scanner
+            .process(b"\x1b]777;CVB;COMMAND;xyz\x07")
+            .is_empty());
     }
 
     #[test]
@@ -1303,6 +1446,7 @@ fn proxy(
     let mut marker_scanner = MarkerScanner::new();
     let mut transcript = Transcript::default();
     let mut capture = CaptureState::default();
+    let mut commands = Vec::new();
     // Set by the SKIP marker: the finished command line consisted only of
     // commands from the skip list. Consumed by the next END marker.
     let mut skip_requested = false;
@@ -1585,10 +1729,17 @@ fn proxy(
                         debug_log("marker_skip", &format!("skip_requested={skip_requested}"));
                     }
 
+                    MarkerEvent::Command(command) => {
+                        if capture.capturing {
+                            commands.push(command);
+                        }
+                    }
+
                     MarkerEvent::Start => {
                         let capturing_before = capture.capturing;
                         skip_requested = false;
                         capture.start();
+                        commands.clear();
 
                         debug_log(
                             "marker_start",
@@ -1622,10 +1773,12 @@ fn proxy(
                         if skip_listed && transcript_is_visibly_empty(&transcript, rows, cols) {
                             debug_log("capture_skipped", "reason=skip_listed_no_output");
                             transcript = Transcript::default();
+                            commands.clear();
                             continue;
                         }
 
-                        let rendered = render_transcript(&transcript, rows, cols, status);
+                        let rendered =
+                            render_transcript(&transcript, rows, cols, status, &commands);
                         let captured_bytes = rendered.len();
                         let buffer = crate::clipboard::ClipboardBuffer::new(rendered);
 
@@ -1648,6 +1801,7 @@ fn proxy(
                         );
 
                         transcript = Transcript::default();
+                        commands.clear();
                     }
                 }
             }

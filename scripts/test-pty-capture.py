@@ -37,7 +37,7 @@ def check(name, condition, detail=""):
             if isinstance(detail, bytes):
                 print(
                     f"     payload length={len(detail)} bytes; "
-                    f"preview={detail[:160]!r}",
+                    f"detail={detail!r}",
                     flush=True,
                 )
             else:
@@ -743,8 +743,29 @@ fi""",
                 "empty capture does not retain previous output",
                 ":",
                 clipboard_dir,
-                (b"The command completed successfully (exit 0)",),
+                (
+                    b"The command `:` completed successfully (exit 0) "
+                    b"and produced no visible output.",
+                ),
                 (b"PTY_ISOLATION_PREVIOUS_ONLY",),
+            )
+
+            run_command(
+                "multiline silent command block names every command",
+                "{\n"
+                "printf -v CVB_TEST_ONE 'one'\n"
+                "printf -v CVB_TEST_TWO 'two'\n"
+                "printf -v CVB_TEST_THREE 'three'\n"
+                "}",
+                clipboard_dir,
+                (
+                    b"The command block finished with exit 0",
+                    b"Commands observed:",
+                    b"- printf -v CVB_TEST_ONE 'one'",
+                    b"- printf -v CVB_TEST_TWO 'two'",
+                    b"- printf -v CVB_TEST_THREE 'three'",
+                    b"produced no visible output.",
+                ),
             )
 
             # Send several commands without waiting between them.
@@ -836,7 +857,7 @@ fi""",
                 "silent failure reports its nonzero exit status",
                 "false",
                 clipboard_dir,
-                (b"The command failed (exit 1)",),
+                (b"The command `false` failed (exit 1)",),
             )
 
             run_command(
@@ -902,7 +923,7 @@ fi""",
                 "unlisted silent command still captures the marker",
                 "true",
                 clipboard_dir,
-                (b"The command completed successfully",),
+                (b"The command `true` completed successfully",),
             )
 
             # Edits to the skip list apply to the running session.
@@ -911,7 +932,7 @@ fi""",
                 "removed entry is captured again",
                 "cd /",
                 clipboard_dir,
-                (b"The command completed successfully",),
+                (b"The command `cd /", b"completed successfully (exit 0)"),
             )
             skip_file.write_text("cd\n")
 
