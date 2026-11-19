@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::patch::hunks::{FilePatch, Hunk, LineKind, matches, read};
-use crate::patch::near::{Candidate, Pair, candidates};
+use crate::patch::near::{Candidate, NotShown, Pair, candidates_counted};
 use crate::patch::parse::Format;
 use crate::patch::reanchor::{Choice, reanchor};
 use crate::patch::review::{CONFIRM_KEY, clip};
@@ -27,6 +27,8 @@ const MAX_CANDIDATE_LINES: usize = 24;
 /// Longest line shown whole.
 const MAX_LINE_CHARS: usize = 110;
 const ESCAPE_SEQUENCE_WAIT: Duration = Duration::from_millis(30);
+/// File lines shown before and after each candidate in the review bundle.
+const REVIEW_CONTEXT: usize = 3;
 
 /// One hunk that does not match, with the places it could belong.
 #[derive(Debug)]
@@ -34,6 +36,8 @@ struct Item {
     file: usize,
     hunk: usize,
     candidates: Vec<Candidate>,
+    /// What the offered list leaves out.
+    not_shown: NotShown,
 }
 
 /// A picker in progress.
@@ -89,7 +93,7 @@ impl Picker {
                 if matches(hunk, &lines) {
                     continue;
                 }
-                let found = candidates(hunk, &lines).map_err(|refusal| {
+                let (found, not_shown) = candidates_counted(hunk, &lines).map_err(|refusal| {
                     format!("no suggestions for {}: {}", file.path, refusal.describe())
                 })?;
                 if found.is_empty() {
@@ -99,7 +103,7 @@ impl Picker {
                         file.path
                     ));
                 }
-                items.push(Item { file: file_index, hunk: hunk_index, candidates: found });
+                items.push(Item { file: file_index, hunk: hunk_index, candidates: found, not_shown });
             }
         }
         if items.is_empty() {
@@ -161,6 +165,14 @@ impl Picker {
             if let Some(start) = hunk.old_start {
                 out.push_str(&format!("Original line hint: {start}\n"));
             }
+            // What the author said about where the hunk belongs: the strongest
+            // semantic hint in the patch, and not part of the compared lines.
+            if let Some(hint) = &hunk.hint {
+                out.push_str(&format!("Patch locator (@@): {hint}\n"));
+            }
+            if !hunk.tail.trim().is_empty() {
+                out.push_str(&format!("Diff function context: {}\n", hunk.tail.trim()));
+            }
 
             out.push_str("Patch as supplied:\n");
             for line in &hunk.lines {
@@ -173,6 +185,9 @@ impl Picker {
             }
 
             out.push_str("\nCandidate comparisons:\n");
+            if let Some(note) = not_shown_note(item.candidates.len(), item.not_shown) {
+                out.push_str(&format!("{note}\n"));
+            }
             for (number, candidate) in item.candidates.iter().enumerate() {
                 out.push_str(&candidate_review_view(
                     number + 1,
@@ -377,6 +392,9 @@ impl Picker {
         if let Some(start) = hunk.old_start {
             out.push_str(&format!(" (the patch says line {start})"));
         }
+        if let Some(hint) = &hunk.hint {
+            out.push_str(&format!(" (the patch says: @@ {hint})"));
+        }
         out.push_str(".\nThe patch expects:\n");
         out.push_str(&expected_view(hunk));
         out.push_str(&format!(
@@ -384,6 +402,9 @@ impl Picker {
             self.selected + 1,
             item.candidates.len()
         ));
+        if let Some(note) = not_shown_note(item.candidates.len(), item.not_shown) {
+            out.push_str(&format!("{note}\n"));
+        }
         out.push_str(&candidate_view(
             self.selected + 1,
             &item.candidates[self.selected],
@@ -469,6 +490,12 @@ fn candidate_review_view(
         candidate.changed,
     );
 
+    if let Some(line) = enclosing_line(candidate, file) {
+        out.push_str(&format!("  enclosing scope (nearest less-indented line above) L{}: {}\n", line + 1, file[line]));
+    }
+    for line in candidate.start.saturating_sub(REVIEW_CONTEXT)..candidate.start {
+        out.push_str(&format!("  . before L{}: {}\n", line + 1, file[line]));
+    }
     for pair in &candidate.pairs {
         match *pair {
             Pair::Both { old: o, line } => {
@@ -489,7 +516,42 @@ fn candidate_review_view(
             }
         }
     }
+    let end = candidate.start + candidate.len;
+    for line in end..(end + REVIEW_CONTEXT).min(file.len()) {
+        out.push_str(&format!("  . after L{}: {}\n", line + 1, file[line]));
+    }
     out
+}
+
+/// Nearest line above the window that is indented less than the window's least
+/// indented non-blank line: usually the function, branch or block that holds it.
+fn enclosing_line(candidate: &Candidate, file: &[&str]) -> Option<usize> {
+    let indent = |text: &str| text.len() - text.trim_start().len();
+    let window = &file[candidate.start..(candidate.start + candidate.len).min(file.len())];
+    let inside = window.iter().filter(|l| !l.trim().is_empty()).map(|l| indent(l)).min()?;
+    (0..candidate.start)
+        .rev()
+        .find(|&line| !file[line].trim().is_empty() && indent(file[line]) < inside)
+}
+
+/// A line when the offered list is not everything that was found.
+fn not_shown_note(shown: usize, not_shown: NotShown) -> Option<String> {
+    let mut parts = Vec::new();
+    if not_shown.capped > 0 {
+        parts.push(format!(
+            "{} more similar place{} beyond the limit",
+            not_shown.capped,
+            if not_shown.capped == 1 { "" } else { "s" }
+        ));
+    }
+    if not_shown.loose_hidden > 0 {
+        parts.push(format!(
+            "{} looser place{} (a line to remove differs) hidden because exact ones exist",
+            not_shown.loose_hidden,
+            if not_shown.loose_hidden == 1 { "" } else { "s" }
+        ));
+    }
+    (!parts.is_empty()).then(|| format!("Showing {shown}; not shown: {}.", parts.join("; ")))
 }
 
 fn cut(text: &str) -> String {
@@ -632,6 +694,44 @@ mod tests {
         assert_eq!(p.feed(b"z"), Step::Cancel { rest: b"z".to_vec() });
         let mut p = picker(&one_hunk());
         assert_eq!(p.feed(&[CONFIRM_KEY]), Step::Cancel { rest: vec![CONFIRM_KEY] });
+    }
+
+    #[test]
+    fn the_bundle_carries_the_locator_the_surroundings_and_the_enclosing_scope() {
+        let file = concat!(
+            "impl Engine {\n",
+            "    fn start(&mut self) {\n",
+            "        self.ready = false;\n",
+            "        self.count = 1;\n",
+            "        self.run();\n",
+            "    }\n",
+            "}\n",
+        );
+        let patch = envelope("*** Update File: f\n@@ fn start\n         self.ready = false;\n-        self.count = 11;\n+        self.count = 2;\n         self.run();\n");
+        let p = Picker::new(
+            &patch,
+            Format::ApplyPatch,
+            HashMap::from([("f".to_string(), file.to_string())]),
+        )
+        .unwrap();
+        let bundle = p.review_bundle();
+        assert!(bundle.contains("Patch locator (@@): fn start"), "{bundle}");
+        assert!(bundle.contains("enclosing scope (nearest less-indented line above) L2:     fn start(&mut self) {"), "{bundle}");
+        assert!(bundle.contains(". before L1: impl Engine {"), "{bundle}");
+        assert!(bundle.contains(". after L6:     }"), "{bundle}");
+        assert!(p.first_view().contains("(the patch says: @@ fn start)"), "{}", p.first_view());
+    }
+
+    #[test]
+    fn the_bundle_and_the_screen_say_when_candidates_were_left_out() {
+        let mut file = String::new();
+        for n in 0..8 {
+            file.push_str(&format!("p\nq\nr{n}\n--\n"));
+        }
+        let patch = envelope("*** Update File: f\n@@\n p\n q\n-rX\n+rY\n");
+        let p = Picker::new(&patch, Format::ApplyPatch, HashMap::from([("f".to_string(), file)])).unwrap();
+        assert!(p.review_bundle().contains("Showing 5; not shown: 3 more similar places beyond the limit."));
+        assert!(p.first_view().contains("Showing 5; not shown: 3 more similar places beyond the limit."));
     }
 
     fn two_candidate_picker() -> Picker {
