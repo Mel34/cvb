@@ -10,7 +10,7 @@ mod context;
 mod control;
 mod keybind;
 mod keyboard;
-// Not wired into the proxy yet (build step 6), so its items are unused for now.
+// Patch parsing, review and failed-hunk recovery used by the PTY proxy.
 #[allow(dead_code)]
 mod patch;
 mod pty;
@@ -57,13 +57,19 @@ Usage:
     cvb
     cvb <PATH>...
     cvb pull [file:PATH] [cascade:N] <search-term>...
+    cvb pull file:PATH lines:N|START-END
+    cvb pull callers:NAME [file:PATH]
+    cvb context
     cvb --help
     cvb --version
 
 Modes:
     cvb                      Start a terminal capture session
     cvb <PATH>...            Capture files or directory inventories
-    cvb pull [file:PATH] <search-term>... Search source files (tracked, or untracked and not ignored)
+    cvb pull                  Search tracked and non-ignored untracked source files
+    cvb pull file:PATH ...    Restrict a search to one file
+    cvb pull callers:NAME     Find syntactic Rust call-site candidates
+    cvb context               Print the LLM operating manual
 
 Options:
     -h, --help       Show this help message

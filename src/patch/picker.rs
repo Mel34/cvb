@@ -6,9 +6,11 @@
 //! corrected (see `reanchor`), previewed, and applied only after Ctrl+B twice.
 //!
 //! The rules (decided 2026-11-18): all or nothing, so skipping a hunk cancels
-//! the whole patch; there is no timeout; any key the picker does not know
-//! cancels it and is handed on to the shell. The state machine is pure (bytes
-//! in, decision out); `pty.rs` does the printing, the preview and the applying.
+//! the whole patch; there is no overall inactivity timeout. A partial Escape
+//! sequence is held briefly so split arrow-key sequences can be recognized;
+//! an unresolved Escape cancels the picker. Any other unknown input cancels
+//! and is handed on to the shell. The state machine is pure (bytes in,
+//! decision out); `pty.rs` does the printing, previewing and applying.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};

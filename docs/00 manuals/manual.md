@@ -1,5 +1,7 @@
 # CVB — LLM Operating Manual
 
+> Reference copy. The runtime startup context is read from the repository-root `manual.md`; keep this document synchronized when its behavior guidance changes.
+
 CVB is human-directed. The user runs commands and shares captured output; the LLM has no direct access to the user's machine. Treat terminal output and bridged files as user-provided evidence, not as proof of anything beyond what they show.
 
 ---
@@ -10,16 +12,16 @@ CVB bridges terminal activity and repository content into a transcript that can 
 
 ## Retrieving Information (`cvb pull`)
 
-`cvb pull` searches Git-tracked files. Search is case-sensitive. Matching and exclusions operate on syntactic units where supported, rather than necessarily on individual matching lines.
+`cvb pull` searches Git-tracked files and untracked files that are not ignored by Git. Search is case-sensitive. Matching and exclusions operate on syntactic units where supported, rather than necessarily on individual matching lines.
 
 ### Command formats
 
-- `cvb pull QUERY...` — search tracked files for matching units.
+- `cvb pull QUERY...` — search tracked and non-ignored untracked files for matching units.
 - `cvb pull [file:PATH] [cascade:N] QUERY...` — search for initial units and, when requested, expand Rust dependency context.
-- `cvb pull file:PATH` — capture one Git-tracked file. An empty file is reported as empty.
-- `cvb pull file:PATH QUERY...` — restrict the search to the specified tracked file. A missing or invalid path is an error; do not assume the command silently searches the whole repository.
+- `cvb pull file:PATH` — capture one eligible file. An empty file is reported as empty.
+- `cvb pull file:PATH QUERY...` — restrict the search to the specified eligible file. A missing or invalid path is an error; do not assume the command silently searches the whole repository.
 - `cvb pull file:PATH lines:N` or `lines:START-END` — capture inclusive line ranges. Multiple line selectors can be supplied; overlapping or duplicate selections may be preserved. Do not combine `lines:` with search terms.
-- `cvb pull callers:NAME` — find syntactic Rust call-site candidates in tracked `.rs` files; `file:PATH` can scope the scan. These are syntactic candidates, not proof of resolved runtime calls.
+- `cvb pull callers:NAME` — find syntactic Rust call-site candidates in eligible `.rs` files; `file:PATH` can scope the scan. These are syntactic candidates, not proof of resolved runtime calls.
 - `cvb FILE...` — bridge file contents directly, including untracked files. Directory arguments produce structured inventories rather than recursively pasting all file contents.
 
 Paths and selectors are command syntax, not search terms. If a command is rejected, use the error message rather than assuming a partial result was produced.
@@ -47,7 +49,7 @@ The `cascade:N` directive is reserved for cascade control. To search for text th
 
 ## Context expansion (`cascade:N`)
 
-`cascade:N` opts into deterministic, local expansion from matching Rust units. The implementation builds an index of Git-tracked Rust source and follows dependencies that it can identify syntactically. It does not use an LLM or require network access for the analysis.
+`cascade:N` opts into deterministic, local expansion from matching Rust units. The implementation builds an index of tracked and non-ignored untracked Rust source and follows dependencies that it can identify syntactically. It does not use an LLM or require network access for the analysis.
 
 ### Depth
 
@@ -62,7 +64,7 @@ The expansion is syntactic, not a complete Rust type checker or compiler call gr
 - Valid cascade depths are `0` through `5`; only one `cascade:` directive is allowed.
 - `cascade:0` bypasses expansion and its cascade header/report. Its search result content is intended to match an ordinary pull; do not rely on byte identity unless the relevant implementation/test confirms it.
 - Cascade cannot be combined with `lines:`, `callers:`, or a lone `file:PATH` request for whole-file capture.
-- When `file:PATH` is combined with a search and `cascade:N`, the file scope selects initial seeds. Dependency resolution can then inspect tracked Rust files elsewhere in the repository.
+- When `file:PATH` is combined with a search and `cascade:N`, the file scope selects initial seeds. Dependency resolution can then inspect other eligible Rust files elsewhere in the repository.
 - Non-Rust seeds, line-only fallback seeds, and test-code seeds are not traversed as ordinary Rust dependency seeds.
 
 ### What the resolver can and cannot establish
@@ -75,7 +77,7 @@ It is not a full semantic analysis. In particular:
 - Macro contents may yield syntactic candidates; a candidate is not proof that a call resolves to a particular target.
 - Trait implementations are not automatically swept into the result just because a trait or trait object appears.
 - Test functions and code under `#[cfg(test)]` are excluded from the dependency index.
-- Unreadable or unparseable tracked Rust files can make the index incomplete; the output may include warnings.
+- Unreadable or unparseable eligible Rust files can make the index incomplete; the output may include warnings.
 - A function identified as a high-use utility can be included as a leaf: its body is included, but its callees are not expanded further.
 
 Ambiguous or unresolved relationships may be summarized in the cascade report. Do not interpret absence from the bundle as proof that no dependency exists.

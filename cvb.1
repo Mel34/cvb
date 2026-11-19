@@ -43,7 +43,7 @@ End the active CVB Bash session.
 
 When used outside an active session, CVB reports that no session is running.
 .TP
-.B pull R[Bfile:IPATHR] [Bcascade:INR] Isearch-term...R
+.B pull \fR[\fBfile:\fIPATH\fR] [\fBcascade:\fIN\fR] \fIsearch-term...\fR
 Search source files: Git-tracked ones and untracked ones that .gitignore does not hide. Rust is parsed syntactically by item, Bash by function, Python (.py, .pyi) by function and class, Zig (.zig) by function, test and type, C (.c, .h) and C++ (.cc, .cpp, .cxx, .hh, .hpp, .hxx) by function and type, and Markdown by heading. Other files are searched by line. Callers and cascade work on Rust only.
 .TP
 .B context
@@ -324,13 +324,20 @@ a recognized patch is shown (its text, a summary of the files, and any correctio
 .B Ctrl+B
 twice applies it; any other key cancels it and is passed on to the shell. A patch pasted while another waits replaces it.
 .PP
-When a patch fails because hunks do not match the files, CVB reports the failure (nothing is modified) and offers, for each such hunk, the nearest places in the file. Pressing a number chooses a place,
+When a patch fails because hunks do not match the files, CVB reports the failure (nothing is modified) and offers up to five candidate locations for each failing hunk. Use the left and right arrow keys to browse candidates and
+.B Enter
+to select the highlighted candidate. Number keys select a candidate directly.
+.PP
+CVB copies a review bundle containing the candidate comparisons and their diffs to the clipboard. The user may paste this bundle into an assistant for help evaluating which location is semantically correct. Candidate scores are suggestions, not proof; CVB does not silently decide ambiguous relocations.
+.PP
+After the last choice the corrected patch is shown, with a warning when a line to be removed differs from the one the patch named. Pressing
 .B s
-skips (which cancels the whole patch) and
-.B q
-cancels. After the last choice the corrected patch is shown, with a warning when a line to be removed differs from the one the patch named; pressing
+skips (which cancels the whole patch).
+.B q ,
+.B Esc
+or an unknown key cancels the picker; unrecognized input is passed on to the shell. Pressing
 .B Ctrl+B
-twice applies it. Any other key cancels and is passed on to the shell. The picker has no timeout.
+twice applies the corrected patch. There is no overall inactivity timeout; CVB briefly waits 30 milliseconds to distinguish a split Escape sequence from a standalone Escape.
 .SH TARGET RESOLUTION
 Existing filesystem paths take precedence over external commands.
 .PP

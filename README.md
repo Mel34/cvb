@@ -10,6 +10,8 @@ It can:
 * capture the currently visible terminal screen with a configurable hotkey;
 * bridge a file directly to the clipboard;
 * recursively inventory a directory as TSV and copy the result to the clipboard;
+* search source files and retrieve relevant code with `cvb pull`;
+* apply pasted patches transactionally, with review and failed-hunk recovery;
 * execute external commands through the normal command-line interface.
 
 CVB is designed around simple, predictable mechanisms. It is not an AI agent, shell replacement, terminal logger, or general-purpose terminal emulator.
@@ -245,7 +247,7 @@ This needs a terminal that sends bracketed paste (most do; Bash enables it by de
 
 **Review before applying.** With `CVB_PATCH_REVIEW=on` (also `1`, `true`, `yes`) a recognized patch is shown instead of applied: its text (the first and last 150 lines when it is longer than 300), a summary line naming the files and what happens to each, and any correction CVB made. Nothing is changed and the clipboard is untouched. Press `Ctrl+B` twice to apply it; any other key cancels, and that key goes on to the shell. Pasting another patch while one waits replaces it. Reading the end of the shown text is also how to notice a patch the clipboard cut short.
 
-**When hunks do not match.** If a patch fails because some hunks do not match the files (the LLM misquoted a line, or the file moved on), CVB still reports the failure and changes nothing, and then offers the nearest places in the file for each such hunk: what the patch expects, and up to five candidate places with the differing lines marked. Press the number of a candidate to choose it, `s` to skip (this cancels the whole patch: it is all or nothing) or `q` to cancel. After the last choice CVB shows the corrected patch and what applying it would do; if a line to be removed differs from the one the patch named, it warns that the real line in the file is the one removed. `Ctrl+B` twice applies it. Any other key cancels and goes on to the shell. There is no timeout: the picker waits until you act. Candidates that only differ in context lines are offered first; ones where a removed line differs are offered only when there is nothing better. It works for `apply_patch` patches and for `git diff` output.
+**When hunks do not match.** If a patch fails because some hunks do not match the files (for example, a line was misquoted or the file moved), CVB reports the failure and changes nothing. It then offers up to five candidate locations for each failing hunk. Use Left/Right to browse candidates and Enter to select the displayed candidate; number keys select a candidate directly. The complete candidate comparisons are also sent through the clipboard, so they can be pasted into an LLM conversation for semantic review. Candidates are suggestions, not automatic decisions: textual similarity does not prove that a location is correct. After all choices, CVB shows the corrected patch and previews its effect. If a line to be removed differs from the one the patch named, CVB warns that the actual file line will be removed. Press `Ctrl+B` twice to apply the corrected patch. `s` skips and cancels the whole patch; `q`, Escape, or an unrecognized key cancels and passes the remaining input to the shell. There is no overall inactivity timeout; Escape is disambiguated from a split arrow-key sequence with a short 30 ms wait. This recovery works for `apply_patch` patches and unified diffs.
 
 ## External commands
 

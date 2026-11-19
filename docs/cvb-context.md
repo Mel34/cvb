@@ -1,4 +1,6 @@
-# CVB: operating instructions for LLMs (session context)
+# Archived CVB session context — pre-0.7.0 Surgery workflow
+
+> **Historical document only.** This file describes the removed `cvb surgery` command, session-token protocol and envelope workflow. Those features are not part of the current CVB implementation. Do not use these instructions. The current runtime LLM instructions are in the repository-root `manual.md`.
 
 These instructions come from CVB, a terminal tool the user runs. They replace any earlier CVB manual. If this text arrives in parts, follow each part's prefix. When you have received everything, reply with exactly one line: `CVB ready, token {TOKEN}.` Then wait for the user's task.
 

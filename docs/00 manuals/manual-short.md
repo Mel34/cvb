@@ -1,5 +1,7 @@
 # CVB — LLM Operating Manual
 
+> Reference copy. The runtime startup context is read from the repository-root `manual.md`; keep this document synchronized when its behavior guidance changes.
+
 CVB is human-directed: the user runs commands and shares captured output. The LLM has no direct access to the user's machine. Treat terminal output and bridged files as evidence only of what they actually show.
 
 # 1. CVB Reference
@@ -8,14 +10,14 @@ CVB bridges terminal activity and repository content into a transcript that can 
 
 ## `cvb pull`
 
-`cvb pull` searches Git-tracked files. Matching is case-sensitive and, where supported, operates on syntactic units rather than individual lines.
+`cvb pull` searches Git-tracked files and untracked files that are not ignored by Git. Matching is case-sensitive and, where supported, operates on syntactic units rather than individual lines.
 
-- `cvb pull QUERY...` — search tracked files.
+- `cvb pull QUERY...` — search tracked and non-ignored untracked files.
 - `cvb pull [file:PATH] [cascade:N] QUERY...` — search, optionally expanding Rust dependencies.
-- `cvb pull file:PATH` — capture one tracked file; empty files are reported as empty.
-- `cvb pull file:PATH QUERY...` — restrict search to a tracked file. Invalid paths are errors; don't assume a repository-wide fallback.
+- `cvb pull file:PATH` — capture one eligible file; empty files are reported as empty.
+- `cvb pull file:PATH QUERY...` — restrict search to an eligible file. Invalid paths are errors; don't assume a repository-wide fallback.
 - `cvb pull file:PATH lines:N` or `lines:START-END` — capture inclusive line ranges. Multiple selections may preserve overlaps. Don't combine `lines:` with search terms.
-- `cvb pull callers:NAME` — find syntactic Rust call-site candidates in tracked `.rs` files; `file:PATH` can scope the scan. Candidates are not proof of resolved runtime calls.
+- `cvb pull callers:NAME` — find syntactic Rust call-site candidates in eligible `.rs` files; `file:PATH` can scope the scan. Candidates are not proof of resolved runtime calls.
 - `cvb FILE...` — bridge file contents, including untracked files. Directory arguments produce structured inventories, not recursive file dumps.
 
 Paths and selectors are command syntax, not search terms. If a command errors, use the error output; don't assume partial results were produced.
@@ -41,13 +43,13 @@ Bare terms are OR alternatives; required terms are ANDed with the query. Matchin
 
 ## `cascade:N` dependency expansion
 
-Cascade performs deterministic local expansion from matching Rust units. It indexes Git-tracked Rust source and follows dependencies it can identify syntactically; it does not use an LLM or require network access.
+Cascade performs deterministic local expansion from matching Rust units. It indexes tracked and non-ignored untracked Rust source and follows dependencies it can identify syntactically; it does not use an LLM or require network access.
 
 - Depth `0`: seeds only. Depth `1`: dependencies of seeds. Higher depths follow dependencies of newly admitted units up to the requested maximum.
 - Valid depths: `0`–`5`; only one `cascade:` directive is allowed.
 - `cascade:0` bypasses expansion and its header/report. Results are intended to match a normal pull; don't rely on byte identity without a confirming test.
 - Cascade cannot be combined with `lines:`, `callers:`, or a lone `file:PATH` whole-file request.
-- With `file:PATH` plus search and cascade, the file scopes initial seeds; resolution may inspect tracked Rust files elsewhere.
+- With `file:PATH` plus search and cascade, the file scopes initial seeds; resolution may inspect other eligible Rust files elsewhere.
 - Non-Rust, line-fallback and test-code seeds are not traversed as ordinary Rust seeds.
 
 ### Resolver limits
@@ -57,7 +59,7 @@ The resolver recognizes selected syntactic relationships, including free-functio
 - Callbacks, unknown receiver types, ambiguous names, external/standard-library calls, trait dispatch, generic constraints and macro expansion may not resolve to a project definition.
 - Macro contents may produce candidates, not confirmed targets. Trait implementations are not automatically included merely because a trait appears.
 - Test functions and `#[cfg(test)]` code are excluded from the dependency index.
-- Unreadable or unparseable tracked Rust files can make the index incomplete; warnings may be emitted.
+- Unreadable or unparseable eligible Rust files can make the index incomplete; warnings may be emitted.
 - High-use utilities called by at least 8 distinct units can be included as leaves: their bodies are included, but their callees are not expanded.
 
 A missing unit does not prove that a dependency doesn't exist. Ambiguous or unresolved relationships may be summarized in the report.
