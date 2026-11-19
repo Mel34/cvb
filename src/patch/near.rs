@@ -231,6 +231,23 @@ fn best_at(start: usize, kinds: &[LineKind], sims: &mut Sims) -> Option<Candidat
 /// first. Candidates that only change context lines come first; ones that change
 /// which line is removed are offered only when there is no other kind.
 pub(crate) fn candidates(hunk: &Hunk, file: &[&str]) -> Result<Vec<Candidate>, Refusal> {
+    candidates_counted(hunk, file).map(|(found, _)| found)
+}
+
+/// What the offered list leaves out, so a reader is not led to think it is complete.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct NotShown {
+    /// Candidates beyond [`MAX_CANDIDATES`] that were dropped.
+    pub capped: usize,
+    /// Loose candidates not offered because strict ones exist.
+    pub loose_hidden: usize,
+}
+
+/// [`candidates`], with what it left out.
+pub(crate) fn candidates_counted(
+    hunk: &Hunk,
+    file: &[&str],
+) -> Result<(Vec<Candidate>, NotShown), Refusal> {
     let old = hunk.old_side();
     if old.len() > MAX_HUNK_LINES {
         return Err(Refusal::HunkTooLong);
@@ -249,20 +266,24 @@ pub(crate) fn candidates(hunk: &Hunk, file: &[&str]) -> Result<Vec<Candidate>, R
     for (index, line) in file.iter().enumerate() {
         by_text.entry(line.trim()).or_default().push(index);
     }
-    let mut starts: Vec<usize> = Vec::new();
+    // A start is supported once for every old line found at its place or one line
+    // either side. When there are more starts than `MAX_STARTS`, the best
+    // supported are scored; position in the file must not decide which are
+    // dropped, or a match late in the file would lose to earlier look-alikes.
+    let mut support: HashMap<usize, usize> = HashMap::new();
     for (i, text) in texts.iter().enumerate() {
         if let Some(positions) = by_text.get(text.trim()) {
             for &at in positions {
                 for shift in 0..=1usize {
                     if at >= i + shift {
-                        starts.push(at - i - shift);
+                        *support.entry(at - i - shift).or_default() += 1;
                     }
                 }
             }
         }
     }
-    starts.sort_unstable();
-    starts.dedup();
+    let mut starts: Vec<usize> = support.keys().copied().collect();
+    starts.sort_unstable_by(|a, b| support[b].cmp(&support[a]).then(a.cmp(b)));
     starts.truncate(MAX_STARTS);
 
     let mut sims = Sims { old: &texts, file, cache: HashMap::new() };
@@ -272,21 +293,33 @@ pub(crate) fn candidates(hunk: &Hunk, file: &[&str]) -> Result<Vec<Candidate>, R
         .collect();
     found.sort_by(|x, y| y.score.total_cmp(&x.score).then(x.start.cmp(&y.start)));
 
+    // Strict and loose candidates are kept apart *before* overlapping windows are
+    // dropped: a loose window that scores higher must not remove an overlapping
+    // strict one, or the strict place would never be offered.
+    let (strict, loose): (Vec<Candidate>, Vec<Candidate>) = found.into_iter().partition(|c| !c.loose);
+    let strict = without_overlaps(strict);
+    let loose_hidden = if strict.is_empty() { 0 } else { without_overlaps(loose.clone()).len() };
+    let mut result = if strict.is_empty() { without_overlaps(loose) } else { strict };
+    if let Some(hint) = hunk.old_start {
+        let distance = |c: &Candidate| (c.start + 1).abs_diff(hint);
+        result.sort_by(|x, y| y.score.total_cmp(&x.score).then(distance(x).cmp(&distance(y))));
+    }
+    let capped = result.len().saturating_sub(MAX_CANDIDATES);
+    result.truncate(MAX_CANDIDATES);
+    Ok((result, NotShown { capped, loose_hidden }))
+}
+
+/// Best first (the input is already ordered); a window that shares a line with a
+/// better one is dropped.
+fn without_overlaps(sorted: Vec<Candidate>) -> Vec<Candidate> {
     let mut chosen: Vec<Candidate> = Vec::new();
-    for candidate in found {
+    for candidate in sorted {
         let end = candidate.start + candidate.len;
         if chosen.iter().all(|c| end <= c.start || c.start + c.len <= candidate.start) {
             chosen.push(candidate);
         }
     }
-    let strict: Vec<Candidate> = chosen.iter().filter(|c| !c.loose).cloned().collect();
-    let mut result = if strict.is_empty() { chosen } else { strict };
-    if let Some(hint) = hunk.old_start {
-        let distance = |c: &Candidate| (c.start + 1).abs_diff(hint);
-        result.sort_by(|x, y| y.score.total_cmp(&x.score).then(distance(x).cmp(&distance(y))));
-    }
-    result.truncate(MAX_CANDIDATES);
-    Ok(result)
+    chosen
 }
 
 #[cfg(test)]
@@ -489,6 +522,50 @@ mod tests {
         assert_eq!(candidates(&hunk(&body), &lines(FILE)), Err(Refusal::HunkTooLong));
         assert_eq!(candidates(&hunk("-only\n"), &lines(FILE)), Err(Refusal::TooShort));
         assert!(Refusal::TooShort.describe().contains("too few"));
+    }
+
+    #[test]
+    fn an_overlapping_loose_window_does_not_hide_a_strict_one() {
+        // The patch deletes `c1`, which is on the last line, and quotes one context
+        // line too many after it. A window at lines 2-4 would delete `d1` instead:
+        // it scores higher, shares line 4 with the strict window, and used to
+        // remove it before the strict/loose split, so only the `d1` place was shown.
+        let file = "b1\nb1\nd1\nb1\nc1\n";
+        let h = hunk(" b1\n-c1\n b1\n+new\n");
+        let (found, not_shown) = candidates_counted(&h, &lines(file)).unwrap();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(!found[0].loose, "{found:?}");
+        assert_eq!(found[0].start, 3);
+        assert_eq!(not_shown, NotShown { capped: 0, loose_hidden: 1 });
+    }
+
+    #[test]
+    fn a_late_match_is_not_dropped_for_the_sake_of_earlier_look_alikes() {
+        // 1,500 look-alike functions give far more candidate starts than are
+        // scored. The true place, further down, is supported by one more old line
+        // than any of them (the exact `fn target() {`) and must be among those scored.
+        let mut file = String::new();
+        for i in 0..1500 {
+            file.push_str(&format!("fn f{i}() {{\n    let a = {i};\n    call(a);\n}}\n\n"));
+        }
+        let late = file.lines().count();
+        file.push_str("fn target() {\n    let a = 7;\n    call(a);\n}\n\n");
+        let h = hunk(" fn target() {\n     let a = 70;\n-    call(a);\n+    call(a + 1);\n }\n \n");
+        let found = candidates(&h, &lines(&file)).unwrap();
+        assert_eq!(found[0].start, late, "{:?}", found.iter().map(|c| (c.start, c.score)).collect::<Vec<_>>());
+        assert!(!found[0].loose);
+    }
+
+    #[test]
+    fn what_the_cap_leaves_out_is_counted() {
+        let mut file = String::new();
+        for n in 0..8 {
+            file.push_str(&format!("p\nq\nr{n}\n--\n"));
+        }
+        let h = hunk(" p\n q\n-rX\n");
+        let (found, not_shown) = candidates_counted(&h, &lines(&file)).unwrap();
+        assert_eq!(found.len(), MAX_CANDIDATES);
+        assert_eq!(not_shown.capped, 3);
     }
 
     #[test]
