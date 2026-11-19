@@ -1,5 +1,5 @@
 CVB_START_MARKER=$'\e]777;CVB;START\a'
-CVB_END_MARKER=$'\e]777;CVB;END\a'
+CVB_END_MARKER_PREFIX=$'\e]777;CVB;END;'
 CVB_SKIP_MARKER=$'\e]777;CVB;SKIP\a'
 
 # Top-level simple commands run since the last prompt, recorded by the DEBUG
@@ -92,7 +92,7 @@ cvb_control_prompt() {
     fi
     CVB_TRACED_COMMANDS=()
 
-    printf '%s' "$CVB_END_MARKER"
+    printf '%s%03d\a' "$CVB_END_MARKER_PREFIX" "$status"
 
     if ((CVB_SAVED_PROMPT_IS_ARRAY)); then
         for command in "${CVB_SAVED_PROMPT_COMMAND[@]}"; do

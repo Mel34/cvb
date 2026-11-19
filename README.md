@@ -297,15 +297,16 @@ Explicit paths such as `./foo`, `../foo`, and `/tmp/foo` are path targets.
 
 CVB uses `wl-copy` for clipboard integration.
 
-When a captured command produces no visible terminal output, CVB copies:
+When a captured command produces no visible terminal output, CVB copies a message reporting success or failure, including the exit status. For example:
 
 ```text
-[NO_VISIBLE_OUTPUT]
+The command completed successfully (exit 0) and produced no visible output.
+The command failed (exit 1) and produced no visible output.
 ```
 
-### Skip list
-
-Some commands, such as `cd`, normally print nothing. Capturing `[NO_VISIBLE_OUTPUT]` for them would replace useful clipboard contents. Commands listed in the skip list leave the clipboard untouched when they produce no visible output.
+Visible terminal output is preserved and labeled Terminal output:.
+Skip list
+Some commands, such as cd, normally print nothing. Commands listed in the skip list leave the clipboard untouched when they produce no visible output.
 
 CVB creates `~/.config/cvb/skip` when a resident session starts. If `XDG_CONFIG_HOME` is set, the file is instead located at `$XDG_CONFIG_HOME/cvb/skip`.
 

@@ -1,6 +1,6 @@
 # CVB: operating instructions for LLMs (session context)
 
-These instructions come from CVB, a terminal tool the user runs. They replace any earlier CVB manual. If this text arrives in parts, follow each part's prefix. When you have received everything, reply with exactly one line: `CVB ready.` Then wait for the user's task.
+These instructions come from CVB, a terminal tool the user runs. They replace any earlier CVB manual. If this text arrives in multiple parts, wait until the final part before processing it. When you have received everything, reply with exactly one line: `CVB ready.` Then wait for the user's task.
 
 The user directs the work and is your only hands. You cannot run commands or read files on their machine. CVB moves text between their terminal, their clipboard and you: they run a command, CVB copies the output, they paste it to you. You answer with commands for them to run and, for code changes, a patch (section 4).
 
@@ -114,6 +114,6 @@ Adapt this to other languages.
 - `cvb DIRECTORY` gives a TSV inventory (`path`, `type`, `size`), not file contents. VCS directories are excluded by the user's ignore list.
 - `cvb COMMAND ...` runs the command (when the name isn't an existing path) and captures its output. Commands the user types in the session are captured too, when they finish.
 - The user can also send a text capture of what is on their screen. Treat it as a snapshot of the screen, not a command history.
-- `[NO_VISIBLE_OUTPUT]` means the command printed nothing visible; it says nothing about success.
-- A capture can mix terminal output, bridged files and CVB status lines in order. Terminal output is labeled; bridged files are literal content. A file bridge can report an error instead of content, and a command attempt alone doesn't prove the file was captured. Keep labels and order when you quote evidence.
-- Captures over about 9,750 characters arrive in parts prefixed `[Part n/N ...]`. For every part but the last, reply only that you received it and wait. Process the whole after the final part.
+- A silent command capture says either "The command completed successfully (exit 0) and produced no visible output." or "The command failed (exit N) and produced no visible output." The exit status is authoritative; do not infer success or failure from silence alone.
+- A capture can mix terminal output, bridged files and CVB status lines in order. Terminal output is introduced by the label Terminal output:. Bridged files are literal content. A file bridge can report an error instead of content, and a command attempt alone doesn't prove the file was captured. Keep labels and order when you quote evidence.
+- Captures over about 9,750 characters arrive in parts labeled Message part N of TOTAL. Intermediate parts say more are coming; briefly acknowledge receipt and wait. The final part says it is the final part and asks you to consider all parts together. Do not analyze or answer until that final part arrives.

@@ -74,11 +74,11 @@ fn load_copy_limit(path: &Path) -> usize {
 fn chunk_prefix(number: usize, total: usize, final_part: bool) -> String {
     if final_part {
         format!(
-            "[Part {number}/{total} - FINAL PART]\nThis is the final part ({number}/{total}). All parts have now been transmitted. Please assemble all parts and process the entire request now.\n---\n"
+            "Message part {number} of {total} (this is the final part).\nAll parts have now been sent. Please consider this part together with the earlier parts and respond to the complete request.\n---\n"
         )
     } else {
         format!(
-            "[Part {number}/{total} - DO NOT PROCESS YET]\nThis is part {number} of {total}. Do not analyze, answer, or summarize yet. Simply reply: \"Part {number}/{total} received, awaiting next part.\" and wait for subsequent parts.\n---\n"
+            "Message part {number} of {total} (more parts are coming).\nPlease wait for the remaining parts before analyzing or responding. Briefly acknowledge receipt of this part.\n---\n"
         )
     }
 }
@@ -669,16 +669,18 @@ mod tests {
                 .unwrap_or_else(|| panic!("part {number}/{total} has no framing separator"));
 
             assert!(
-                header.starts_with(&format!("[Part {number}/{total} - ")),
+                header.starts_with(&format!("Message part {number} of {total} ")),
                 "part {number}/{total} has incorrect numbering"
             );
 
             if final_part {
-                assert!(header.contains("FINAL PART"));
-                assert!(!header.contains("DO NOT PROCESS YET"));
+                assert!(header.contains("this is the final part"));
+                assert!(header.contains("respond to the complete request"));
+                assert!(!header.contains("more parts are coming"));
             } else {
-                assert!(header.contains("DO NOT PROCESS YET"));
-                assert!(!header.contains("FINAL PART"));
+                assert!(header.contains("more parts are coming"));
+                assert!(header.contains("wait for the remaining parts"));
+                assert!(!header.contains("this is the final part"));
             }
 
             reconstructed.push_str(payload);

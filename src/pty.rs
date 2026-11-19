@@ -24,7 +24,6 @@ ioctl_read_bad!(tiocgwinsz, libc::TIOCGWINSZ, Winsize);
 ioctl_write_ptr_bad!(tiocswinsz, libc::TIOCSWINSZ, Winsize);
 
 const CONTROL_FD: i32 = 3;
-const NO_OUTPUT: &str = "[NO_VISIBLE_OUTPUT]";
 
 const DEFAULT_SKIP_LIST: &str = "\
 # Commands listed here (one name per line) do not replace the clipboard when
@@ -68,7 +67,7 @@ enum MarkerEvent {
 
 struct MarkerScanner {
     start: Vec<u8>,
-    end: Vec<u8>,
+    end_prefix: Vec<u8>,
     pathop: Vec<u8>,
     skip: Vec<u8>,
     pending: Vec<u8>,
@@ -205,8 +204,7 @@ fn render_terminal_segment(bytes: &[u8], rows: u16, cols: u16) -> String {
     screen_to_text(&mut renderer)
 }
 
-/// True when rendering the transcript would yield only `[NO_VISIBLE_OUTPUT]`:
-/// no literal (file bridge) content and no terminal segment with visible text.
+/// True when there is no literal content and no terminal segment with visible text.
 fn transcript_is_visibly_empty(transcript: &Transcript, rows: u16, cols: u16) -> bool {
     transcript.segments.iter().all(|segment| match segment {
         TranscriptSegment::Terminal(bytes) => render_terminal_segment(bytes, rows, cols).is_empty(),
@@ -214,35 +212,38 @@ fn transcript_is_visibly_empty(transcript: &Transcript, rows: u16, cols: u16) ->
     })
 }
 
-fn render_transcript(transcript: &Transcript, rows: u16, cols: u16) -> Vec<u8> {
-    if transcript.segments.is_empty() {
-        return NO_OUTPUT.as_bytes().to_vec();
-    }
-
+fn render_transcript(transcript: &Transcript, rows: u16, cols: u16, status: i32) -> Vec<u8> {
     let mut output = Vec::new();
 
     for segment in &transcript.segments {
         match segment {
             TranscriptSegment::Terminal(bytes) => {
-                output.extend_from_slice(b"[Terminal output]\n");
-
                 let text = render_terminal_segment(bytes, rows, cols);
-                let processed = if text.is_empty() {
-                    NO_OUTPUT.to_string()
-                } else {
-                    text
-                };
+                if !text.is_empty() {
+                    output.extend_from_slice(b"Terminal output:\n");
+                    output.extend_from_slice(text.as_bytes());
 
-                output.extend_from_slice(processed.as_bytes());
-
-                if !processed.ends_with('\n') {
-                    output.push(b'\n');
+                    if !text.ends_with('\n') {
+                        output.push(b'\n');
+                    }
                 }
             }
             TranscriptSegment::Literal(bytes) => {
                 output.extend_from_slice(bytes);
             }
         }
+    }
+
+    if output.is_empty() {
+        let message = if status == 0 {
+            "The command completed successfully (exit 0) and produced no visible output."
+                .to_string()
+        } else {
+            format!(
+                "The command failed (exit {status}) and produced no visible output."
+            )
+        };
+        output.extend_from_slice(message.as_bytes());
     }
 
     output
@@ -260,11 +261,11 @@ mod transcript_tests {
         transcript.push_literal(b"[file.txt]\n--------\n\x1b[31mRAW\x1b[0m\n");
         transcript.push_terminal(b"NEXT\r\n");
 
-        let rendered = render_transcript(&transcript, 24, 80);
+        let rendered = render_transcript(&transcript, 24, 80, 0);
 
         assert_eq!(
             rendered,
-            b"[Terminal output]\nRED\n[file.txt]\n--------\n\x1b[31mRAW\x1b[0m\n[Terminal output]\nNEXT\n"
+            b"Terminal output:\nRED\n[file.txt]\n--------\n\x1b[31mRAW\x1b[0m\nTerminal output:\nNEXT\n"
         );
     }
 
@@ -301,12 +302,22 @@ mod transcript_tests {
     }
 
     #[test]
-    fn renders_empty_transcript_as_no_output() {
+    fn renders_empty_transcript_as_success_status() {
         let transcript = Transcript::default();
 
         assert_eq!(
-            render_transcript(&transcript, 24, 80),
-            b"[NO_VISIBLE_OUTPUT]"
+            render_transcript(&transcript, 24, 80, 0),
+            b"The command completed successfully (exit 0) and produced no visible output."
+        );
+    }
+
+    #[test]
+    fn renders_empty_transcript_as_failure_status() {
+        let transcript = Transcript::default();
+
+        assert_eq!(
+            render_transcript(&transcript, 24, 80, 7),
+            b"The command failed (exit 7) and produced no visible output."
         );
     }
 
@@ -356,7 +367,7 @@ impl MarkerScanner {
     fn new() -> Self {
         Self {
             start: b"\x1b]777;CVB;START\x07".to_vec(),
-            end: b"\x1b]777;CVB;END\x07".to_vec(),
+            end_prefix: b"\x1b]777;CVB;END;".to_vec(),
             pathop: b"\x1b]777;CVB;PATHOP\x07".to_vec(),
             skip: b"\x1b]777;CVB;SKIP\x07".to_vec(),
             pending: Vec::new(),
@@ -376,11 +387,6 @@ impl MarkerScanner {
                     MarkerEvent::Start,
                 ),
                 (
-                    find_subslice(&self.pending, &self.end),
-                    self.end.len(),
-                    MarkerEvent::End(0),
-                ),
-                (
                     find_subslice(&self.pending, &self.pathop),
                     self.pathop.len(),
                     MarkerEvent::Pathop,
@@ -397,6 +403,39 @@ impl MarkerScanner {
             })
             .min_by_key(|(position, _, _)| *position);
 
+            let end_position = find_subslice(&self.pending, &self.end_prefix);
+
+            if let Some(end_position) = end_position {
+                if marker.as_ref().map_or(true, |(position, _, _)| end_position <= *position) {
+                    if end_position > 0 {
+                        events.push(MarkerEvent::Data(
+                            self.pending.drain(..end_position).collect(),
+                        ));
+                        continue;
+                    }
+
+                    let marker_length = self.end_prefix.len() + 4;
+                    if self.pending.len() < marker_length {
+                        break;
+                    }
+
+                    let status_bytes =
+                        &self.pending[self.end_prefix.len()..self.end_prefix.len() + 3];
+                    let terminator = self.pending[self.end_prefix.len() + 3];
+
+                    if status_bytes.iter().all(u8::is_ascii_digit) && terminator == b'\x07' {
+                        let status = status_bytes
+                            .iter()
+                            .fold(0, |value, digit| value * 10 + i32::from(digit - b'0'));
+                        self.pending.drain(..marker_length);
+                        events.push(MarkerEvent::End(status));
+                    } else {
+                        events.push(MarkerEvent::Data(self.pending.drain(..1).collect()));
+                    }
+                    continue;
+                }
+            }
+
             let Some((position, length, event)) = marker else {
                 break;
             };
@@ -410,13 +449,27 @@ impl MarkerScanner {
         }
 
         if !self.pending.is_empty() {
-            let keep = self
-                .start
-                .len()
-                .max(self.end.len())
-                .max(self.pathop.len())
-                .max(self.skip.len())
-                .saturating_sub(1);
+            let keep = if self.pending.starts_with(&self.end_prefix)
+                && self.pending.len() < self.end_prefix.len() + 4
+            {
+                self.pending.len()
+            } else {
+                [
+                    self.start.as_slice(),
+                    self.end_prefix.as_slice(),
+                    self.pathop.as_slice(),
+                    self.skip.as_slice(),
+                ]
+                .iter()
+                .map(|marker| {
+                    (1..=self.pending.len().min(marker.len()))
+                        .rev()
+                        .find(|length| self.pending.ends_with(&marker[..*length]))
+                        .unwrap_or(0)
+                })
+                .max()
+                .unwrap_or(0)
+            };
 
             if self.pending.len() > keep {
                 let split_at = self.pending.len() - keep;
@@ -449,7 +502,7 @@ mod marker_scanner_tests {
         let mut scanner = MarkerScanner::new();
 
         let events = scanner.process(
-            b"\x1b]777;CVB;START\x07\x1b]777;CVB;PATHOP\x07\x1b]777;CVB;START\x07\x1b]777;CVB;PATHOP\x07\x1b]777;CVB;START\x07\x1b]777;CVB;END\x07",
+            b"\x1b]777;CVB;START\x07\x1b]777;CVB;PATHOP\x07\x1b]777;CVB;START\x07\x1b]777;CVB;PATHOP\x07\x1b]777;CVB;START\x07\x1b]777;CVB;END;000\x07",
         );
 
         assert_eq!(
@@ -470,7 +523,7 @@ mod marker_scanner_tests {
         let mut scanner = MarkerScanner::new();
 
         let events =
-            scanner.process(b"\x1b]777;CVB;START\x07\x1b]777;CVB;SKIP\x07\x1b]777;CVB;END\x07");
+            scanner.process(b"\x1b]777;CVB;START\x07\x1b]777;CVB;SKIP\x07\x1b]777;CVB;END;000\x07");
 
         assert_eq!(
             events,
@@ -492,7 +545,7 @@ mod marker_scanner_tests {
         let mut scanner = MarkerScanner::new();
 
         let mut events =
-            scanner.process(b"before\x1b]777;CVB;START\x07ONE\x1b]777;CVB;END\x07after");
+            scanner.process(b"before\x1b]777;CVB;START\x07ONE\x1b]777;CVB;END;000\x07after");
 
         events.extend(scanner.process(b"0123456789012345"));
 
@@ -504,6 +557,7 @@ mod marker_scanner_tests {
                 MarkerEvent::Data(b"ONE".to_vec()),
                 MarkerEvent::End(0),
                 MarkerEvent::Data(b"after".to_vec()),
+                MarkerEvent::Data(b"0123456789012345".to_vec()),
             ]
         );
     }
@@ -512,7 +566,7 @@ mod marker_scanner_tests {
     fn preserves_data_between_markers() {
         let mut scanner = MarkerScanner::new();
 
-        let events = scanner.process(b"\x1b]777;CVB;START\x07ONE\nTWO\n\x1b]777;CVB;END\x07");
+        let events = scanner.process(b"\x1b]777;CVB;START\x07ONE\nTWO\n\x1b]777;CVB;END;000\x07");
 
         assert_eq!(
             events,
@@ -533,7 +587,7 @@ mod marker_scanner_tests {
             Vec::<MarkerEvent>::new()
         );
 
-        let events = scanner.process(b"ART\x07ONE\x1b]777;CVB;END\x07");
+        let events = scanner.process(b"ART\x07ONE\x1b]777;CVB;END;000\x07");
 
         assert_eq!(
             events,
@@ -543,6 +597,25 @@ mod marker_scanner_tests {
                 MarkerEvent::End(0),
             ]
         );
+    }
+
+    #[test]
+    fn recognizes_nonzero_exit_status() {
+        let mut scanner = MarkerScanner::new();
+
+        assert_eq!(
+            scanner.process(b"\x1b]777;CVB;END;127\x07"),
+            vec![MarkerEvent::End(127)]
+        );
+    }
+
+    #[test]
+    fn recognizes_exit_status_marker_split_across_reads() {
+        let marker = b"\x1b]777;CVB;END;017\x07";
+        let mut scanner = MarkerScanner::new();
+
+        assert_eq!(scanner.process(&marker[..17]), Vec::<MarkerEvent>::new());
+        assert_eq!(scanner.process(&marker[17..]), vec![MarkerEvent::End(17)]);
     }
 }
 
@@ -1526,7 +1599,7 @@ fn proxy(
                         );
                     }
 
-                    MarkerEvent::End(_status) => {
+                    MarkerEvent::End(status) => {
                         let capturing_before = capture.capturing;
                         let skip_listed = std::mem::take(&mut skip_requested);
 
@@ -1552,7 +1625,7 @@ fn proxy(
                             continue;
                         }
 
-                        let rendered = render_transcript(&transcript, rows, cols);
+                        let rendered = render_transcript(&transcript, rows, cols, status);
                         let captured_bytes = rendered.len();
                         let buffer = crate::clipboard::ClipboardBuffer::new(rendered);
 
@@ -1666,7 +1739,7 @@ fn capture_screen(terminal: &mut vt100::Parser) -> Result<(), String> {
     let text = screen_viewport_to_text(terminal);
 
     let processed = if text.is_empty() {
-        NO_OUTPUT.to_string()
+        "The captured terminal screen contains no visible text.".to_string()
     } else {
         text
     };

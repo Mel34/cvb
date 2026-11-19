@@ -20,7 +20,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 START = b"\x1b]777;CVB;START\x07"
-END = b"\x1b]777;CVB;END\x07"
+END_PREFIX = b"\x1b]777;CVB;END;"
 PASTE_BEGIN = b"\x1b[200~"
 PASTE_END = b"\x1b[201~"
 DOT = "●".encode()  # the red dot CVB puts in front of the prompt
@@ -166,7 +166,7 @@ class Session:
             os.execve(str(binary), [str(binary)], env)
         self.pid, self.master = pid, master
         fcntl.ioctl(master, 0x5414, struct.pack("HHHH", 24, 100, 0, 0))
-        self.read_until(END)
+        self.read_until_end()
         self.settle()
 
     # -- terminal plumbing -------------------------------------------------
@@ -206,6 +206,24 @@ class Session:
                 return result
             if time.monotonic() > deadline:
                 raise TimeoutError(f"timed out waiting for {marker!r}; got {bytes(self.buffer)[-300:]!r}")
+            self.pump(0.1)
+
+    def read_until_end(self, timeout=15):
+        deadline = time.monotonic() + timeout
+        marker_length = len(END_PREFIX) + 4
+        while True:
+            at = self.buffer.find(END_PREFIX)
+            if at >= 0 and len(self.buffer) >= at + marker_length:
+                status = self.buffer[at + len(END_PREFIX):at + len(END_PREFIX) + 3]
+                terminator = self.buffer[at + len(END_PREFIX) + 3]
+                if status.isdigit() and terminator == 0x07:
+                    result = bytes(self.buffer[:at])
+                    del self.buffer[:at + marker_length]
+                    return result
+            if time.monotonic() > deadline:
+                raise TimeoutError(
+                    f"timed out waiting for {END_PREFIX!r}; got {bytes(self.buffer)[-300:]!r}"
+                )
             self.pump(0.1)
 
     def send(self, data):

@@ -227,8 +227,10 @@ CVB uses
 .B wl-copy
 for Wayland clipboard integration.
 .PP
-When a captured command produces no visible terminal output, CVB copies the marker
-.BR "[NO_VISIBLE_OUTPUT]" .
+When a captured command produces no visible terminal output, CVB copies a message
+stating whether the command succeeded or failed, including its exit status.
+Visible terminal output is preserved and introduced by the label
+.BR "Terminal output:" .
 .PP
 Commands listed in the skip list are an exception: when they produce no visible output the clipboard is left unchanged.
 Output, including error messages, is captured as usual.

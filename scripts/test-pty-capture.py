@@ -16,7 +16,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 START = b"\x1b]777;CVB;START\x07"
-END = b"\x1b]777;CVB;END\x07"
+END_PREFIX = b"\x1b]777;CVB;END;"
 
 passed = 0
 failed = 0
@@ -68,6 +68,37 @@ def read_until(marker, timeout=10):
 
         if not data:
             raise RuntimeError("PTY closed before expected marker")
+        buffer.extend(data)
+
+
+def read_until_end_marker(timeout=10):
+    deadline = time.monotonic() + timeout
+    while True:
+        position = buffer.find(END_PREFIX)
+        if position >= 0:
+            marker_end = position + len(END_PREFIX) + 4
+            if len(buffer) >= marker_end:
+                status = buffer[position + len(END_PREFIX):marker_end - 1]
+                if status.isdigit() and buffer[marker_end - 1] == 0x07:
+                    result = bytes(buffer[:position])
+                    del buffer[:marker_end]
+                    return result
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("timed out waiting for CVB command completion")
+
+        ready, _, _ = select.select([master], [], [], min(remaining, 0.2))
+        if not ready:
+            continue
+
+        try:
+            data = os.read(master, 65536)
+        except OSError as error:
+            raise RuntimeError(f"PTY closed: {error}") from error
+
+        if not data:
+            raise RuntimeError("PTY closed before command completion")
         buffer.extend(data)
 
 
@@ -147,7 +178,7 @@ def run_skipped(name, command, clipboard_dir, settle=0.5):
     buffer.clear()
     before = len(clipboard_files(clipboard_dir))
     os.write(master, command.encode("utf-8") + b"\n")
-    read_until(END)
+    read_until_end_marker()
     time.sleep(settle)
     after = len(clipboard_files(clipboard_dir))
     check(name, after == before, f"{after - before} new capture(s)")
@@ -235,7 +266,7 @@ number = len(files) + 1
         fcntl.ioctl(master, 0x5414, struct.pack("HHHH", 24, 80, 0, 0))
 
         try:
-            read_until(END)
+            read_until_end_marker()
             check("interactive CVB session starts", True)
 
             launch_captures = clipboard_files(clipboard_dir)
@@ -254,7 +285,7 @@ number = len(files) + 1
                 "captures ordinary command output",
                 "printf 'PTY_SINGLE_OK\\n'",
                 clipboard_dir,
-                (b"[Terminal output]", b"PTY_SINGLE_OK"),
+                (b"Terminal output:", b"PTY_SINGLE_OK"),
             )
 
             run_command(
@@ -712,7 +743,7 @@ fi""",
                 "empty capture does not retain previous output",
                 ":",
                 clipboard_dir,
-                (b"[NO_VISIBLE_OUTPUT]",),
+                (b"The command completed successfully (exit 0)",),
                 (b"PTY_ISOLATION_PREVIOUS_ONLY",),
             )
 
@@ -790,7 +821,7 @@ fi""",
             interrupted_payload = payloads[before]
             check(
                 "Ctrl+C interrupts foreground command",
-                b"[Terminal output]" in interrupted_payload,
+                b"Terminal output:" in interrupted_payload,
                 interrupted_payload,
             )
 
@@ -802,10 +833,10 @@ fi""",
             )
 
             run_command(
-                "silent failure produces no-visible-output marker",
+                "silent failure reports its nonzero exit status",
                 "false",
                 clipboard_dir,
-                (b"[NO_VISIBLE_OUTPUT]",),
+                (b"The command failed (exit 1)",),
             )
 
             run_command(
@@ -844,7 +875,7 @@ fi""",
                 "printf 'PTY_SKIP_%s\\n' NEXT",
                 clipboard_dir,
                 (b"PTY_SKIP_NEXT",),
-                (b"[NO_VISIBLE_OUTPUT]", b"%s"),
+                (b"The command completed successfully", b"%s"),
             )
             check(
                 "listed silent command adds no capture",
@@ -857,7 +888,7 @@ fi""",
                 "cd /cvb-no-such-directory",
                 clipboard_dir,
                 (b"No such file or directory",),
-                (b"[NO_VISIBLE_OUTPUT]",),
+                (b"The command failed",),
             )
 
             run_command(
@@ -871,7 +902,7 @@ fi""",
                 "unlisted silent command still captures the marker",
                 "true",
                 clipboard_dir,
-                (b"[NO_VISIBLE_OUTPUT]",),
+                (b"The command completed successfully",),
             )
 
             # Edits to the skip list apply to the running session.
@@ -880,7 +911,7 @@ fi""",
                 "removed entry is captured again",
                 "cd /",
                 clipboard_dir,
-                (b"[NO_VISIBLE_OUTPUT]",),
+                (b"The command completed successfully",),
             )
             skip_file.write_text("cd\n")
 
