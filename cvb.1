@@ -1,18 +1,21 @@
-.TH CVB 1 "October 2026" "CVB 0.7.0" "User Commands"
+.TH CVB 1 "November 2026" "CVB 0.7.0" "User Commands"
 .SH NAME
 cvb - terminal-to-LLM exchange utility
 .SH SYNOPSIS
 .B cvb
-.RI [ COMMAND ]
-.br
-.B cvb on
-.br
-.B cvb off
 .br
 .B cvb pull
 .RI [ file:PATH ]
 .RI [ cascade:N ]
 .I search-term...
+.br
+.B cvb pull
+.BI file: PATH
+.BI lines: SPEC
+.br
+.B cvb pull
+.BI callers: NAME
+.RI [ file:PATH ]
 .br
 .B cvb context
 .br
@@ -31,20 +34,30 @@ CVB can capture completed commands and their terminal output in a resident Bash 
 CVB is not a shell replacement, terminal logger, terminal database, or AI agent.
 .SH COMMANDS
 .TP
-.B on
-Start a resident CVB Bash session.
+.B (no arguments)
+Start a resident CVB Bash session. The Bash wrapper must have been sourced (see RESIDENT CAPTURE).
 
 Commands entered in the session are captured when they complete. Their visible terminal output is copied to the Wayland clipboard.
 
-The active session is indicated by a red dot in the shell prompt.
-.TP
-.B off
-End the active CVB Bash session.
-
-When used outside an active session, CVB reports that no session is running.
+The active session is indicated by a red dot in the shell prompt. The session ends with the shell's own
+.BR exit .
 .TP
 .B pull \fR[\fBfile:\fIPATH\fR] [\fBcascade:\fIN\fR] \fIsearch-term...\fR
 Search source files: Git-tracked ones and untracked ones that .gitignore does not hide. Rust is parsed syntactically by item, Bash by function, Python (.py, .pyi) by function and class, Zig (.zig) by function, test and type, C (.c, .h) and C++ (.cc, .cpp, .cxx, .hh, .hpp, .hxx) by function and type, and Markdown by heading. Other files are searched by line. Callers and cascade work on Rust only.
+
+Matching is case-sensitive. Bare terms are alternatives (OR),
+.BI + term
+is required and
+.BI - term
+excludes units that contain it (at least one positive term is needed); a quoted argument is an exact phrase.
+.BI file: PATH
+restricts the search to one file (only one is allowed) or, alone, prints the whole file.
+.BI lines: SPEC
+(N or START-END, several allowed) prints those lines of the file and cannot be combined with search terms.
+.BI callers: NAME
+lists syntactic Rust call sites.
+.BI cascade: N
+(0 to 5) adds the Rust units that the matches depend on.
 .TP
 .B context
 Print the launch context text (the manual), byte-identical to the launch clipboard.
@@ -67,8 +80,10 @@ Common terminal pagers are disabled while executing commands so their output can
 .SH RESIDENT CAPTURE
 The resident mode is normally started through the Bash wrapper supplied with CVB.
 
-Source the wrapper into the parent Bash shell before using
-.B cvb on.
+Source the wrapper into the parent Bash shell, then run
+.B cvb
+with no arguments. The session ends with
+.BR exit .
 .PP
 The wrapper creates a temporary shell-state file and starts a child Bash session. Useful parent-shell state is transferred to the child, including aliases, functions, shell options, shopt settings, and inherited environment variables.
 .PP
@@ -191,11 +206,11 @@ are ignored. A directory name is excluded wherever it occurs in the directory tr
 The initial file excludes common version-control directories:
 .PP
 .EX
-.git
-.hg
-.svn
-.bzr
-.jj
+\&.git
+\&.hg
+\&.svn
+\&.bzr
+\&.jj
 .EE
 .PP
 The file is the complete source of truth: remove an entry to include that directory, or add entries such as
@@ -324,13 +339,13 @@ a recognized patch is shown (its text, a summary of the files, and any correctio
 .B Ctrl+B
 twice applies it; any other key cancels it and is passed on to the shell. A patch pasted while another waits replaces it.
 .PP
-When a patch fails because hunks do not match the files, CVB reports the failure (nothing is modified) and offers up to five candidate locations for each failing hunk. Use the left and right arrow keys to browse candidates and
+When a patch fails because hunks do not match the files, CVB reports the failure (nothing is modified) and offers up to five candidate locations for each failing hunk. Places where only context lines differ come first; places where a line to be removed differs or is missing are offered only when there is nothing better, and the screen says how many were left out. Use the left and right arrow keys (or up and down) to browse candidates and
 .B Enter
 to select the highlighted candidate. Number keys select a candidate directly.
 .PP
-CVB copies a review bundle containing the candidate comparisons and their diffs to the clipboard. The user may paste this bundle into an assistant for help evaluating which location is semantically correct. Candidate scores are suggestions, not proof; CVB does not silently decide ambiguous relocations.
+CVB copies a review bundle to the clipboard: for each failing hunk, the patch as supplied and every candidate with its differences, its score, the enclosing scope and the surrounding file lines. The user may paste this bundle into an assistant for help evaluating which location is semantically correct. Candidate scores are suggestions, not proof; CVB does not silently decide ambiguous relocations.
 .PP
-After the last choice the corrected patch is shown, with a warning when a line to be removed differs from the one the patch named. Pressing
+After the last choice the corrected patch is shown. A warning appears when a line to be removed differs from the one the patch named (the real file line would be removed), and another when a line to be removed is not in the file (that removal is dropped and nothing is deleted for it). Pressing
 .B s
 skips (which cancels the whole patch).
 .B q ,
@@ -356,10 +371,8 @@ The CVB executable when installed system-wide.
 .TP
 .I /usr/share/cvb/cvb.bash
 Bash wrapper providing the
-.B cvb on
-and
-.B cvb off
-commands.
+.B cvb
+command that starts a session.
 .TP
 .I $XDG_RUNTIME_DIR/cvb/
 Temporary CVB shell-state and Bash initialization files.
@@ -375,16 +388,38 @@ Directory names excluded from directory inventories. If
 .B XDG_CONFIG_HOME
 is set, the file is located at
 .IR $XDG_CONFIG_HOME/cvb/ignore .
+.TP
+.I ~/.config/cvb/skip
+Commands whose output is not captured when they print nothing. If
+.B XDG_CONFIG_HOME
+is set, the file is located at
+.IR $XDG_CONFIG_HOME/cvb/skip .
+.TP
+.I $XDG_STATE_HOME/cvb/surgery/
+Journals and scratch copies of patch transactions (default
+.IR ~/.local/state/cvb/surgery/ ).
 .SH REQUIREMENTS
 CVB requires:
-.IP (bu 2
+.IP \(bu 2
 Linux
-.IP (bu 2
+.IP \(bu 2
 Bash
-.IP (bu 2
+.IP \(bu 2
 Wayland
-.IP (bu 2
+.IP \(bu 2
 wl-clipboard
+.IP \(bu 2
+git (for
+.B cvb pull
+and pasted unified diffs)
+.IP \(bu 2
+apply_patch in
+.B PATH
+(for pasted
+.B apply_patch
+patches)
+.IP \(bu 2
+the libinput, libudev and libcanberra libraries
 .SH EXIT STATUS
 .TP
 .B 0
@@ -402,7 +437,7 @@ General error or external command returned non-zero status.
 .BR wl-copy (1)
 .SH AUTHOR
 Petar Margetić
-\br
+.br
 chadgpt
 .SH LICENSE
 CVB is free software licensed under the GNU General Public License, version 3 or later.

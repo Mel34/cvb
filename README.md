@@ -22,6 +22,9 @@ CVB is designed around simple, predictable mechanisms. It is not an AI agent, sh
 * Bash
 * Wayland
 * `wl-clipboard`
+* `git`, for `cvb pull` and for pasted unified diffs
+* `apply_patch` in `PATH`, for pasted `apply_patch` patches
+* the libraries `libinput`, `libudev` and `libcanberra` (CVB links them; building needs their development files, for example `libinput-dev`, `libudev-dev` and `libcanberra-dev` on Debian and Ubuntu)
 * Rust/Cargo when building from source
 
 ## Building
@@ -40,7 +43,7 @@ target/release/cvb
 
 ## Resident capture session
 
-The `cvb on` mode starts an interactive child Bash session.
+Running `cvb` with no arguments starts an interactive child Bash session.
 
 Source the CVB Bash wrapper first:
 
@@ -51,18 +54,14 @@ source data/cvb.bash
 Then:
 
 ```text
-cvb on
+cvb
 ```
 
 The active CVB session is indicated by a red dot in the prompt.
 
 Commands entered inside the session are captured when they complete. Their visible terminal output is copied to the Wayland clipboard.
 
-To end the session:
-
-```text
-cvb off
-```
+To end the session, type `exit` at its prompt.
 
 The parent shell is left running normally after the CVB child session exits. Commands entered during the session are added to the parent shell's history.
 
@@ -224,6 +223,23 @@ The file is the complete source of truth: remove an entry to include that direct
 
 CVB does not interpret glob patterns, regular expressions, or `.gitignore` syntax.
 
+## Searching code with `cvb pull`
+
+`cvb pull` searches the files of the Git repository, tracked or untracked but not ignored, and prints line-numbered units: the smallest enclosing function, type or heading section for Rust, Bash, Python, Zig, C, C++ and Markdown, and plain lines for any other file.
+
+```text
+cvb pull foo bar          units containing foo OR bar
+cvb pull +foo +bar        units containing all + terms
+cvb pull foo -test        leave out units containing test
+cvb pull file:PATH        the whole file
+cvb pull file:PATH foo    search one file
+cvb pull file:PATH lines:10-40
+cvb pull callers:NAME     syntactic call sites (Rust)
+cvb pull +foo cascade:2   also the Rust units the matches depend on
+```
+
+Matching is case-sensitive; `lines:` cannot be combined with search terms, and only one `file:` scope is allowed. The operating manual (`manual.md`) describes the output and the limits in full.
+
 ## Pasting patches
 
 Inside a CVB session, paste a patch at the shell prompt, either in `apply_patch` format (`*** Begin Patch` ... `*** End Patch`) or as a unified diff, the output of `git diff` (`diff --git a/... b/...`, or `--- a/...` followed by `+++ b/...`). CVB applies an `apply_patch` patch with your installed `apply_patch` and a diff with `git apply` (both found in `PATH`), prints the result, copies it to the clipboard and draws the prompt again. You type no command, and nothing is added to your history.
@@ -247,7 +263,7 @@ This needs a terminal that sends bracketed paste (most do; Bash enables it by de
 
 **Review before applying.** With `CVB_PATCH_REVIEW=on` (also `1`, `true`, `yes`) a recognized patch is shown instead of applied: its text (the first and last 150 lines when it is longer than 300), a summary line naming the files and what happens to each, and any correction CVB made. Nothing is changed and the clipboard is untouched. Press `Ctrl+B` twice to apply it; any other key cancels, and that key goes on to the shell. Pasting another patch while one waits replaces it. Reading the end of the shown text is also how to notice a patch the clipboard cut short.
 
-**When hunks do not match.** If a patch fails because some hunks do not match the files (for example, a line was misquoted or the file moved), CVB reports the failure and changes nothing. It then offers up to five candidate locations for each failing hunk. Use Left/Right to browse candidates and Enter to select the displayed candidate; number keys select a candidate directly. The complete candidate comparisons are also sent through the clipboard, so they can be pasted into an LLM conversation for semantic review. Candidates are suggestions, not automatic decisions: textual similarity does not prove that a location is correct. After all choices, CVB shows the corrected patch and previews its effect. If a line to be removed differs from the one the patch named, CVB warns that the actual file line will be removed. Press `Ctrl+B` twice to apply the corrected patch. `s` skips and cancels the whole patch; `q`, Escape, or an unrecognized key cancels and passes the remaining input to the shell. There is no overall inactivity timeout; Escape is disambiguated from a split arrow-key sequence with a short 30 ms wait. This recovery works for `apply_patch` patches and unified diffs.
+**When hunks do not match.** If a patch fails because some hunks do not match the files (for example, a line was misquoted or the file moved), CVB reports the failure and changes nothing. It then offers up to five candidate locations for each failing hunk. Candidates where only context lines differ come first; places where a line to be removed differs or is missing are offered only when there is nothing better, and the screen says how many were left out. Use Left/Right (or Up/Down) to browse candidates and Enter to select the displayed candidate; number keys select a candidate directly. The complete candidate comparisons are also sent through the clipboard, so they can be pasted into an LLM conversation for semantic review. Candidates are suggestions, not automatic decisions: textual similarity does not prove that a location is correct. After all choices, CVB shows the corrected patch and previews its effect. If a line to be removed differs from the one the patch named, CVB warns that the actual file line will be removed; if a line to be removed is not in the file at all, CVB warns that this removal is dropped and nothing is deleted for it. Press `Ctrl+B` twice to apply the corrected patch. `s` skips and cancels the whole patch; `q`, Escape, or an unrecognized key cancels and passes the remaining input to the shell. There is no overall inactivity timeout; Escape is disambiguated from a split arrow-key sequence with a short 30 ms wait. This recovery works for `apply_patch` patches and unified diffs.
 
 ## External commands
 
@@ -312,13 +328,18 @@ Screen captures copy the textual contents of the currently visible terminal scre
 ## CLI
 
 ```text
-cvb on
-cvb off
+cvb
+cvb pull [file:PATH] [cascade:N] <search-term>...
+cvb pull file:PATH lines:N|START-END
+cvb pull callers:NAME [file:PATH]
+cvb context
 cvb --help
 cvb --version
 cvb <path>
 cvb <command> [args...]
 ```
+
+`cvb` with no arguments starts a resident session (see above); `cvb context` prints the operating manual that a session puts on the clipboard when it starts.
 
 There are intentionally no separate `file` or `directory` subcommands.
 
