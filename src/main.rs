@@ -433,7 +433,6 @@ fn append_directory_entries(
                 "symlink",
                 "-",
                 &metadata,
-                true,
                 &target,
             )?;
 
@@ -452,7 +451,6 @@ fn append_directory_entries(
                 "dir",
                 "-",
                 &metadata,
-                false,
                 "-",
             )?;
 
@@ -465,7 +463,6 @@ fn append_directory_entries(
                 "file",
                 &metadata.len().to_string(),
                 &metadata,
-                false,
                 "-",
             )?;
         } else {
@@ -476,7 +473,6 @@ fn append_directory_entries(
                 "other",
                 "-",
                 &metadata,
-                false,
                 "-",
             )?;
         }
@@ -492,7 +488,6 @@ fn append_inventory_entry(
     entry_type: &str,
     size: &str,
     metadata: &std::fs::Metadata,
-    symlink: bool,
     target: &str,
 ) -> Result<(), String> {
     let modified = format_system_time(
@@ -513,7 +508,7 @@ fn append_inventory_entry(
     writeln!(
         output,
         "{path}\t{name}\t{entry_type}\t{size}\t{modified}\t{created}\t{}\t{target}\t{permissions}\t{owner}\t{group}",
-        if symlink { "yes" } else { "no" }
+        if entry_type == "symlink" { "yes" } else { "no" }
     )
     .map_err(|error| format!("CVB: unable to build directory inventory: {error}"))
 }

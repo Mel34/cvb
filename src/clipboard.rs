@@ -817,32 +817,31 @@ mod tests {
 
     #[test]
     fn chunk_sequence_cancellation_stops_after_current_part() {
-        for raw_key in [0x03] {
-            let cancel_key = super::decode_chunk_key(raw_key, || None);
-            assert_eq!(cancel_key, super::ChunkKey::Cancel);
-            let chunks = vec![
-                "first framed chunk".to_string(),
-                "second framed chunk".to_string(),
-                "third framed chunk".to_string(),
-            ];
-            let mut copied = Vec::<Vec<u8>>::new();
+        let raw_key = 0x03;
+        let cancel_key = super::decode_chunk_key(raw_key, || None);
+        assert_eq!(cancel_key, super::ChunkKey::Cancel);
+        let chunks = vec![
+            "first framed chunk".to_string(),
+            "second framed chunk".to_string(),
+            "third framed chunk".to_string(),
+        ];
+        let mut copied = Vec::<Vec<u8>>::new();
 
-            super::copy_chunk_sequence_with(
-                &chunks,
-                |buffer| {
-                    copied.push(buffer.as_bytes().to_vec());
-                    Ok(())
-                },
-                || Ok(cancel_key),
-            )
-            .unwrap();
+        super::copy_chunk_sequence_with(
+            &chunks,
+            |buffer| {
+                copied.push(buffer.as_bytes().to_vec());
+                Ok(())
+            },
+            || Ok(cancel_key),
+        )
+        .unwrap();
 
-            assert_eq!(
-                copied,
-                vec![chunks[0].as_bytes().to_vec()],
-                "cancel key {cancel_key:?} must prevent later chunks from being copied"
-            );
-        }
+        assert_eq!(
+            copied,
+            vec![chunks[0].as_bytes().to_vec()],
+            "cancel key {cancel_key:?} must prevent later chunks from being copied"
+        );
     }
 
     #[test]

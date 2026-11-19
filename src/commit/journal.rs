@@ -967,8 +967,7 @@ mod tests {
         let j_path = write_journal_atomic(&base, &journal).unwrap();
         journal.state = JournalState::Committed;
         let result = write_journal_atomic_with_dir_sync(&base, &journal, |_path| {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            Err(std::io::Error::other(
                 "injected directory sync failure",
             ))
         });

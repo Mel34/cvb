@@ -411,10 +411,10 @@ impl Picker {
             hunk,
             &lines,
         ));
-        out.push_str(&format!(
+        out.push_str(
             "Left/Right browse candidates; Enter selects; 1-9 selects directly; \
-             s skips (cancels the whole patch); q or Esc cancels.\n"
-        ));
+             s skips (cancels the whole patch); q or Esc cancels.\n",
+        );
         out
     }
 }
@@ -493,8 +493,13 @@ fn candidate_review_view(
     if let Some(line) = enclosing_line(candidate, file) {
         out.push_str(&format!("  enclosing scope (nearest less-indented line above) L{}: {}\n", line + 1, file[line]));
     }
-    for line in candidate.start.saturating_sub(REVIEW_CONTEXT)..candidate.start {
-        out.push_str(&format!("  . before L{}: {}\n", line + 1, file[line]));
+    for (line, content) in file
+        .iter()
+        .enumerate()
+        .take(candidate.start)
+        .skip(candidate.start.saturating_sub(REVIEW_CONTEXT))
+    {
+        out.push_str(&format!("  . before L{}: {}\n", line + 1, content));
     }
     for pair in &candidate.pairs {
         match *pair {
@@ -517,8 +522,13 @@ fn candidate_review_view(
         }
     }
     let end = candidate.start + candidate.len;
-    for line in end..(end + REVIEW_CONTEXT).min(file.len()) {
-        out.push_str(&format!("  . after L{}: {}\n", line + 1, file[line]));
+    for (line, content) in file
+        .iter()
+        .enumerate()
+        .take((end + REVIEW_CONTEXT).min(file.len()))
+        .skip(end)
+    {
+        out.push_str(&format!("  . after L{}: {}\n", line + 1, content));
     }
     out
 }
