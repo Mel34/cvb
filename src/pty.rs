@@ -1090,13 +1090,25 @@ fn picker_input(
     stdout: &io::Stdout,
     screen_terminal: &mut vt100::Parser,
 ) -> Result<Vec<u8>, String> {
-    use crate::patch::deliver;
-    use crate::patch::picker::{ARMED_NOTE, CANCELLED_NOTE, CONFIRM_NOTE, Step};
-
     let Some(active) = state.picker.as_mut() else {
         return Ok(bytes);
     };
-    match active.feed(&bytes) {
+    let step = active.feed(&bytes);
+    picker_step(state, step, master, child, stdout, screen_terminal)
+}
+
+fn picker_step(
+    state: &mut PatchState,
+    step: crate::patch::picker::Step,
+    master: &OwnedFd,
+    child: Pid,
+    stdout: &io::Stdout,
+    screen_terminal: &mut vt100::Parser,
+) -> Result<Vec<u8>, String> {
+    use crate::patch::deliver;
+    use crate::patch::picker::{ARMED_NOTE, CANCELLED_NOTE, CONFIRM_NOTE, Step};
+
+    match step {
         Step::Waiting { just_armed } => {
             if just_armed {
                 show_note(ARMED_NOTE, master, stdout, screen_terminal)?;
@@ -1241,7 +1253,18 @@ fn proxy(
             nix::poll::PollFd::new(keybind_fd, nix::poll::PollFlags::POLLIN),
         ];
 
-        match nix::poll::poll(&mut poll_fds, patch_input.poll_timeout_ms(Instant::now())) {
+        let now = Instant::now();
+        let picker_timeout = patch_state
+            .picker
+            .as_ref()
+            .and_then(|picker| picker.poll_timeout_ms(now));
+        let poll_timeout = match (patch_input.poll_timeout_ms(now), picker_timeout) {
+            (Some(left), Some(right)) => Some(left.min(right)),
+            (Some(timeout), None) | (None, Some(timeout)) => Some(timeout),
+            (None, None) => None,
+        };
+
+        match nix::poll::poll(&mut poll_fds, poll_timeout) {
             Ok(_) => {}
             Err(nix::errno::Errno::EINTR) => continue,
             Err(error) => return Err(format!("CVB: PTY poll failed: {error}")),
@@ -1249,7 +1272,8 @@ fn proxy(
 
         // A held partial marker (an Escape key) or a stalled patch paste goes to
         // the shell once its deadline has passed.
-        let due = patch_input.flush_if_due(Instant::now());
+        let now = Instant::now();
+        let due = patch_input.flush_if_due(now);
         if !due.is_empty() {
             dispatch_paste_events(
                 due,
@@ -1259,6 +1283,32 @@ fn proxy(
                 &mut screen_terminal,
                 &mut patch_state,
             )?;
+        }
+
+        let picker_due = patch_state
+            .picker
+            .as_mut()
+            .and_then(|picker| picker.flush_if_due(now));
+        if let Some(step) = picker_due {
+            let incoming = picker_step(
+                &mut patch_state,
+                step,
+                master,
+                child,
+                &stdout,
+                &mut screen_terminal,
+            )?;
+            if !incoming.is_empty() {
+                let events = patch_input.feed(&incoming, !capture.capturing, now);
+                dispatch_paste_events(
+                    events,
+                    master,
+                    child,
+                    &stdout,
+                    &mut screen_terminal,
+                    &mut patch_state,
+                )?;
+            }
         }
 
         let stdin_events = poll_fds[0]

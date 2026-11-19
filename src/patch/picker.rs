@@ -11,6 +11,7 @@
 //! in, decision out); `pty.rs` does the printing, the preview and the applying.
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use crate::patch::hunks::{FilePatch, Hunk, LineKind, matches, read};
 use crate::patch::near::{Candidate, Pair, candidates};
@@ -23,6 +24,7 @@ const MAX_EXPECTED_LINES: usize = 14;
 const MAX_CANDIDATE_LINES: usize = 24;
 /// Longest line shown whole.
 const MAX_LINE_CHARS: usize = 110;
+const ESCAPE_SEQUENCE_WAIT: Duration = Duration::from_millis(30);
 
 /// One hunk that does not match, with the places it could belong.
 #[derive(Debug)]
@@ -44,6 +46,9 @@ pub(crate) struct Picker {
     picks: Vec<usize>,
     /// Candidate currently being inspected for the next undecided hunk.
     selected: usize,
+    /// An Escape sequence split across terminal reads.
+    pending_escape: Vec<u8>,
+    escape_deadline: Option<Instant>,
     armed: bool,
 }
 
@@ -106,6 +111,8 @@ impl Picker {
             items,
             picks: Vec::new(),
             selected: 0,
+            pending_escape: Vec::new(),
+            escape_deadline: None,
             armed: false,
         })
     }
@@ -187,18 +194,30 @@ impl Picker {
 
     /// Feeds input read from the terminal, byte by byte.
     pub(crate) fn feed(&mut self, bytes: &[u8]) -> Step {
+        self.feed_at(bytes, Instant::now())
+    }
+
+    fn feed_at(&mut self, bytes: &[u8], now: Instant) -> Step {
+        let mut input = std::mem::take(&mut self.pending_escape);
+        input.extend_from_slice(bytes);
+        self.escape_deadline = None;
+
         let mut changed = false;
         let mut just_armed = false;
+        let started_confirming = self.confirming();
         let mut at = 0;
 
-        while at < bytes.len() {
+        while at < input.len() {
             if self.confirming() {
-                let byte = bytes[at];
+                let byte = input[at];
                 if byte != CONFIRM_KEY {
-                    return Step::Cancel { rest: bytes[at..].to_vec() };
+                    return Step::Cancel { rest: input[at..].to_vec() };
                 }
                 if self.armed {
-                    return Step::Apply { text: self.corrected(), rest: bytes[at + 1..].to_vec() };
+                    return Step::Apply {
+                        text: self.corrected(),
+                        rest: input[at + 1..].to_vec(),
+                    };
                 }
                 self.armed = true;
                 just_armed = true;
@@ -207,26 +226,24 @@ impl Picker {
             }
 
             let current = self.picks.len();
-            let byte = bytes[at];
+            let byte = input[at];
 
-            // CSI and SS3 cursor sequences. Terminals normally deliver each
-            // sequence together; unknown sequences are handed back to Bash.
+            // CSI and SS3 cursor sequences. Retain incomplete sequences so
+            // an arrow key split across PTY reads is still recognized.
             if byte == 0x1b {
-                let rest = &bytes[at..];
-                let direction = if rest.starts_with(b"\x1b[D")
-                    || rest.starts_with(b"\x1bOD")
-                {
-                    Some(false)
-                } else if rest.starts_with(b"\x1b[C")
-                    || rest.starts_with(b"\x1bOC")
-                {
-                    Some(true)
-                } else if rest.starts_with(b"\x1b[A") {
-                    Some(false)
-                } else if rest.starts_with(b"\x1b[B") {
-                    Some(true)
-                } else {
-                    None
+                let rest = &input[at..];
+                if rest.len() == 1 || (rest.len() == 2 && matches!(rest[1], b'[' | b'O')) {
+                    self.pending_escape.extend_from_slice(rest);
+                    self.escape_deadline = Some(now + ESCAPE_SEQUENCE_WAIT);
+                    break;
+                }
+
+                let direction = match (rest.get(1), rest.get(2)) {
+                    (Some(b'['), Some(b'D')) | (Some(b'O'), Some(b'D')) => Some(false),
+                    (Some(b'['), Some(b'C')) | (Some(b'O'), Some(b'C')) => Some(true),
+                    (Some(b'['), Some(b'A')) => Some(false),
+                    (Some(b'['), Some(b'B')) => Some(true),
+                    _ => None,
                 };
 
                 if let Some(forward) = direction {
@@ -238,16 +255,12 @@ impl Picker {
                         self.selected.saturating_sub(1)
                     };
                     changed |= self.selected != previous;
-                    at += if rest.starts_with(b"\x1bO") { 3 } else { 3 };
+                    at += 3;
                     continue;
                 }
 
-                // A lone Escape cancels and is consumed. Other unknown
-                // sequences are returned to the shell unchanged.
-                if rest.len() == 1 {
-                    return Step::Cancel { rest: bytes[at + 1..].to_vec() };
-                }
-                return Step::Cancel { rest: bytes[at..].to_vec() };
+                // Unknown sequences are returned to the shell unchanged.
+                return Step::Cancel { rest: rest.to_vec() };
             }
 
             match byte {
@@ -256,16 +269,6 @@ impl Picker {
                     self.picks.push(self.selected);
                     self.selected = 0;
                     at += 1;
-                    if self.confirming() {
-                        let tail = &bytes[at..];
-                        if tail.is_empty() {
-                            return self.confirm_step();
-                        }
-                        return match self.feed(tail) {
-                            Step::Waiting { .. } => self.confirm_step(),
-                            other => other,
-                        };
-                    }
                     changed = true;
                 }
                 b'1'..=b'9' => {
@@ -277,28 +280,43 @@ impl Picker {
                     self.picks.push(choice);
                     self.selected = 0;
                     at += 1;
-                    if self.confirming() {
-                        // Input after the last choice still counts: a Ctrl+B
-                        // in the same read arms the confirmation.
-                        let tail = &bytes[at..];
-                        if tail.is_empty() {
-                            return self.confirm_step();
-                        }
-                        return match self.feed(tail) {
-                            Step::Waiting { .. } => self.confirm_step(),
-                            other => other,
-                        };
-                    }
                     changed = true;
                 }
-                _ => return Step::Cancel { rest: bytes[at..].to_vec() },
+                _ => return Step::Cancel { rest: input[at..].to_vec() },
             }
         }
 
-        if changed {
+        if self.confirming() && !started_confirming {
+            self.confirm_step()
+        } else if changed {
             Step::Show(self.view_item(self.picks.len()))
         } else {
             Step::Waiting { just_armed }
+        }
+    }
+
+    /// Milliseconds until a partial Escape sequence must be resolved.
+    pub(crate) fn poll_timeout_ms(&self, now: Instant) -> Option<u16> {
+        let deadline = self.escape_deadline?;
+        let left = deadline.saturating_duration_since(now);
+        let millis = left.as_millis()
+            + u128::from(left.subsec_nanos() % 1_000_000 != 0);
+        Some(millis.min(u128::from(u16::MAX)) as u16)
+    }
+
+    /// Resolves a partial Escape sequence after the terminal-read timeout.
+    pub(crate) fn flush_if_due(&mut self, now: Instant) -> Option<Step> {
+        let deadline = self.escape_deadline?;
+        if now < deadline {
+            return None;
+        }
+
+        self.escape_deadline = None;
+        let pending = std::mem::take(&mut self.pending_escape);
+        if pending == b"\x1b" {
+            Some(Step::Cancel { rest: Vec::new() })
+        } else {
+            Some(Step::Cancel { rest: pending })
         }
     }
 
@@ -371,7 +389,7 @@ impl Picker {
             &lines,
         ));
         out.push_str(&format!(
-            "Left/Right browse candidates; Enter selects; 1-5 selects directly; \
+            "Left/Right browse candidates; Enter selects; 1-9 selects directly; \
              s skips (cancels the whole patch); q or Esc cancels.\n"
         ));
         out
@@ -649,6 +667,59 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn arrow_sequences_split_across_reads_are_recognized() {
+        let mut p = two_candidate_picker();
+        let now = Instant::now();
+
+        assert_eq!(
+            p.feed_at(b"\x1b", now),
+            Step::Waiting { just_armed: false }
+        );
+        assert_eq!(
+            p.feed_at(b"[", now + Duration::from_millis(5)),
+            Step::Waiting { just_armed: false }
+        );
+
+        match p.feed_at(b"C", now + Duration::from_millis(10)) {
+            Step::Show(view) => assert!(view.contains("Candidate 2 of 2"), "{view}"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(p.poll_timeout_ms(now + Duration::from_millis(10)), None);
+    }
+
+    #[test]
+    fn a_lone_escape_cancels_only_after_its_deadline() {
+        let mut p = two_candidate_picker();
+        let now = Instant::now();
+
+        assert_eq!(
+            p.feed_at(b"\x1b", now),
+            Step::Waiting { just_armed: false }
+        );
+        assert_eq!(p.poll_timeout_ms(now), Some(30));
+        assert_eq!(p.flush_if_due(now + Duration::from_millis(29)), None);
+        assert_eq!(
+            p.flush_if_due(now + Duration::from_millis(30)),
+            Some(Step::Cancel { rest: Vec::new() })
+        );
+    }
+
+    #[test]
+    fn an_incomplete_non_escape_sequence_is_returned_to_the_shell() {
+        let mut p = two_candidate_picker();
+        let now = Instant::now();
+
+        assert_eq!(
+            p.feed_at(b"\x1b[", now),
+            Step::Waiting { just_armed: false }
+        );
+        assert_eq!(
+            p.flush_if_due(now + ESCAPE_SEQUENCE_WAIT),
+            Some(Step::Cancel { rest: b"\x1b[".to_vec() })
+        );
     }
 
     #[test]
