@@ -42,6 +42,8 @@ pub(crate) struct Picker {
     items: Vec<Item>,
     /// Candidate chosen for `items[i]`, for each `i` already decided.
     picks: Vec<usize>,
+    /// Candidate currently being inspected for the next undecided hunk.
+    selected: usize,
     armed: bool,
 }
 
@@ -103,6 +105,7 @@ impl Picker {
             originals,
             items,
             picks: Vec::new(),
+            selected: 0,
             armed: false,
         })
     }
@@ -122,16 +125,75 @@ impl Picker {
         )
     }
 
+    /// All alternatives, with untruncated source lines, for external review.
+    /// This is copied once when the picker opens; navigation does not replace it.
+    pub(crate) fn review_bundle(&self) -> String {
+        let mut out = String::from(
+            "CVB FAILED-HUNK REVIEW\n\
+             The patch failed to match the current files. No changes have been made.\n\
+             Candidates are suggestions, not automatic decisions.\n",
+        );
+
+        for (index, item) in self.items.iter().enumerate() {
+            let file = &self.files[item.file];
+            let hunk = &file.hunks[item.hunk];
+            let lines: Vec<&str> = self.originals[&file.path].lines().collect();
+
+            out.push_str(&format!(
+                "\n========== HUNK {} OF {} ==========\n\
+                 File: {}\n\
+                 Patch hunk: {} of {}\n",
+                index + 1,
+                self.items.len(),
+                file.path,
+                item.hunk + 1,
+                file.hunks.len(),
+            ));
+            if let Some(start) = hunk.old_start {
+                out.push_str(&format!("Original line hint: {start}\n"));
+            }
+
+            out.push_str("Patch as supplied:\n");
+            for line in &hunk.lines {
+                let mark = match line.kind {
+                    LineKind::Context => ' ',
+                    LineKind::Remove => '-',
+                    LineKind::Add => '+',
+                };
+                out.push_str(&format!("{mark}{}\n", line.text));
+            }
+
+            out.push_str("\nCandidate comparisons:\n");
+            for (number, candidate) in item.candidates.iter().enumerate() {
+                out.push_str(&candidate_review_view(
+                    number + 1,
+                    candidate,
+                    hunk,
+                    &lines,
+                ));
+            }
+        }
+
+        out.push_str(
+            "\nPlease compare the alternatives semantically. \
+             A higher textual score does not prove that a location is correct.\n",
+        );
+        out
+    }
+
     fn confirming(&self) -> bool {
         self.picks.len() == self.items.len()
     }
 
     /// Feeds input read from the terminal, byte by byte.
     pub(crate) fn feed(&mut self, bytes: &[u8]) -> Step {
-        let mut shown = String::new();
+        let mut changed = false;
         let mut just_armed = false;
-        for (at, &byte) in bytes.iter().enumerate() {
+        let mut at = 0;
+
+        while at < bytes.len() {
             if self.confirming() {
+                let byte = bytes[at];
                 if byte != CONFIRM_KEY {
                     return Step::Cancel { rest: bytes[at..].to_vec() };
                 }
@@ -140,21 +202,62 @@ impl Picker {
                 }
                 self.armed = true;
                 just_armed = true;
+                at += 1;
                 continue;
             }
+
             let current = self.picks.len();
+            let byte = bytes[at];
+
+            // CSI and SS3 cursor sequences. Terminals normally deliver each
+            // sequence together; unknown sequences are handed back to Bash.
+            if byte == 0x1b {
+                let rest = &bytes[at..];
+                let direction = if rest.starts_with(b"\x1b[D")
+                    || rest.starts_with(b"\x1bOD")
+                {
+                    Some(false)
+                } else if rest.starts_with(b"\x1b[C")
+                    || rest.starts_with(b"\x1bOC")
+                {
+                    Some(true)
+                } else if rest.starts_with(b"\x1b[A") {
+                    Some(false)
+                } else if rest.starts_with(b"\x1b[B") {
+                    Some(true)
+                } else {
+                    None
+                };
+
+                if let Some(forward) = direction {
+                    let previous = self.selected;
+                    let last = self.items[current].candidates.len() - 1;
+                    self.selected = if forward {
+                        (self.selected + 1).min(last)
+                    } else {
+                        self.selected.saturating_sub(1)
+                    };
+                    changed |= self.selected != previous;
+                    at += if rest.starts_with(b"\x1bO") { 3 } else { 3 };
+                    continue;
+                }
+
+                // A lone Escape cancels and is consumed. Other unknown
+                // sequences are returned to the shell unchanged.
+                if rest.len() == 1 {
+                    return Step::Cancel { rest: bytes[at + 1..].to_vec() };
+                }
+                return Step::Cancel { rest: bytes[at..].to_vec() };
+            }
+
             match byte {
                 b's' | b'q' => return Step::Cancel { rest: Vec::new() },
-                b'1'..=b'9' => {
-                    let choice = usize::from(byte - b'1');
-                    if choice >= self.items[current].candidates.len() {
-                        continue;
-                    }
-                    self.picks.push(choice);
+                b'\r' | b'\n' => {
+                    self.picks.push(self.selected);
+                    self.selected = 0;
+                    at += 1;
                     if self.confirming() {
-                        // Input after the last choice still counts: a Ctrl+B
-                        // in the same read arms the confirmation.
-                        let tail = &bytes[at + 1..];
+                        let tail = &bytes[at..];
                         if tail.is_empty() {
                             return self.confirm_step();
                         }
@@ -163,15 +266,39 @@ impl Picker {
                             other => other,
                         };
                     }
-                    shown.push_str(&self.view_item(self.picks.len()));
+                    changed = true;
+                }
+                b'1'..=b'9' => {
+                    let choice = usize::from(byte - b'1');
+                    if choice >= self.items[current].candidates.len() {
+                        at += 1;
+                        continue;
+                    }
+                    self.picks.push(choice);
+                    self.selected = 0;
+                    at += 1;
+                    if self.confirming() {
+                        // Input after the last choice still counts: a Ctrl+B
+                        // in the same read arms the confirmation.
+                        let tail = &bytes[at..];
+                        if tail.is_empty() {
+                            return self.confirm_step();
+                        }
+                        return match self.feed(tail) {
+                            Step::Waiting { .. } => self.confirm_step(),
+                            other => other,
+                        };
+                    }
+                    changed = true;
                 }
                 _ => return Step::Cancel { rest: bytes[at..].to_vec() },
             }
         }
-        if shown.is_empty() {
-            Step::Waiting { just_armed }
+
+        if changed {
+            Step::Show(self.view_item(self.picks.len()))
         } else {
-            Step::Show(shown)
+            Step::Waiting { just_armed }
         }
     }
 
@@ -232,13 +359,20 @@ impl Picker {
         }
         out.push_str(".\nThe patch expects:\n");
         out.push_str(&expected_view(hunk));
-        for (number, candidate) in item.candidates.iter().enumerate() {
-            out.push_str(&candidate_view(number + 1, candidate, hunk, &lines));
-        }
-        let top = item.candidates.len();
-        let keys = if top == 1 { "1".to_string() } else { format!("1-{top}") };
         out.push_str(&format!(
-            "Press {keys} to choose, s to skip (cancels the whole patch), q to cancel.\n"
+            "\nCandidate {} of {}:\n",
+            self.selected + 1,
+            item.candidates.len()
+        ));
+        out.push_str(&candidate_view(
+            self.selected + 1,
+            &item.candidates[self.selected],
+            hunk,
+            &lines,
+        ));
+        out.push_str(&format!(
+            "Left/Right browse candidates; Enter selects; 1-5 selects directly; \
+             s skips (cancels the whole patch); q or Esc cancels.\n"
         ));
         out
     }
@@ -291,6 +425,47 @@ fn candidate_view(number: usize, candidate: &Candidate, hunk: &Hunk, file: &[&st
             }
             Pair::Missing { old: o } => {
                 out.push_str(&format!("    - not in file: {}\n", cut(old[o].1)));
+            }
+        }
+    }
+    out
+}
+
+/// Complete candidate data for the clipboard review bundle. Unlike the
+/// terminal view, this deliberately preserves long lines and every pair.
+fn candidate_review_view(
+    number: usize,
+    candidate: &Candidate,
+    hunk: &Hunk,
+    file: &[&str],
+) -> String {
+    let old = hunk.old_side();
+    let first = candidate.start + 1;
+    let last = candidate.start + candidate.len;
+    let confidence = if candidate.loose { "LOOSE" } else { "STRICT" };
+    let mut out = format!(
+        "\n[{number}] lines {first}-{last}; {confidence}; score {:.3}; {} changed line(s)\n",
+        candidate.score,
+        candidate.changed,
+    );
+
+    for pair in &candidate.pairs {
+        match *pair {
+            Pair::Both { old: o, line } => {
+                let expected = old[o].1;
+                let actual = file[line];
+                if expected.trim() == actual.trim() {
+                    out.push_str(&format!("  = file L{}: {actual}\n", line + 1));
+                } else {
+                    out.push_str(&format!("  ! expected: {expected}\n"));
+                    out.push_str(&format!("  ! actual L{}: {actual}\n", line + 1));
+                }
+            }
+            Pair::Extra { line } => {
+                out.push_str(&format!("  + file-only L{}: {}\n", line + 1, file[line]));
+            }
+            Pair::Missing { old: o } => {
+                out.push_str(&format!("  - patch-only: {}\n", old[o].1));
             }
         }
     }
@@ -370,7 +545,7 @@ mod tests {
         assert!(view.contains("expected:      let a = 11;") || view.contains("expected: "), "{view}");
         assert!(view.contains("let a = 1;"), "{view}");
         assert!(view.contains("[1] lines 1-4"), "{view}");
-        assert!(view.contains("Press 1 to choose, s to skip (cancels the whole patch), q to cancel."), "{view}");
+        assert!(view.contains("Left/Right browse candidates; Enter selects"), "{view}");
     }
 
     #[test]
@@ -434,11 +609,57 @@ mod tests {
     #[test]
     fn an_unknown_key_cancels_and_is_handed_on_whole() {
         let mut p = picker(&one_hunk());
-        assert_eq!(p.feed(b"\x1b[A"), Step::Cancel { rest: b"\x1b[A".to_vec() });
-        let mut p = picker(&one_hunk());
-        assert_eq!(p.feed(b"\r"), Step::Cancel { rest: b"\r".to_vec() });
+        assert_eq!(p.feed(b"z"), Step::Cancel { rest: b"z".to_vec() });
         let mut p = picker(&one_hunk());
         assert_eq!(p.feed(&[CONFIRM_KEY]), Step::Cancel { rest: vec![CONFIRM_KEY] });
+    }
+
+    fn two_candidate_picker() -> Picker {
+        let file = concat!(
+            "fn first_here() {\n",
+            "    let a = 1;\n",
+            "    let b = 2;\n",
+            "}\n",
+            "\n",
+            "fn second_here() {\n",
+            "    let a = 1;\n",
+            "    let b = 2;\n",
+            "}\n",
+        );
+        let text = envelope(
+            "*** Update File: f\n@@\n fn missing() {\n     let a = 1;\n-    let b = 22;\n+    let b = 5;\n }\n",
+        );
+        let originals = HashMap::from([("f".to_string(), file.to_string())]);
+        Picker::new(&text, Format::ApplyPatch, originals).expect("two candidates")
+    }
+
+    #[test]
+    fn arrow_keys_browse_candidates_and_enter_selects_the_highlighted_one() {
+        let mut p = two_candidate_picker();
+        assert!(p.first_view().contains("Candidate 1 of 2"));
+
+        match p.feed(b"\x1b[C") {
+            Step::Show(view) => assert!(view.contains("Candidate 2 of 2"), "{view}"),
+            other => panic!("{other:?}"),
+        }
+
+        match p.feed(b"\r") {
+            Step::Confirm { patch, .. } => {
+                assert!(patch.contains("fn second_here()"), "{patch}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_review_bundle_contains_all_candidates_and_untruncated_differences() {
+        let p = two_candidate_picker();
+        let bundle = p.review_bundle();
+        assert!(bundle.contains("CVB FAILED-HUNK REVIEW"), "{bundle}");
+        assert!(bundle.contains("fn missing()"), "{bundle}");
+    assert!(bundle.contains("actual L1: fn first_here()"), "{bundle}");
+    assert!(bundle.contains("actual L6: fn second_here()"), "{bundle}");
+        assert!(bundle.contains("LOOSE"), "{bundle}");
     }
 
     #[test]

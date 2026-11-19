@@ -993,8 +993,38 @@ fn apply_and_present(
     present_patch_report(&report, master, stdout, screen_terminal)?;
     if let Some(picker) = picker {
         debug_log("patch_picker_open", &format!("hunks={}", picker.hunk_count()));
-        show_note(&picker.first_view(), master, stdout, screen_terminal)?;
+        let first_view = picker.first_view();
+        let review_bundle = picker.review_bundle();
         state.picker = Some(picker);
+        show_note(&first_view, master, stdout, screen_terminal)?;
+
+        let buffer = crate::clipboard::ClipboardBuffer::new(review_bundle.into_bytes());
+        match crate::clipboard::process_with_outcome(&buffer) {
+            Ok(crate::clipboard::ChunkSequenceOutcome::Completed) => {
+                show_note(
+                    "CVB patch: all candidate comparisons copied to the clipboard. Paste them here for review.\n",
+                    master,
+                    stdout,
+                    screen_terminal,
+                )?;
+            }
+            Ok(crate::clipboard::ChunkSequenceOutcome::Cancelled) => {
+                show_note(
+                    "CVB patch: clipboard transfer stopped before all review parts were copied.\n",
+                    master,
+                    stdout,
+                    screen_terminal,
+                )?;
+            }
+            Err(error) => {
+                show_note(
+                    &format!("CVB patch: could not copy candidate comparisons: {error}\n"),
+                    master,
+                    stdout,
+                    screen_terminal,
+                )?;
+            }
+        }
     }
     Ok(())
 }
