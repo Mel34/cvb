@@ -356,20 +356,34 @@ impl Picker {
         reanchor(&self.text, self.format, &self.files, &choices, &self.originals)
     }
 
-    fn any_loose(&self) -> bool {
-        self.picks
-            .iter()
-            .enumerate()
-            .any(|(i, &pick)| self.items[i].candidates[pick].loose)
+    /// Over every pick made so far: how many removed lines are replaced by the
+    /// real line of the file, and how many are not in the file and are dropped.
+    fn removal_effects(&self) -> (usize, usize) {
+        let (mut replaced, mut dropped) = (0, 0);
+        for (item, &pick) in self.items.iter().zip(&self.picks) {
+            let file = &self.files[item.file];
+            let lines: Vec<&str> = self.originals[&file.path].lines().collect();
+            let (r, d) = removal_effects(&item.candidates[pick], &file.hunks[item.hunk], &lines);
+            replaced += r;
+            dropped += d;
+        }
+        (replaced, dropped)
     }
 
     fn confirm_view(&self) -> String {
         let mut out = String::from("CVB patch: corrected patch (hunks moved to the chosen places):\n");
         out.push_str(&clip(&self.corrected()));
-        if self.any_loose() {
+        let (replaced, dropped) = self.removal_effects();
+        if replaced > 0 {
             out.push_str(
                 "WARNING: for at least one hunk the line to be removed differs from what the patch named;\n\
                  the real line in the file is the one that will be removed. Check the lines above.\n",
+            );
+        }
+        if dropped > 0 {
+            out.push_str(
+                "WARNING: for at least one hunk a line the patch asked to remove is not in the file;\n\
+                 that removal is dropped and nothing is deleted for it. Check the lines above.\n",
             );
         }
         out
@@ -433,6 +447,26 @@ fn expected_view(hunk: &Hunk) -> String {
     out
 }
 
+/// What applying `candidate` does to the hunk's removed lines: how many are
+/// replaced by the real, different line of the file, and how many are not in the
+/// file at all, so that their removal is dropped from the corrected hunk.
+fn removal_effects(candidate: &Candidate, hunk: &Hunk, file: &[&str]) -> (usize, usize) {
+    let old = hunk.old_side();
+    let (mut replaced, mut dropped) = (0, 0);
+    for pair in &candidate.pairs {
+        match *pair {
+            Pair::Both { old: o, line }
+                if old[o].0 == LineKind::Remove && old[o].1.trim() != file[line].trim() =>
+            {
+                replaced += 1;
+            }
+            Pair::Missing { old: o } if old[o].0 == LineKind::Remove => dropped += 1,
+            _ => {}
+        }
+    }
+    (replaced, dropped)
+}
+
 /// One candidate: where it is, how it differs, and its lines side by side.
 fn candidate_view(number: usize, candidate: &Candidate, hunk: &Hunk, file: &[&str]) -> String {
     let old = hunk.old_side();
@@ -444,7 +478,14 @@ fn candidate_view(number: usize, candidate: &Candidate, hunk: &Hunk, file: &[&st
         let plural = if candidate.changed == 1 { "" } else { "s" };
         format!("{} line{plural} differ", candidate.changed)
     };
-    let loose = if candidate.loose { "; a line to remove differs" } else { "" };
+    let (replaced, dropped) = removal_effects(candidate, hunk, file);
+    let mut loose = String::new();
+    if replaced > 0 {
+        loose.push_str("; a line to remove differs");
+    }
+    if dropped > 0 {
+        loose.push_str("; a line to remove is not in the file, so that removal is dropped");
+    }
     let mut out = format!("[{number}] lines {first}-{last}: {how}{loose}\n");
     for (shown, pair) in candidate.pairs.iter().enumerate() {
         if shown == MAX_CANDIDATE_LINES {
@@ -465,7 +506,8 @@ fn candidate_view(number: usize, candidate: &Candidate, hunk: &Hunk, file: &[&st
                 out.push_str(&format!("    + only in file: {}\n", cut(file[line])));
             }
             Pair::Missing { old: o } => {
-                out.push_str(&format!("    - not in file: {}\n", cut(old[o].1)));
+                let dropped = if old[o].0 == LineKind::Remove { " (removal dropped)" } else { "" };
+                out.push_str(&format!("    - not in file{dropped}: {}\n", cut(old[o].1)));
             }
         }
     }
@@ -489,6 +531,17 @@ fn candidate_review_view(
         candidate.score,
         candidate.changed,
     );
+    let (replaced, dropped) = removal_effects(candidate, hunk, file);
+    if replaced > 0 {
+        out.push_str(&format!(
+            "  removal: {replaced} line(s) to remove differ; the real file line would be removed instead\n"
+        ));
+    }
+    if dropped > 0 {
+        out.push_str(&format!(
+            "  removal: {dropped} line(s) to remove are not in the file; those removals would be dropped\n"
+        ));
+    }
 
     if let Some(line) = enclosing_line(candidate, file) {
         out.push_str(&format!("  enclosing scope (nearest less-indented line above) L{}: {}\n", line + 1, file[line]));
@@ -517,7 +570,8 @@ fn candidate_review_view(
                 out.push_str(&format!("  + file-only L{}: {}\n", line + 1, file[line]));
             }
             Pair::Missing { old: o } => {
-                out.push_str(&format!("  - patch-only: {}\n", old[o].1));
+                let dropped = if old[o].0 == LineKind::Remove { " (removal dropped)" } else { "" };
+                out.push_str(&format!("  - patch-only{dropped}: {}\n", old[o].1));
             }
         }
     }
@@ -556,7 +610,7 @@ fn not_shown_note(shown: usize, not_shown: NotShown) -> Option<String> {
     }
     if not_shown.loose_hidden > 0 {
         parts.push(format!(
-            "{} looser place{} (a line to remove differs) hidden because exact ones exist",
+            "{} looser place{} (a line to remove differs or is missing) hidden because exact ones exist",
             not_shown.loose_hidden,
             if not_shown.loose_hidden == 1 { "" } else { "s" }
         ));
@@ -904,9 +958,75 @@ mod tests {
         // The line to remove is misquoted: the real line would be removed.
         let text = envelope("*** Update File: f\n@@\n fn main() {\n     let a = 1;\n-    let b = 20;\n+    let b = 5;\n     let c = 3;\n");
         let mut p = picker(&text);
+        let first = p.first_view();
+        assert!(first.contains("; a line to remove differs\n"), "{first}");
+        assert!(!first.contains("dropped"), "{first}");
+        let bundle = p.review_bundle();
+        assert!(bundle.contains("removal: 1 line(s) to remove differ; the real file line would be removed instead"), "{bundle}");
+        assert!(!bundle.contains("dropped"), "{bundle}");
         let Step::Confirm { view, patch } = p.feed(b"1") else { panic!() };
         assert!(view.contains("WARNING"), "{view}");
+        assert!(view.contains("the real line in the file is the one that will be removed"), "{view}");
+        assert!(!view.contains("removal is dropped"), "{view}");
         assert!(patch.contains("-    let b = 2;"), "{patch}");
+    }
+
+    /// The line to remove is not in the file at all: the corrected hunk removes
+    /// nothing for it, and the warning must say that, not that a real line goes.
+    const MISSING_REMOVED: &str = "*** Update File: f\n@@\n fn main() {\n     let a = 1;\n-    let zz = 9;\n+    let b = 5;\n     let b = 2;\n";
+
+    #[test]
+    fn a_removed_line_that_is_not_in_the_file_is_warned_about_as_dropped() {
+        let mut p = picker(&envelope(MISSING_REMOVED));
+        let first = p.first_view();
+        assert!(first.contains("a line to remove is not in the file, so that removal is dropped"), "{first}");
+        assert!(first.contains("- not in file (removal dropped):     let zz = 9;"), "{first}");
+        assert!(!first.contains("a line to remove differs"), "{first}");
+        let bundle = p.review_bundle();
+        assert!(bundle.contains("removal: 1 line(s) to remove are not in the file; those removals would be dropped"), "{bundle}");
+        assert!(bundle.contains("- patch-only (removal dropped):     let zz = 9;"), "{bundle}");
+
+        let Step::Confirm { view, patch } = p.feed(b"1") else { panic!() };
+        assert!(view.contains("that removal is dropped and nothing is deleted for it"), "{view}");
+        assert!(!view.contains("the real line in the file is the one that will be removed"), "{view}");
+        assert!(!patch.lines().any(|l| l.starts_with('-')), "no line is removed: {patch}");
+        assert!(patch.contains("+    let b = 5;\n     let b = 2;\n"), "{patch}");
+    }
+
+    #[test]
+    fn a_dropped_removal_in_a_diff_is_warned_about_the_same_way() {
+        let diff = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,4 +1,4 @@\n fn main() {\n     let a = 1;\n-    let zz = 9;\n+    let b = 5;\n     let b = 2;\n";
+        let mut p = Picker::new(diff, Format::GitDiff, originals()).unwrap();
+        let Step::Confirm { view, patch } = p.feed(b"1") else { panic!() };
+        assert!(view.contains("that removal is dropped and nothing is deleted for it"), "{view}");
+        assert!(!view.contains("the real line in the file is the one that will be removed"), "{view}");
+        assert!(
+            !patch.lines().any(|l| l.starts_with('-') && !l.starts_with("---")),
+            "no line is removed: {patch}"
+        );
+        assert!(patch.contains("@@ -1,3 +1,4 @@"), "{patch}");
+    }
+
+    #[test]
+    fn both_kinds_of_removal_are_reported_together_and_a_context_change_is_not_one() {
+        // One hunk misquotes a removed line, the other asks to remove a line that is
+        // not there: each gets its own warning.
+        let file = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\no\n";
+        let text = envelope("*** Update File: f\n@@\n a\n-bb\n c\n d\n@@\n i\n j\n-zz\n+Z\n k\n l\n");
+        let originals = HashMap::from([("f".to_string(), file.to_string())]);
+        let mut p = Picker::new(&text, Format::ApplyPatch, originals).unwrap();
+        assert_eq!(p.hunk_count(), 2);
+        let _ = p.feed(b"1");
+        let Step::Confirm { view, .. } = p.feed(b"1") else { panic!() };
+        assert!(view.contains("the real line in the file is the one that will be removed"), "{view}");
+        assert!(view.contains("that removal is dropped and nothing is deleted for it"), "{view}");
+
+        // A misquoted context line alone triggers neither warning.
+        let text = envelope("*** Update File: f\n@@\n a\n bb\n-c\n d\n");
+        let originals = HashMap::from([("f".to_string(), file.to_string())]);
+        let mut p = Picker::new(&text, Format::ApplyPatch, originals).unwrap();
+        let Step::Confirm { view, .. } = p.feed(b"1") else { panic!() };
+        assert!(!view.contains("WARNING"), "{view}");
     }
 
     #[test]

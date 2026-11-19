@@ -50,8 +50,9 @@ pub(crate) struct Candidate {
     /// 0..=1, how much of the old side the window reproduces (exact lines count
     /// fully, near misses half).
     pub score: f64,
-    /// A removed line differs, or is missing: applying this changes which line is
-    /// deleted from the one the patch named. Shown with a warning.
+    /// A removed line differs (the real line would be deleted instead) or is
+    /// missing from the file (that removal would be dropped): applying this
+    /// changes what is deleted from what the patch named. Shown with a warning.
     pub loose: bool,
     /// Lines that differ, are extra or are missing.
     pub changed: usize,

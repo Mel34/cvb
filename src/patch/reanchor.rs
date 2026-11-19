@@ -5,9 +5,10 @@
 //! lines are kept as they were. The rest of the patch is untouched, except that a
 //! diff's hunk headers are renumbered where the rewrite changed them.
 //!
-//! This changes what the patch says: a removed line the LLM misquoted is replaced
-//! by the real line, so the real line is the one deleted. The picker shows the
-//! difference before anything is applied.
+//! This changes what the patch says. A removed line the LLM misquoted is replaced
+//! by the real line, so the real line is the one deleted. A removed line that is
+//! not in the file at all is dropped: nothing is deleted for it, and its added
+//! lines stay. The picker shows the difference before anything is applied.
 
 use std::collections::HashMap;
 
@@ -236,6 +237,26 @@ mod tests {
         let patch = envelope("*** Update File: f\n@@\n fn main() {\n     let a = 1;\n-    let b = 22;\n+    let b = 5;\n     let c = 3;\n");
         let fixed = fix(&patch, Format::ApplyPatch, "f", FILE);
         assert!(fixed.contains("-    let b = 2;\n+    let b = 5;\n"), "{fixed}");
+    }
+
+    #[test]
+    fn a_missing_removed_line_is_dropped_not_replaced() {
+        // `let zz = 9;` is not in the file: nothing is removed in its place, the
+        // added line stays, and no real line is turned into a removal.
+        let patch = envelope("*** Update File: f\n@@\n fn main() {\n     let a = 1;\n-    let zz = 9;\n+    let b = 5;\n     let b = 2;\n");
+        let fixed = fix(&patch, Format::ApplyPatch, "f", FILE);
+        assert_eq!(
+            fixed,
+            envelope("*** Update File: f\n@@\n fn main() {\n     let a = 1;\n+    let b = 5;\n     let b = 2;\n")
+        );
+
+        // The same in a diff: the corrected diff applies with git and deletes nothing.
+        let diff = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,4 +1,4 @@\n fn main() {\n     let a = 1;\n-    let zz = 9;\n+    let b = 5;\n     let b = 2;\n";
+        let fixed = fix(diff, Format::GitDiff, "f", FILE);
+        assert_eq!(
+            git_applies(FILE, &fixed).as_deref(),
+            Some("fn main() {\n    let a = 1;\n    let b = 5;\n    let b = 2;\n    let c = 3;\n    run(a, b, c);\n}\n")
+        );
     }
 
     #[test]
