@@ -226,6 +226,36 @@ class Session:
             self.pump(0.1)
         raise TimeoutError(f"timed out waiting for capture {count}; terminal: {bytes(self.buffer)[-400:]!r}")
 
+    # Event-driven waits: they return as soon as the thing they wait for has
+    # happened and give up only after a generous deadline, so they never depend
+    # on how long CVB takes.
+    def wait_screen(self, marker, timeout=15):
+        """Pumps until `marker` is in the screen buffer. Clear the buffer first
+        when the marker could also be left over from an earlier step."""
+        deadline = time.monotonic() + timeout
+        while marker not in self.buffer:
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"timed out waiting for {marker!r} on screen; got {bytes(self.buffer)[-400:]!r}")
+            self.pump(0.05)
+        return bytes(self.buffer)
+
+    def wait_capture_where(self, test, since, timeout=15):
+        """The first clipboard capture after the first `since` ones that `test` accepts."""
+        deadline = time.monotonic() + timeout
+        while True:
+            for data in self.captures()[since:]:
+                if test(data):
+                    return data
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"no matching capture after {since}; terminal: {bytes(self.buffer)[-400:]!r}")
+            self.pump(0.05)
+
+    def barrier(self, tag):
+        """CVB handles input in order, so once a command typed now has been
+        captured, everything typed before it has been handled."""
+        out = self.run(f"printf 'BARRIER_%s\\n' {tag}").decode()
+        return f"BARRIER_{tag}" in out
+
     def run(self, command):
         """Runs a command line and returns its clipboard capture."""
         before = len(self.captures())
@@ -258,6 +288,100 @@ class Session:
 
     def read(self, rel):
         return (self.project / rel).read_text()
+
+
+# Two places where the hunk could belong, and a removed line the patch misquotes
+# (`betaa`), so the picker offers both and the user has to choose. The fake
+# apply_patch finds a hunk by its '-' lines alone, so the two places differ in
+# that line (`beta1`, `beta2`): the corrected patch then lands only where chosen.
+FLOW_FILE = "head\nalpha\nbeta1\ngamma\nmiddle\nalpha\nbeta2\ngamma\ntail\n"
+FLOW_PATCH = "*** Begin Patch\n*** Update File: m.txt\n@@\n alpha\n-betaa\n+BETA\n gamma\n*** End Patch"
+FLOW_SECOND = "head\nalpha\nbeta1\ngamma\nmiddle\nalpha\nBETA\ngamma\ntail\n"
+BUNDLE_END = b"A higher textual score does not prove that a location is correct.\n"
+CANCELLED = b"cancelled, nothing was applied"
+
+
+def open_flow_picker(s):
+    """Pastes the failing patch over a fresh file and returns the clipboard
+    review bundle once the picker is ready for keys."""
+    s.write("m.txt", FLOW_FILE)
+    since = len(s.captures())
+    s.buffer.clear()
+    s.paste(FLOW_PATCH)
+    s.wait_capture_where(lambda d: d.startswith(b"CVB patch FAILED"), since)
+    bundle = s.wait_capture_where(
+        lambda d: d.startswith(b"CVB FAILED-HUNK REVIEW") and d.endswith(BUNDLE_END), since)
+    s.wait_screen(b"all candidate comparisons copied")
+    return bundle.decode()
+
+
+def picker_flow(s):
+    """The picker as a person uses it: browse, choose, confirm, cancel. Every
+    step waits for what CVB prints or copies; nothing assumes how long it takes."""
+    bundle = open_flow_picker(s)
+    check("flow: the review bundle is copied and lists both places",
+          "[1] lines 2-4" in bundle and "[2] lines 6-8" in bundle and "HUNK 1 OF 1" in bundle, bundle)
+
+    # Browse with the arrow keys, choose with Enter, apply with Ctrl+B twice.
+    s.buffer.clear()
+    s.send(b"\x1b[C")
+    screen = s.wait_screen(b"Candidate 2 of 2")
+    check("flow: Right shows the second place", b"[2] lines 6-8" in screen, screen[-300:])
+    s.buffer.clear()
+    s.send(b"\r")
+    screen = s.wait_screen(b"Not applied yet")
+    check("flow: Enter shows the corrected patch and the preview, and changes nothing",
+          b"would apply to 1 file(s)" in screen and s.read("m.txt") == FLOW_FILE, screen[-400:])
+    since = len(s.captures())
+    s.buffer.clear()
+    s.send(b"\x02")
+    s.wait_screen(b"press Ctrl+B once more")
+    check("flow: the first Ctrl+B only arms", s.read("m.txt") == FLOW_FILE)
+    s.send(b"\x02")
+    report = s.wait_capture_where(lambda d: d.startswith(b"CVB patch APPLIED"), since).decode()
+    check("flow: the second Ctrl+B applies the patch at the place that was browsed to",
+          s.read("m.txt") == FLOW_SECOND, (report, s.read("m.txt")))
+    check("flow: the shell works after applying", s.barrier("applied"))
+
+    # Cancel while the corrected patch waits: the key goes on to the shell.
+    open_flow_picker(s)
+    s.buffer.clear()
+    s.send(b"2")
+    s.wait_screen(b"Not applied yet")
+    since = len(s.captures())
+    s.buffer.clear()
+    s.send(b"echo after-confirm\n")
+    screen = s.wait_screen(CANCELLED)
+    typed = s.wait_capture_where(lambda d: b"after-confirm" in d, since)
+    check("flow: a key at the confirmation cancels, reaches the shell, and nothing is applied",
+          s.read("m.txt") == FLOW_FILE
+          and not any(d.startswith(b"CVB patch APPLIED") for d in s.captures()[since:]),
+          (screen[-300:], typed))
+
+    # A key between the two Ctrl+B presses cancels too.
+    open_flow_picker(s)
+    s.buffer.clear()
+    s.send(b"1")
+    s.wait_screen(b"Not applied yet")
+    s.buffer.clear()
+    s.send(b"\x02")
+    s.wait_screen(b"press Ctrl+B once more")
+    since = len(s.captures())
+    s.send(b"echo between-presses\n")
+    s.wait_screen(CANCELLED)
+    s.wait_capture_where(lambda d: b"between-presses" in d, since)
+    check("flow: a key between the two presses cancels and nothing is applied",
+          s.read("m.txt") == FLOW_FILE
+          and not any(d.startswith(b"CVB patch APPLIED") for d in s.captures()[since:]))
+
+    # q and a lone Escape cancel while browsing and hand nothing on.
+    for name, key in (("q", b"q"), ("a lone Escape", b"\x1b")):
+        open_flow_picker(s)
+        s.buffer.clear()
+        s.send(key)
+        s.wait_screen(CANCELLED)
+        check(f"flow: {name} cancels the picker and the shell works again",
+              s.barrier("after-cancel") and s.read("m.txt") == FLOW_FILE)
 
 
 def main():
@@ -638,8 +762,9 @@ def main():
             screen = bytes(pick.buffer)
             check("picker: the screen offers the nearest place",
                   b"did not match the files" in screen and b"[1] lines 1-3" in screen
-                  and b"a line to remove differs" in screen and b"s to skip" in screen, screen[-500:])
-            check("picker: the prompt is drawn again below it", DOT in screen.rsplit(b"to cancel.", 1)[-1])
+                  and b"a line to remove differs" in screen and b"s skips" in screen, screen[-500:])
+            below = screen.rsplit(b"Esc cancels.", 1)
+            check("picker: the prompt is drawn again below it", len(below) == 2 and DOT in below[1], screen[-300:])
 
             pick.buffer.clear()
             pick.send(b"1")
@@ -710,6 +835,13 @@ def main():
             pick.settle()
         finally:
             pick.close()
+
+        # ------------------------------------------------------------ picker flow
+        flow = Session(work, "flow")
+        try:
+            picker_flow(flow)
+        finally:
+            flow.close()
 
         # ------------------------------------------------------------ switched off
         off = Session(work, "off", {"CVB_PATCH_PASTE": "off"})
