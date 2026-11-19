@@ -204,8 +204,12 @@ fn best_at(start: usize, kinds: &[LineKind], sims: &mut Sims) -> Option<Candidat
             Pair::Both { old, line } => {
                 let s = sims.get(old, line);
                 if s >= 1.0 {
-                    exact += 1;
-                    matched += 1;
+                    // A blank line or a lone brace is in every function: it ranks
+                    // the window but does not count as evidence of the place.
+                    if sims.old[old].chars().any(char::is_alphanumeric) {
+                        exact += 1;
+                        matched += 1;
+                    }
                 } else {
                     changed += 1;
                     loose |= kinds[old] == LineKind::Remove;
@@ -566,6 +570,15 @@ mod tests {
         let (found, not_shown) = candidates_counted(&h, &lines(&file)).unwrap();
         assert_eq!(found.len(), MAX_CANDIDATES);
         assert_eq!(not_shown.capped, 3);
+    }
+
+    #[test]
+    fn blank_and_brace_lines_alone_do_not_place_a_hunk() {
+        // Nothing the hunk says about `handle` is in the file; its blank line and
+        // closing brace match every function, and those must not be enough.
+        let file = "fn other() {\n    stuff();\n}\n\nfn another() {\n    more();\n}\n";
+        let h = hunk(" \n fn handle() {\n-    old();\n }\n+new\n");
+        assert_eq!(candidates(&h, &lines(file)).unwrap(), vec![]);
     }
 
     #[test]
