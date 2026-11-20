@@ -33,6 +33,7 @@ cvb_control_debug() {
     # The prompt hook itself is not part of the user's command line.
     if ((${#FUNCNAME[@]} == 1)) && [[ $command != cvb_control_prompt ]]; then
         CVB_TRACED_COMMANDS+=("$command")
+        cvb_control_emit_command "$command"
     fi
 }
 
@@ -78,19 +79,17 @@ cvb_control_skip_listed() {
     return 0
 }
 
-cvb_control_emit_commands() {
-    local command byte hex index
+cvb_control_emit_command() {
+    local command=$1 byte hex index
     local LC_CTYPE=C
 
-    for command in "${CVB_TRACED_COMMANDS[@]}"; do
-        hex=
-        for ((index = 0; index < ${#command}; index++)); do
-            printf -v byte '%02x' "'${command:index:1}"
-            hex+=$byte
-        done
-
-        printf '%s%s\a' "$CVB_COMMAND_MARKER_PREFIX" "$hex"
+    hex=
+    for ((index = 0; index < ${#command}; index++)); do
+        printf -v byte '%02x' "'${command:index:1}"
+        hex+=$byte
     done
+
+    printf '%s%s\a' "$CVB_COMMAND_MARKER_PREFIX" "$hex"
 }
 
 cvb_control_restore_status() {
@@ -107,7 +106,6 @@ cvb_control_prompt() {
         printf '%s' "$CVB_SKIP_MARKER"
     fi
 
-    cvb_control_emit_commands
     CVB_TRACED_COMMANDS=()
 
     printf '%s%03d\a' "$CVB_END_MARKER_PREFIX" "$status"

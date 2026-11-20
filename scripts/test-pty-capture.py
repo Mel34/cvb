@@ -126,8 +126,16 @@ def wait_for_payload(directory, count, timeout=10):
             except OSError:
                 pass
 
-        result = os.waitpid(child_pid, os.WNOHANG)
-        if result[0]:
+        result = os.waitid(
+            os.P_PID,
+            child_pid,
+            os.WEXITED | os.WNOHANG | os.WNOWAIT,
+        )
+        if result is not None and result.si_pid:
+            files = clipboard_files(directory)
+            if len(files) >= count:
+                return [path.read_bytes() for path in files]
+
             raise RuntimeError(
                 "CVB exited before clipboard capture; terminal output: "
                 + bytes(buffer).decode("utf-8", "replace")
@@ -799,7 +807,7 @@ fi""",
                 b"The command `false` failed (exit 1)",
                 b"Command 5/5:",
                 b"PTY_BRACKETED_3",
-                b"Command block: 4 passed, 1 failed.",
+                b"Command block: 4 passed, 1 failed, 0 incomplete.",
             )
             check(
                 "bracketed paste produces one complete command-block report",
@@ -985,6 +993,8 @@ fi""",
                 (b"PTY_FILE_BRIDGE_OK",),
             )
 
+            # Preserve the normal shell-exit regression before starting a
+            # second session dedicated to interrupted command-block teardown.
             os.write(master, b"exit\n")
             deadline = time.monotonic() + 10
             status = None
@@ -997,6 +1007,67 @@ fi""",
                 time.sleep(0.05)
 
             check("interactive session exits cleanly", status == 0, status)
+            os.close(master)
+            master = None
+
+            pid, master_fd = pty.fork()
+            if pid == 0:
+                os.execve(str(binary), [str(binary)], env)
+
+            child_pid = pid
+            master = master_fd
+            fcntl.ioctl(master, 0x5414, struct.pack("HHHH", 24, 80, 0, 0))
+            buffer.clear()
+            read_until_end_marker()
+
+            # The DEBUG trap publishes metadata before exec replaces Bash.
+            incomplete_before = len(clipboard_files(clipboard_dir))
+            incomplete_commands = [
+                "printf 'PTY_INCOMPLETE_FIRST\\n'",
+                "exec sleep 30",
+            ]
+            os.write(
+                master,
+                b"\x1b[200~"
+                + ("\n".join(incomplete_commands) + "\n").encode()
+                + b"\x1b[201~",
+            )
+            read_until(START)
+            read_until(b"PTY_INCOMPLETE_FIRST")
+            read_until(
+                b"\x1b]777;CVB;COMMAND;6578656320736c656570203330\x07"
+            )
+            time.sleep(0.2)
+            os.write(master, b"\x03")
+
+            incomplete_payloads = wait_for_payload(
+                clipboard_dir, incomplete_before + 1, timeout=10
+            )
+            incomplete_payload = incomplete_payloads[incomplete_before]
+            check(
+                "interrupted command block reports completed and incomplete commands",
+                all(item in incomplete_payload for item in (
+                    b"Command 1/2: printf 'PTY_INCOMPLETE_FIRST\\n'",
+                    b"PTY_INCOMPLETE_FIRST",
+                    b"Exit status: 0 (PASS)",
+                    b"Command 2/2: exec sleep 30",
+                    b"Exit status: INCOMPLETE",
+                    b"Command block: 1 passed, 0 failed, 1 incomplete.",
+                )),
+                incomplete_payload,
+            )
+
+            deadline = time.monotonic() + 10
+            status = None
+            while time.monotonic() < deadline:
+                result = os.waitpid(child_pid, os.WNOHANG)
+                if result[0]:
+                    status = os.waitstatus_to_exitcode(result[1])
+                    child_pid = None
+                    break
+                time.sleep(0.05)
+
+            check("interrupted interactive session exits", status is not None, status)
 
         except Exception as error:
             diagnostic = bytes(buffer).decode("utf-8", "replace")

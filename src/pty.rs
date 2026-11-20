@@ -86,6 +86,72 @@ struct CommandBlockCapture {
     results: Vec<(i32, Vec<u8>)>,
 }
 
+fn render_command_block_report(block: &CommandBlockCapture) -> Vec<u8> {
+    let mut report = String::from("Command block results:\n\n");
+    let mut passed = 0usize;
+    let mut failed = 0usize;
+    let mut incomplete = 0usize;
+
+    for (index, command) in block.commands.iter().enumerate() {
+        report.push_str(&format!(
+            "Command {}/{}: {}\n",
+            index + 1,
+            block.commands.len(),
+            command
+        ));
+
+        if let Some((exit_status, rendered)) = block.results.get(index) {
+            report.push_str(&String::from_utf8_lossy(rendered));
+            if !rendered.ends_with(b"\n") {
+                report.push('\n');
+            }
+
+            if *exit_status == 0 {
+                passed += 1;
+                report.push_str("Exit status: 0 (PASS)\n\n");
+            } else {
+                failed += 1;
+                report.push_str(&format!(
+                    "Exit status: {} (FAIL)\n\n",
+                    exit_status
+                ));
+            }
+        } else {
+            incomplete += 1;
+            report.push_str("Exit status: INCOMPLETE (no completion marker received)\n\n");
+        }
+    }
+
+    if block.results.len() > block.commands.len() {
+        let extra_count = block.results.len() - block.commands.len();
+        report.push_str(&format!(
+            "Unexpected results: {extra_count}\n"
+        ));
+
+        for (index, (exit_status, rendered)) in
+            block.results.iter().enumerate().skip(block.commands.len())
+        {
+            report.push_str(&format!(
+                "Unexpected result {}: exit status {}\n",
+                index - block.commands.len() + 1,
+                exit_status
+            ));
+            report.push_str(&String::from_utf8_lossy(rendered));
+            if !rendered.ends_with(b"\n") {
+                report.push('\n');
+            }
+        }
+        report.push('\n');
+    }
+
+    report.push_str(&format!(
+        "Command block: {} passed, {} failed, {} incomplete.\n",
+        passed, failed, incomplete
+    ));
+
+    report.into_bytes()
+}
+
 impl CaptureState {
     fn start(&mut self) {
         if !self.capturing {
@@ -284,8 +350,49 @@ fn render_transcript(
 #[cfg(test)]
 mod transcript_tests {
     use super::{
-        Transcript, TranscriptSegment, render_transcript, transcript_is_visibly_empty,
+        CommandBlockCapture, Transcript, TranscriptSegment,
+        render_command_block_report, render_transcript,
+        transcript_is_visibly_empty,
     };
+
+    #[test]
+    fn command_block_report_marks_missing_results_incomplete() {
+        let block = CommandBlockCapture {
+            commands: vec![
+                "printf one".to_string(),
+                "true".to_string(),
+                "false".to_string(),
+            ],
+            results: vec![(0, b"one\n".to_vec())],
+        };
+
+        let report = String::from_utf8(render_command_block_report(&block)).unwrap();
+
+        assert!(report.contains("Command 1/3: printf one"));
+        assert!(report.contains("Exit status: 0 (PASS)"));
+        assert!(report.contains("Command 2/3: true"));
+        assert!(report.contains("Exit status: INCOMPLETE"));
+        assert!(report.contains("Command 3/3: false"));
+        assert!(report.contains("Command block: 1 passed, 0 failed, 2 incomplete."));
+    }
+
+    #[test]
+    fn command_block_report_lists_unexpected_results_separately() {
+        let block = CommandBlockCapture {
+            commands: vec!["true".to_string()],
+            results: vec![
+                (0, b"first result\n".to_vec()),
+                (7, b"extra result\n".to_vec()),
+            ],
+        };
+
+        let report = String::from_utf8(render_command_block_report(&block)).unwrap();
+
+        assert!(report.contains("Command block: 1 passed, 0 failed, 0 incomplete."));
+        assert!(report.contains("Unexpected results: 1"));
+        assert!(report.contains("Unexpected result 1: exit status 7"));
+        assert!(report.contains("extra result"));
+    }
 
     #[test]
     fn renders_terminal_and_preserves_literal_bytes_in_order() {
@@ -1486,6 +1593,7 @@ fn proxy(
     let mut patch_state = PatchState::new();
     debug_log("proxy_start", &format!("pid={}", std::process::id()));
 
+    let proxy_result = (|| -> Result<(), String> {
     loop {
         let keyboard_fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(keyboard.fd()) };
         let keybind_fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(keybind_watcher.fd()) };
@@ -1814,67 +1922,15 @@ fn proxy(
                             );
 
                             if block.results.len() >= block.commands.len() {
-                                let mut report = String::from("Command block results:\n\n");
-                                let mut passed = 0usize;
-                                let mut failed = 0usize;
-
-                                for (index, (exit_status, rendered)) in
-                                    block.results.iter().enumerate()
-                                {
-                                    let command = block
-                                        .commands
-                                        .get(index)
-                                        .map(String::as_str)
-                                        .unwrap_or("<unexpected command result>");
-                                    report.push_str(&format!(
-                                        "Command {}/{}: {}\n",
-                                        index + 1,
-                                        block.commands.len(),
-                                        command
-                                    ));
-                                    report.push_str(
-                                        &String::from_utf8_lossy(rendered),
-                                    );
-                                    if !rendered.ends_with(b"\n") {
-                                        report.push('\n');
-                                    }
-                                    if *exit_status == 0 {
-                                        passed += 1;
-                                        report.push_str("Exit status: 0 (PASS)\n\n");
-                                    } else {
-                                        failed += 1;
-                                        report.push_str(&format!(
-                                            "Exit status: {} (FAIL)\n\n",
-                                            exit_status
-                                        ));
-                                    }
-                                }
-
-                                if block.results.len() != block.commands.len() {
-                                    report.push_str(&format!(
-                                        "Accounting mismatch: expected {} command result(s), received {}.\n",
-                                        block.commands.len(),
-                                        block.results.len()
-                                    ));
-                                }
-
-                                report.push_str(&format!(
-                                    "Command block: {} passed, {} failed.\n",
-                                    passed, failed
-                                ));
-
-                                let rendered = report.into_bytes();
+                                let rendered = render_command_block_report(block);
                                 let captured_bytes = rendered.len();
-                                let buffer =
-                                    crate::clipboard::ClipboardBuffer::new(rendered);
+                                let buffer = crate::clipboard::ClipboardBuffer::new(rendered);
                                 debug_log(
                                     "command_block_dispatch",
                                     &format!(
-                                        "expected={} completed={} passed={} failed={} captured_bytes={captured_bytes}",
+                                        "expected={} completed={} captured_bytes={captured_bytes}",
                                         block.commands.len(),
-                                        block.results.len(),
-                                        passed,
-                                        failed
+                                        block.results.len()
                                     ),
                                 );
                                 crate::clipboard::process(&buffer)?;
@@ -1951,8 +2007,33 @@ fn proxy(
             }
         }
     }
-
     Ok(())
+    })();
+
+    let finalization_result = if let Some(block) = command_block.as_ref() {
+        let rendered = render_command_block_report(block);
+        let buffer = crate::clipboard::ClipboardBuffer::new(rendered);
+        debug_log(
+            "command_block_incomplete_dispatch",
+            &format!(
+                "expected={} completed={}",
+                block.commands.len(),
+                block.results.len()
+            ),
+        );
+        crate::clipboard::process(&buffer)
+    } else {
+        Ok(())
+    };
+
+    match (proxy_result, finalization_result) {
+        (Err(proxy_error), Err(finalization_error)) => {
+            Err(format!("{proxy_error}; additionally, {finalization_error}"))
+        }
+        (Err(proxy_error), _) => Err(proxy_error),
+        (Ok(()), Err(finalization_error)) => Err(finalization_error),
+        (Ok(()), Ok(())) => Ok(()),
+    }
 }
 
 fn handle_control_message(
