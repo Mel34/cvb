@@ -2,12 +2,16 @@
 //! result": the shell's directory, the runner call, the text for the screen, and
 //! the key sequence that makes the shell redraw its prompt.
 
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::PathBuf;
 
 use crate::patch::paste::RejectReason;
 use crate::patch::picker::Picker;
-use crate::patch::run::{DEFAULT_TIMEOUT, Env, Report, open_picker, preview_patch, run_patch};
+use crate::patch::run::{
+    DEFAULT_TIMEOUT, Env, Report, open_picker, preview_patch_expecting, run_patch,
+    run_patch_expecting,
+};
 use crate::commit::journal::resolve_state_dir;
 use crate::patch::text::is_escape_char;
 
@@ -80,14 +84,22 @@ fn with_env<T>(shell_pid: i32, work: impl FnOnce(&Env) -> T) -> Result<T, String
     Ok(work(&env))
 }
 
-/// Applies a pasted patch for the shell with process id `shell_pid`; returns the
-/// text to show and copy.
-pub(crate) fn apply_for_shell(text: &str, shell_pid: i32) -> String {
-    apply_offering_picker(text, shell_pid).0
+/// Applies a patch the picker corrected, for the shell with process id
+/// `shell_pid`; returns the text to show and copy. `expected` holds the content
+/// digests the picker saw: if a file changed since, nothing is applied. A failure
+/// does not reopen the picker.
+pub(crate) fn apply_for_shell(
+    text: &str,
+    shell_pid: i32,
+    expected: &HashMap<String, String>,
+) -> String {
+    match with_env(shell_pid, |env| run_patch_expecting(text, env, expected).to_text()) {
+        Ok(text) | Err(text) => text,
+    }
 }
 
-/// Like [`apply_for_shell`]. When the patch failed because hunks do not match
-/// the files, also returns the picker that can place them.
+/// Applies a pasted patch. When it failed because hunks do not match the files,
+/// also returns the picker that can place them.
 pub(crate) fn apply_offering_picker(text: &str, shell_pid: i32) -> (String, Option<Picker>) {
     match with_env(shell_pid, |env| {
         let report = run_patch(text, env);
@@ -103,9 +115,14 @@ pub(crate) fn apply_offering_picker(text: &str, shell_pid: i32) -> (String, Opti
 }
 
 /// Dry run of a corrected patch: `Ok` with the text to show when it would apply,
-/// `Err` with the report text when it would not.
-pub(crate) fn preview_for_shell(text: &str, shell_pid: i32) -> Result<String, String> {
-    match with_env(shell_pid, |env| preview_patch(text, env)) {
+/// `Err` with the report text when it would not, or when a file changed since the
+/// picker saw it (`expected` holds the picker's content digests).
+pub(crate) fn preview_for_shell(
+    text: &str,
+    shell_pid: i32,
+    expected: &HashMap<String, String>,
+) -> Result<String, String> {
+    match with_env(shell_pid, |env| preview_patch_expecting(text, env, expected)) {
         Ok(Report::Applied { files, output }) => {
             Ok(format!("CVB patch would apply to {files} file(s):\n{output}"))
         }

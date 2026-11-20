@@ -1337,7 +1337,11 @@ fn picker_step(
         }
         Step::Confirm { view, patch } => {
             // Show what the corrected patch is, then what applying it would do.
-            match deliver::preview_for_shell(&patch, child.as_raw()) {
+            // The files must still be the ones the picker saw.
+            let Some(expected) = state.picker.as_ref().map(|picker| picker.digests()) else {
+                return Ok(Vec::new());
+            };
+            match deliver::preview_for_shell(&patch, child.as_raw(), &expected) {
                 Ok(outcome) => {
                     let shown = format!("{view}{outcome}{CONFIRM_NOTE}\n");
                     show_note(&shown, master, stdout, screen_terminal)?;
@@ -1355,11 +1359,14 @@ fn picker_step(
             Ok(Vec::new())
         }
         Step::Apply { text, rest } => {
-            state.picker = None;
+            let Some(expected) = state.picker.take().map(|picker| picker.digests()) else {
+                return Ok(rest);
+            };
             debug_log("patch_picker_apply", &format!("bytes={}", text.len()));
             // A correction that fails again does not reopen the picker: the
-            // report is shown as it is.
-            let report = deliver::apply_for_shell(&text, child.as_raw());
+            // report is shown as it is. Files changed since the picker opened
+            // are refused.
+            let report = deliver::apply_for_shell(&text, child.as_raw(), &expected);
             present_patch_report(&report, master, stdout, screen_terminal)?;
             Ok(rest)
         }

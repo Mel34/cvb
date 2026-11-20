@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use crate::commit::apply::sha256_hex;
 use crate::patch::hunks::{FilePatch, Hunk, LineKind, matches, read};
 use crate::patch::near::{Candidate, NotShown, Pair, candidates_counted};
 use crate::patch::parse::Format;
@@ -47,6 +48,9 @@ pub(crate) struct Picker {
     format: Format,
     files: Vec<FilePatch>,
     originals: HashMap<String, String>,
+    /// SHA-256 (hex) of each original's bytes when the picker opened. The
+    /// preview and the apply must run on exactly these contents.
+    digests: HashMap<String, String>,
     items: Vec<Item>,
     /// Candidate chosen for `items[i]`, for each `i` already decided.
     picks: Vec<usize>,
@@ -109,11 +113,18 @@ impl Picker {
         if items.is_empty() {
             return Err("no suggestions: no hunk of this patch can be placed".to_string());
         }
+        // `originals` are the files' bytes read as UTF-8 and not transformed, so the
+        // digest of the text is the digest of the file.
+        let digests = originals
+            .iter()
+            .map(|(path, text)| (path.clone(), sha256_hex(text.as_bytes())))
+            .collect();
         Ok(Self {
             text: text.to_string(),
             format,
             files,
             originals,
+            digests,
             items,
             picks: Vec::new(),
             selected: 0,
@@ -121,6 +132,12 @@ impl Picker {
             escape_deadline: None,
             armed: false,
         })
+    }
+
+    /// The content digest of every file the picker was built from, for the
+    /// preview and the apply to check that nothing changed since.
+    pub(crate) fn digests(&self) -> HashMap<String, String> {
+        self.digests.clone()
     }
 
     /// How many hunks need a decision.
@@ -658,6 +675,17 @@ mod tests {
 
     fn picker(text: &str) -> Picker {
         Picker::new(text, Format::ApplyPatch, originals()).expect("picker")
+    }
+
+    #[test]
+    fn the_picker_records_the_content_digest_of_each_file_it_was_built_from() {
+        let digests = picker(&one_hunk()).digests();
+        assert_eq!(digests.len(), 1);
+        assert_eq!(digests["f"], sha256_hex(FILE.as_bytes()));
+        // A different file content has a different digest.
+        let other = HashMap::from([("f".to_string(), FILE.replace("b = 2", "b = 3"))]);
+        let changed = Picker::new(&one_hunk(), Format::ApplyPatch, other).expect("picker").digests();
+        assert_ne!(changed["f"], digests["f"]);
     }
 
     #[test]

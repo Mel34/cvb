@@ -123,13 +123,52 @@ fn new_id() -> String {
 
 /// Parses, checks and applies one pasted patch (`text` is a complete envelope).
 pub(crate) fn run_patch(text: &str, env: &Env) -> Report {
-    run_patch_with(text, env, true)
+    run_patch_with(text, env, true, None)
+}
+
+/// Like [`run_patch`] for a patch the picker corrected: `expected` holds the
+/// content digests the picker saw (path to SHA-256 hex). If any of those files
+/// has other contents now, the patch is rejected before the program runs.
+pub(crate) fn run_patch_expecting(
+    text: &str,
+    env: &Env,
+    expected: &HashMap<String, String>,
+) -> Report {
+    run_patch_with(text, env, true, Some(expected))
 }
 
 /// Everything `run_patch` does except the commit: the program runs in the scratch
 /// copy and the report says what would happen. `Applied` then means "would apply".
 pub(crate) fn preview_patch(text: &str, env: &Env) -> Report {
-    run_patch_with(text, env, false)
+    run_patch_with(text, env, false, None)
+}
+
+/// [`preview_patch`] with the same content check as [`run_patch_expecting`].
+pub(crate) fn preview_patch_expecting(
+    text: &str,
+    env: &Env,
+    expected: &HashMap<String, String>,
+) -> Report {
+    run_patch_with(text, env, false, Some(expected))
+}
+
+/// The first file (in path order) whose contents are not the ones `expected`
+/// describes. Contents are compared, never modification times. A file the patch
+/// does not read, or one `expected` does not list, is not checked here.
+fn changed_since(
+    originals: &HashMap<String, String>,
+    expected: &HashMap<String, String>,
+) -> Option<String> {
+    let mut paths: Vec<&String> = originals.keys().collect();
+    paths.sort();
+    paths
+        .into_iter()
+        .find(|path| {
+            expected
+                .get(*path)
+                .is_some_and(|digest| *digest != sha256_hex(originals[*path].as_bytes()))
+        })
+        .cloned()
 }
 
 /// For a patch that failed: the picker that can suggest where its failing hunks
@@ -142,7 +181,12 @@ pub(crate) fn open_picker(text: &str, env: &Env) -> Result<Picker, String> {
     Picker::new(parsed.normalized.as_deref().unwrap_or(text), parsed.format, originals)
 }
 
-fn run_patch_with(text: &str, env: &Env, commit: bool) -> Report {
+fn run_patch_with(
+    text: &str,
+    env: &Env,
+    commit: bool,
+    expected: Option<&HashMap<String, String>>,
+) -> Report {
     let parsed = match parse_any(text) {
         Ok(parsed) => parsed,
         Err(error) => return rejected(error.to_string()),
@@ -160,6 +204,13 @@ fn run_patch_with(text: &str, env: &Env, commit: bool) -> Report {
         Ok(originals) => originals,
         Err(reason) => return rejected(reason),
     };
+    // Before anything runs: the candidates and the preview the user looked at
+    // were made from other contents than these.
+    if let Some(path) = expected.and_then(|expected| changed_since(&originals, expected)) {
+        return rejected(format!(
+            "{path} changed since the candidates were shown; no files were modified. Paste the patch again"
+        ));
+    }
 
     remove_stale_scratch(&state.dir);
     let id = new_id();
@@ -1588,6 +1639,106 @@ printf '%s\n' "${changed[@]}"
         let report = run_patch(&fixed, &env);
         assert!(matches!(report, Report::Applied { files: 1, .. }), "{report:?}");
         assert_eq!(fx.read("f.rs"), "fn main() {\n    let a = 1;\n    let b = 5;\n    let c = 3;\n}\n");
+    }
+
+    const PICK_DIFF: &str = "diff --git a/f.rs b/f.rs\n--- a/f.rs\n+++ b/f.rs\n@@ -1,4 +1,4 @@\n fn main() {\n     let a = 1;\n-    let b = 20;\n+    let b = 5;\n     let c = 3;\n";
+    const PICK_FIXED: &str = "fn main() {\n    let a = 1;\n    let b = 5;\n    let c = 3;\n}\n";
+
+    /// The digests a picker over `patch` recorded, and the patch it corrects to
+    /// when its first candidate is chosen. The patch tool has not run.
+    fn picked(fx: &Fixture, patch: &str) -> (HashMap<String, String>, String) {
+        let mut picker = open_picker(patch, &fx.env(Duration::from_secs(30))).expect("picker");
+        let expected = picker.digests();
+        let crate::patch::picker::Step::Confirm { patch: fixed, .. } = picker.feed(b"1") else {
+            panic!("expected a confirmation")
+        };
+        (expected, fixed)
+    }
+
+    fn both_formats() -> [String; 2] {
+        [format!("*** Begin Patch\n{PICK_PATCH}*** End Patch\n"), PICK_DIFF.to_string()]
+    }
+
+    #[test]
+    fn a_correction_applies_when_the_files_are_as_the_picker_saw_them() {
+        for (n, patch) in both_formats().iter().enumerate() {
+            let fx = Fixture::new(&format!("fresh-{n}"));
+            fx.write("f.rs", PICK_FILE);
+            let (expected, fixed) = picked(&fx, patch);
+            let env = fx.env(Duration::from_secs(30));
+            let report = preview_patch_expecting(&fixed, &env, &expected);
+            assert!(matches!(report, Report::Applied { .. }), "{report:?}");
+            assert_eq!(fx.read("f.rs"), PICK_FILE);
+            let report = run_patch_expecting(&fixed, &env, &expected);
+            assert!(matches!(report, Report::Applied { files: 1, .. }), "{report:?}");
+            assert_eq!(fx.read("f.rs"), PICK_FIXED);
+        }
+    }
+
+    /// The change is one the corrected patch would still apply over, so only the
+    /// content check can refuse it; and it refuses before the program runs.
+    #[test]
+    fn a_file_modified_since_the_picker_opened_is_rejected_before_the_program_runs() {
+        for (n, patch) in both_formats().iter().enumerate() {
+            let fx = Fixture::new(&format!("modified-{n}"));
+            fx.write("f.rs", PICK_FILE);
+            let (expected, fixed) = picked(&fx, patch);
+            let modified = format!("{PICK_FILE}// added meanwhile\n");
+            fx.write("f.rs", &modified);
+            let env = fx.env(Duration::from_secs(30));
+            for report in [
+                preview_patch_expecting(&fixed, &env, &expected),
+                run_patch_expecting(&fixed, &env, &expected),
+            ] {
+                let text = report.to_text();
+                assert_eq!(
+                    text,
+                    "CVB patch REJECTED: f.rs changed since the candidates were shown; \
+                     no files were modified. Paste the patch again\n",
+                    "{report:?}"
+                );
+            }
+            assert_eq!(fx.read("f.rs"), modified, "the file is as the user left it");
+            assert_eq!(fx.log("stdin"), "", "the patch program must not have run");
+            assert!(fx.leftovers().is_empty(), "{:?}", fx.leftovers());
+        }
+    }
+
+    #[test]
+    fn rewriting_a_file_with_the_same_bytes_is_not_a_change() {
+        for (n, patch) in both_formats().iter().enumerate() {
+            let fx = Fixture::new(&format!("touched-{n}"));
+            fx.write("f.rs", PICK_FILE);
+            let (expected, fixed) = picked(&fx, patch);
+            // Same bytes, new modification time.
+            fx.write("f.rs", PICK_FILE);
+            let later = SystemTime::now() + Duration::from_secs(3600);
+            fs::File::options().write(true).open(fx.root.join("f.rs")).unwrap().set_modified(later).unwrap();
+            let report = run_patch_expecting(&fixed, &fx.env(Duration::from_secs(30)), &expected);
+            assert!(matches!(report, Report::Applied { files: 1, .. }), "{report:?}");
+            assert_eq!(fx.read("f.rs"), PICK_FIXED);
+        }
+    }
+
+    #[test]
+    fn only_the_files_the_picker_saw_are_compared() {
+        let originals = HashMap::from([
+            ("a".to_string(), "one\n".to_string()),
+            ("b".to_string(), "two\n".to_string()),
+        ]);
+        let digests = |a: &str, b: &str| {
+            HashMap::from([
+                ("a".to_string(), sha256_hex(a.as_bytes())),
+                ("b".to_string(), sha256_hex(b.as_bytes())),
+            ])
+        };
+        assert_eq!(changed_since(&originals, &digests("one\n", "two\n")), None);
+        assert_eq!(changed_since(&originals, &digests("one\n", "2\n")), Some("b".to_string()));
+        // Both changed: the first path in order is named.
+        assert_eq!(changed_since(&originals, &digests("1\n", "2\n")), Some("a".to_string()));
+        // A file the picker did not list is not held against the patch.
+        let only_a = HashMap::from([("a".to_string(), sha256_hex(b"one\n"))]);
+        assert_eq!(changed_since(&originals, &only_a), None);
     }
 
     /// An executable that another thread (or a forked child) still has open for

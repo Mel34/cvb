@@ -354,7 +354,9 @@ skips (which cancels the whole patch).
 .B Esc
 or an unknown key cancels the picker; unrecognized input is passed on to the shell. Pressing
 .B Ctrl+B
-twice applies the corrected patch. There is no overall inactivity timeout; CVB briefly waits 30 milliseconds to distinguish a split Escape sequence from a standalone Escape.
+twice applies the corrected patch. If a file the patch changes has different contents from when the candidates were shown (compared by content; touching a file does not count), CVB changes nothing, reports
+.BR "CVB patch REJECTED: FILE changed since the candidates were shown" ,
+and closes the picker; the patch must be pasted again. There is no overall inactivity timeout; CVB briefly waits 30 milliseconds to distinguish a split Escape sequence from a standalone Escape.
 .SH TARGET RESOLUTION
 Existing filesystem paths take precedence over external commands.
 .PP

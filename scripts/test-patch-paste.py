@@ -319,13 +319,23 @@ BUNDLE_END = b"A higher textual score does not prove that a location is correct.
 CANCELLED = b"cancelled, nothing was applied"
 
 
-def open_flow_picker(s):
+FLOW_FIRST = "head\nalpha\nBETA\ngamma\nmiddle\nalpha\nbeta2\ngamma\ntail\n"
+# The same kind of failure as a git diff: `thre` is misquoted and the header
+# line number (9) is far off, so the picker offers the one real place.
+DIFF_FILE = "one\ntwo\nthree\nfour\nfive\nsix\n"
+DIFF_PATCH = ("diff --git a/y.txt b/y.txt\n--- a/y.txt\n+++ b/y.txt\n@@ -9,5 +9,5 @@\n"
+              " one\n two\n-thre\n+3\n four\n five\n")
+DIFF_FIXED = "one\ntwo\n3\nfour\nfive\nsix\n"
+STALE = b"changed since the candidates were shown"
+
+
+def open_flow_picker(s, path="m.txt", content=FLOW_FILE, patch=FLOW_PATCH):
     """Pastes the failing patch over a fresh file and returns the clipboard
     review bundle once the picker is ready for keys."""
-    s.write("m.txt", FLOW_FILE)
+    s.write(path, content)
     since = len(s.captures())
     s.buffer.clear()
-    s.paste(FLOW_PATCH)
+    s.paste(patch)
     s.wait_capture_where(lambda d: d.startswith(b"CVB patch FAILED"), since)
     bundle = s.wait_capture_where(
         lambda d: d.startswith(b"CVB FAILED-HUNK REVIEW") and d.endswith(BUNDLE_END), since)
@@ -400,6 +410,70 @@ def picker_flow(s):
         s.wait_screen(CANCELLED)
         check(f"flow: {name} cancels the picker and the shell works again",
               s.barrier("after-cancel") and s.read("m.txt") == FLOW_FILE)
+
+    stale_flow(s)
+
+
+def stale_flow(s):
+    """A file that changed while the picker was open is not patched. The
+    contents are compared, so the change below is one the corrected patch would
+    still apply over; every key waits for CVB's answer to the one before."""
+    def applied_since(since):
+        return any(d.startswith(b"CVB patch APPLIED") for d in s.captures()[since:])
+
+    def choose_and_confirm():
+        s.buffer.clear()
+        s.send(b"1")
+        s.wait_screen(b"Not applied yet")
+
+    def press_twice(since):
+        s.buffer.clear()
+        s.send(b"\x02")
+        s.wait_screen(b"press Ctrl+B once more")
+        s.send(b"\x02")
+        return s.wait_capture_where(lambda d: STALE in d or d.startswith(b"CVB patch APPLIED"), since)
+
+    # Modified after the corrected patch was previewed: the apply refuses.
+    for name, path, content, patch in (
+        ("apply_patch", "m.txt", FLOW_FILE, FLOW_PATCH),
+        ("git diff", "y.txt", DIFF_FILE, DIFF_PATCH),
+    ):
+        open_flow_picker(s, path, content, patch)
+        choose_and_confirm()
+        modified = content + "added meanwhile\n"
+        s.write(path, modified)
+        since = len(s.captures())
+        report = press_twice(since).decode()
+        check(f"flow: a {name} file modified before the apply is rejected, not patched",
+              report.startswith(f"CVB patch REJECTED: {path} changed since the candidates were shown")
+              and s.read(path) == modified and not applied_since(since), report)
+        check(f"flow: the shell works after a stale apply ({name})", s.barrier("stale-apply"))
+
+    # Modified before the choice is previewed: the picker is dropped with the report.
+    open_flow_picker(s)
+    modified = FLOW_FILE + "added meanwhile\n"
+    s.write("m.txt", modified)
+    since = len(s.captures())
+    s.buffer.clear()
+    s.send(b"1")
+    report = s.wait_capture_where(lambda d: STALE in d, since).decode()
+    check("flow: a file modified before the preview is rejected and the picker is dropped",
+          "CVB patch REJECTED: m.txt changed since the candidates were shown" in report
+          and "nothing was changed" in report and s.read("m.txt") == modified
+          and not applied_since(since), report)
+    check("flow: keys reach the shell after a stale preview", s.barrier("stale-preview"))
+
+    # Same bytes, newer modification time: not a change.
+    open_flow_picker(s)
+    s.write("m.txt", FLOW_FILE)
+    later = time.time() + 3600
+    os.utime(s.project / "m.txt", (later, later))
+    choose_and_confirm()
+    since = len(s.captures())
+    report = press_twice(since).decode()
+    check("flow: a file only touched since the picker opened is still patched",
+          report.startswith("CVB patch APPLIED files=1") and s.read("m.txt") == FLOW_FIRST, report)
+    check("flow: the shell works after the touched-file apply", s.barrier("touched"))
 
 
 def main():
