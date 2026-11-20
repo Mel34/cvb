@@ -8,9 +8,11 @@
 //! Rules (see `design-apply-patch.md`, section 3):
 //!
 //! * Only a paste that *starts* while the shell is idle is examined.
-//! * Anything that is not a patch is forwarded byte-identical, markers included.
-//!   A paste is held back only while it can still turn out to be a patch: the
-//!   first non-blank line must be exactly `*** Begin Patch`.
+//! * An ordinary idle-prompt paste is buffered until its closing marker, then
+//!   forwarded without the bracketed-paste markers. This lets Readline process
+//!   its newlines as normal interactive input.
+//! * Unsafe, oversized, timed-out, or non-idle pastes retain their original
+//!   bracketed-paste markers and bytes.
 //! * A patch is buffered until the end marker, up to [`MAX_PATCH_BYTES`]. Over the
 //!   cap, or on timeout, the held bytes are forwarded unchanged.
 //! * A paste whose first non-blank line is `diff --git ...`, or a `--- a/...` line
@@ -74,6 +76,9 @@ enum State {
     Normal,
     /// A paste started at an idle prompt; not yet known to be a patch.
     Sniff,
+    /// An idle-prompt paste known not to be a patch; wait for its end marker
+    /// before deciding whether it is safe to forward without the markers.
+    CommandBuffer,
     /// Known to be a patch (or a diff); buffering until the end marker.
     Buffer,
     /// Inside a paste that is passed through; looking for its end marker.
@@ -84,9 +89,9 @@ enum State {
 #[derive(Debug)]
 pub(crate) struct PasteRecognizer {
     state: State,
-    /// Unprocessed bytes. In `Sniff` and `Buffer` this is the paste body so far
-    /// (without the start marker); in `Normal` and `Foreign` it is only a held
-    /// partial marker.
+    /// Unprocessed bytes. In `Sniff`, `CommandBuffer`, and `Buffer` this is the
+    /// paste body so far (without the start marker); in `Normal` and `Foreign`
+    /// it is only a held partial marker.
     buf: Vec<u8>,
     /// Offset in `buf` from which the end marker still has to be searched.
     scan_from: usize,
@@ -161,7 +166,7 @@ impl PasteRecognizer {
     /// Reports what is held back.
     pub(crate) fn pending(&self) -> Pending {
         match self.state {
-            State::Sniff | State::Buffer => Pending::Paste,
+            State::Sniff | State::CommandBuffer | State::Buffer => Pending::Paste,
             State::Normal | State::Foreign if !self.buf.is_empty() => Pending::PartialMarker,
             _ => Pending::Nothing,
         }
@@ -186,7 +191,7 @@ impl PasteRecognizer {
                     push_forward(&mut events, std::mem::take(&mut self.buf));
                 }
             }
-            State::Sniff | State::Buffer => {
+            State::Sniff | State::CommandBuffer | State::Buffer => {
                 let mut bytes = PASTE_START.to_vec();
                 bytes.append(&mut self.buf);
                 push_forward(&mut events, bytes);
@@ -203,6 +208,7 @@ impl PasteRecognizer {
                 State::Normal => self.step_normal(idle, events),
                 State::Foreign => self.step_foreign(events),
                 State::Sniff => self.step_sniff(events),
+                State::CommandBuffer => self.step_command_buffer(events),
                 State::Buffer => self.step_buffer(events),
             };
             if !progressed {
@@ -343,6 +349,25 @@ impl PasteRecognizer {
         true
     }
 
+    /// Ordinary command paste: wait for the closing marker before forwarding.
+    fn step_command_buffer(&mut self, events: &mut Vec<PasteEvent>) -> bool {
+        if self.buf.len() > MAX_PATCH_BYTES {
+            self.give_up(events);
+            return true;
+        }
+        let Some(at) = self.find_end() else {
+            return false;
+        };
+        let rest = self.buf.split_off(at + PASTE_END.len());
+        self.buf.truncate(at);
+        let body = std::mem::take(&mut self.buf);
+        self.buf = rest;
+        self.scan_from = 0;
+        self.state = State::Normal;
+        forward_command_paste(body, events);
+        true
+    }
+
     /// Finds the end marker, remembering how far the buffer has been searched.
     fn find_end(&mut self) -> Option<usize> {
         let found = find(&self.buf, PASTE_END, self.scan_from);
@@ -352,33 +377,57 @@ impl PasteRecognizer {
         found
     }
 
-    /// The paste is not a patch: forward the start marker and what was held, and
-    /// continue in `Foreign` (or `Normal` if the end marker is already in hand).
+    /// The paste is not a patch. Keep buffering it until the end marker so the
+    /// complete body can be checked before deciding whether to remove the markers.
     fn not_a_patch(&mut self, end: Option<usize>, events: &mut Vec<PasteEvent>) {
-        let mut bytes = PASTE_START.to_vec();
         match end {
             Some(at) => {
                 let rest = self.buf.split_off(at + PASTE_END.len());
-                bytes.append(&mut self.buf);
+                self.buf.truncate(at);
+                let body = std::mem::take(&mut self.buf);
                 self.buf = rest;
                 self.state = State::Normal;
+                forward_command_paste(body, events);
             }
             None => {
-                bytes.append(&mut self.buf);
-                self.state = State::Foreign;
+                self.state = State::CommandBuffer;
             }
         }
         self.scan_from = 0;
-        push_forward(events, bytes);
     }
 
     /// Over the size cap: forward everything held, unchanged.
     fn give_up(&mut self, events: &mut Vec<PasteEvent>) {
         let mut bytes = PASTE_START.to_vec();
-        bytes.append(&mut self.buf);
+        if let Some(at) = self.find_end() {
+            let rest = self.buf.split_off(at + PASTE_END.len());
+            bytes.append(&mut self.buf);
+            self.buf = rest;
+            self.state = State::Normal;
+        } else {
+            bytes.append(&mut self.buf);
+            self.state = State::Foreign;
+        }
         push_forward(events, bytes);
-        self.state = State::Foreign;
         self.scan_from = 0;
+    }
+}
+
+/// Forward an ordinary command paste without its bracketed-paste markers only
+/// when the complete body is valid UTF-8 and contains no control characters
+/// other than tab and line endings. Otherwise preserve the original wrapper.
+fn forward_command_paste(body: Vec<u8>, events: &mut Vec<PasteEvent>) {
+    let safe = std::str::from_utf8(&body).is_ok_and(|text| {
+        text.chars()
+            .all(|ch| !ch.is_control() || matches!(ch, '\n' | '\r' | '\t'))
+    });
+    if safe {
+        push_forward(events, body);
+    } else {
+        let mut bytes = PASTE_START.to_vec();
+        bytes.extend_from_slice(&body);
+        bytes.extend_from_slice(PASTE_END);
+        push_forward(events, bytes);
     }
 }
 
@@ -590,13 +639,15 @@ mod tests {
     }
 
     #[test]
-    fn plain_text_input_is_forwarded_byte_identical_for_every_chunking() {
+    fn ordinary_paste_is_forwarded_without_markers_for_every_chunking() {
         let mut input = b"ls -la\n".to_vec();
         input.extend_from_slice(&wrapped("echo hi\nsecond line"));
         input.extend_from_slice(b"\x1b[A\x1b\x1b[1;5C tail");
+        let mut expected = b"ls -la\necho hi\nsecond line".to_vec();
+        expected.extend_from_slice(b"\x1b[A\x1b\x1b[1;5C tail");
         for size in 1..=input.len() {
             let (events, r) = run(&input, &[size], true);
-            assert_eq!(forwarded(&events), input, "chunk size {size}");
+            assert_eq!(forwarded(&events), expected, "chunk size {size}");
             assert!(
                 events.iter().all(|e| matches!(e, PasteEvent::Forward(_))),
                 "chunk size {size}"
@@ -606,7 +657,7 @@ mod tests {
     }
 
     #[test]
-    fn a_paste_that_only_mentions_the_marker_is_forwarded() {
+    fn a_paste_that_only_mentions_the_marker_is_forwarded_as_plain_input() {
         for body in [
             "echo '*** Begin Patch'",
             "see *** Begin Patch\n*** End Patch",
@@ -619,7 +670,7 @@ mod tests {
             let input = wrapped(body);
             for size in [1, 2, 5, usize::MAX] {
                 let (events, r) = run(&input, &[size], true);
-                assert_eq!(forwarded(&events), input, "{body:?} chunk {size}");
+                assert_eq!(forwarded(&events), body.as_bytes(), "{body:?} chunk {size}");
                 assert!(
                     events.iter().all(|e| matches!(e, PasteEvent::Forward(_))),
                     "{body:?} chunk {size}"
@@ -630,11 +681,10 @@ mod tests {
     }
 
     #[test]
-    fn a_patch_inside_other_text_is_forwarded() {
+    fn a_patch_inside_other_text_is_forwarded_as_plain_input() {
         let body = format!("run this:\n{PATCH}");
-        let input = wrapped(&body);
-        let (events, _) = run(&input, &[3], true);
-        assert_eq!(forwarded(&events), input);
+        let (events, _) = run(&wrapped(&body), &[3], true);
+        assert_eq!(forwarded(&events), body.as_bytes());
     }
 
     #[test]
@@ -654,6 +704,33 @@ mod tests {
         let input = wrapped(&body);
         let (events, _) = run(&input, &[usize::MAX], true);
         assert_eq!(forwarded(&events), input);
+    }
+
+    #[test]
+    fn an_ordinary_paste_is_not_forwarded_until_its_end_marker() {
+        let mut r = PasteRecognizer::new();
+        assert!(r.feed(b"\x1b[200~echo one\n", true).is_empty());
+        assert_eq!(r.pending(), Pending::Paste);
+        assert_eq!(
+            r.feed(b"echo two\n\x1b[201~", true),
+            vec![PasteEvent::Forward(b"echo one\necho two\n".to_vec())]
+        );
+        assert_eq!(r.pending(), Pending::Nothing);
+    }
+
+    #[test]
+    fn an_ordinary_paste_with_control_bytes_keeps_its_markers() {
+        let mut body = b"printf 'hello'\n".to_vec();
+        body.extend_from_slice(b"\x1b[31m");
+        let input = {
+            let mut bytes = PASTE_START.to_vec();
+            bytes.extend_from_slice(&body);
+            bytes.extend_from_slice(PASTE_END);
+            bytes
+        };
+        let (events, r) = run(&input, &[2], true);
+        assert_eq!(forwarded(&events), input);
+        assert_eq!(r.pending(), Pending::Nothing);
     }
 
     #[test]
@@ -906,7 +983,7 @@ mod tests {
     }
 
     #[test]
-    fn pastes_that_only_resemble_a_diff_reach_the_shell_unchanged() {
+    fn pastes_that_only_resemble_a_diff_reach_the_shell_as_plain_input() {
         let cases = [
             "---\ntitle: notes\n---\n",         // YAML front matter
             "--- some markdown rule\n",           // not an a/ path
@@ -923,7 +1000,7 @@ mod tests {
             let input = wrapped(text);
             for size in [usize::MAX, 7, 1] {
                 let (events, r) = run(&input, &[size], true);
-                assert_eq!(forwarded(&events), input, "{text:?} chunk {size}");
+                assert_eq!(forwarded(&events), text.as_bytes(), "{text:?} chunk {size}");
                 assert!(!events.iter().any(|e| !matches!(e, PasteEvent::Forward(_))), "{text:?}");
                 assert_eq!(r.pending(), Pending::Nothing);
             }

@@ -768,6 +768,44 @@ fi""",
                 ),
             )
 
+            # A bracketed command paste must reach the existing interactive
+            # Bash session as ordinary newline-delimited input. Each command
+            # gets its own capture, and shell state persists between lines.
+            bracketed_before = len(clipboard_files(clipboard_dir))
+            bracketed_commands = [
+                "printf 'PTY_BRACKETED_1\\n'",
+                "CVB_BRACKETED_VALUE=preserved",
+                "printf 'PTY_BRACKETED_2_%s\\n' \"$CVB_BRACKETED_VALUE\"",
+                "false",
+                "printf 'PTY_BRACKETED_3\\n'",
+            ]
+            bracketed_body = ("\n".join(bracketed_commands) + "\n").encode()
+            os.write(
+                master,
+                b"\x1b[200~" + bracketed_body + b"\x1b[201~",
+            )
+            bracketed_payloads = wait_for_payload(
+                clipboard_dir, bracketed_before + len(bracketed_commands)
+            )
+            bracketed_payloads = bracketed_payloads[
+                bracketed_before:bracketed_before + len(bracketed_commands)
+            ]
+            bracketed_expected = [
+                b"PTY_BRACKETED_1",
+                b"The command `CVB_BRACKETED_VALUE=preserved`",
+                b"PTY_BRACKETED_2_preserved",
+                b"The command `false` failed (exit 1)",
+                b"PTY_BRACKETED_3",
+            ]
+            for index, (payload, expected) in enumerate(
+                zip(bracketed_payloads, bracketed_expected), start=1
+            ):
+                check(
+                    f"bracketed paste command {index} captured separately",
+                    expected in payload,
+                    payload,
+                )
+
             # Send several commands without waiting between them.
             burst_before = len(clipboard_files(clipboard_dir))
             burst_commands = [
