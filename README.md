@@ -225,7 +225,7 @@ CVB does not interpret glob patterns, regular expressions, or `.gitignore` synta
 
 ## Searching code with `cvb pull`
 
-`cvb pull` searches the files of the Git repository, tracked or untracked but not ignored, and prints line-numbered units: the smallest enclosing function, type or heading section for Rust, Bash, Python, Zig, C, C++ and Markdown, and plain lines for any other file.
+`cvb pull` searches the files of the Git repository, tracked or untracked but not ignored, and prints line-numbered units: the smallest enclosing function, type or heading section for Rust, Bash, Python, Zig, C, C++, JavaScript, TypeScript, Go, Java, Lua and Markdown, and plain lines for any other file.
 
 ```text
 cvb pull foo bar          units containing foo OR bar

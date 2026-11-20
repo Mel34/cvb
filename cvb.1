@@ -43,7 +43,7 @@ The active session is indicated by a red dot in the shell prompt. The session en
 .BR exit .
 .TP
 .B pull \fR[\fBfile:\fIPATH\fR] [\fBcascade:\fIN\fR] \fIsearch-term...\fR
-Search source files: Git-tracked ones and untracked ones that .gitignore does not hide. Rust is parsed syntactically by item, Bash by function, Python (.py, .pyi) by function and class, Zig (.zig) by function, test and type, C (.c, .h) and C++ (.cc, .cpp, .cxx, .hh, .hpp, .hxx) by function and type, and Markdown by heading. Other files are searched by line. Callers and cascade work on Rust only.
+Search source files: Git-tracked ones and untracked ones that .gitignore does not hide. Rust is parsed syntactically by item, Bash by function, Python (.py, .pyi) by function and class, Zig (.zig) by function, test and type, C (.c, .h) and C++ (.cc, .cpp, .cxx, .hh, .hpp, .hxx) by function and type, JavaScript (.js, .mjs, .cjs, .jsx) by function and class, TypeScript (.ts, .mts, .cts, .tsx) by function, class and type, Go (.go) by function and type, Java (.java) by method and type, Lua (.lua) by function, and Markdown by heading. Other files are searched by line. Callers and cascade work on Rust only.
 
 Matching is case-sensitive. Bare terms are alternatives (OR),
 .BI + term

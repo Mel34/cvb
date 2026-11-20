@@ -4,7 +4,7 @@
 //! a type, a test). Rust uses `syn`, Bash and every language here use
 //! tree-sitter. A language is a table: which file extensions, which node kinds
 //! are units, and which parent nodes belong to a unit (a Python decorator, a C++
-//! `template <...>` line, a C `typedef`).
+//! `template <...>` line, a C `typedef`, a JavaScript `export`).
 //!
 //! Unlike Bash, a file with syntax errors still yields units: nodes that contain
 //! an error are skipped, the rest are used. Only when an error file has no unit
@@ -90,7 +90,99 @@ static CPP: Lang = Lang {
     wrappers: &["template_declaration", "type_definition"],
 };
 
-static LANGUAGES: [&Lang; 4] = [&ZIG, &PYTHON, &C, &CPP];
+/// An arrow function or function expression bound to a name
+/// (`const f = () => {}`): the declarator is the unit.
+const FUNCTION_VALUES: &[&str] = &["arrow_function", "function_expression", "function"];
+
+static JAVASCRIPT: Lang = Lang {
+    extensions: &["js", "mjs", "cjs", "jsx"],
+    language: || tree_sitter_javascript::LANGUAGE.into(),
+    units: &[
+        unit("function_declaration", "JavaScript function"),
+        unit("generator_function_declaration", "JavaScript function"),
+        unit("method_definition", "JavaScript function"),
+        unit_with("variable_declarator", "JavaScript function", FUNCTION_VALUES),
+        unit("class_declaration", "JavaScript class"),
+    ],
+    wrappers: &["export_statement", "lexical_declaration", "variable_declaration"],
+};
+
+const TYPESCRIPT_UNITS: &[Unit] = &[
+    unit("function_declaration", "TypeScript function"),
+    unit("generator_function_declaration", "TypeScript function"),
+    unit("method_definition", "TypeScript function"),
+    unit_with("variable_declarator", "TypeScript function", FUNCTION_VALUES),
+    unit("class_declaration", "TypeScript class"),
+    unit("abstract_class_declaration", "TypeScript class"),
+    unit("interface_declaration", "TypeScript type"),
+    unit("type_alias_declaration", "TypeScript type"),
+    unit("enum_declaration", "TypeScript type"),
+];
+
+const TYPESCRIPT_WRAPPERS: &[&str] = &["export_statement", "lexical_declaration", "variable_declaration"];
+
+static TYPESCRIPT: Lang = Lang {
+    extensions: &["ts", "mts", "cts"],
+    language: || tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+    units: TYPESCRIPT_UNITS,
+    wrappers: TYPESCRIPT_WRAPPERS,
+};
+
+/// `.tsx` needs its own grammar: `<T>` is a type assertion in `.ts` and an
+/// element in `.tsx`.
+static TSX: Lang = Lang {
+    extensions: &["tsx"],
+    language: || tree_sitter_typescript::LANGUAGE_TSX.into(),
+    units: TYPESCRIPT_UNITS,
+    wrappers: TYPESCRIPT_WRAPPERS,
+};
+
+static GO: Lang = Lang {
+    extensions: &["go"],
+    language: || tree_sitter_go::LANGUAGE.into(),
+    units: &[
+        unit("function_declaration", "Go function"),
+        unit("method_declaration", "Go function"),
+        unit("type_spec", "Go type"),
+        unit("type_alias", "Go type"),
+    ],
+    wrappers: &[],
+};
+
+static JAVA: Lang = Lang {
+    extensions: &["java"],
+    language: || tree_sitter_java::LANGUAGE.into(),
+    units: &[
+        unit("method_declaration", "Java method"),
+        unit("constructor_declaration", "Java method"),
+        unit("class_declaration", "Java type"),
+        unit("interface_declaration", "Java type"),
+        unit("enum_declaration", "Java type"),
+        unit("record_declaration", "Java type"),
+        unit("annotation_type_declaration", "Java type"),
+    ],
+    wrappers: &[],
+};
+
+static LUA: Lang = Lang {
+    extensions: &["lua"],
+    language: || tree_sitter_lua::LANGUAGE.into(),
+    units: &[unit("function_declaration", "Lua function")],
+    wrappers: &[],
+};
+
+static LANGUAGES: [&Lang; 10] = [
+    &ZIG,
+    &PYTHON,
+    &C,
+    &CPP,
+    &JAVASCRIPT,
+    &TYPESCRIPT,
+    &TSX,
+    &GO,
+    &JAVA,
+    &LUA,
+];
 
 /// The language of `path`, by extension.
 pub(crate) fn language_for(path: &str) -> Option<&'static Lang> {
@@ -154,8 +246,10 @@ fn collect(
     if !node.has_error()
         && let Some(spec) = unit_of(lang, node)
     {
+        // Wrappers can nest (`export const f = ...` is an export around a
+        // declaration around the declarator), so climb while they continue.
         let mut outer = node;
-        if let Some(parent) = node.parent()
+        while let Some(parent) = outer.parent()
             && lang.wrappers.contains(&parent.kind())
             && !parent.has_error()
         {
@@ -199,7 +293,14 @@ mod tests {
         for name in ["x.cc", "x.cpp", "x.cxx", "x.hpp", "x.hh", "x.hxx"] {
             assert!(language_for(name).is_some(), "{name}");
         }
+        for name in [
+            "x.js", "x.mjs", "x.cjs", "x.jsx", "x.ts", "x.mts", "x.cts", "x.tsx", "x.go", "x.java",
+            "x.lua",
+        ] {
+            assert!(language_for(name).is_some(), "{name}");
+        }
         assert!(language_for("x.rs").is_none());
+        assert!(language_for("x.json").is_none());
         assert!(language_for("Makefile").is_none());
         assert!(language_for("zig").is_none());
         // Only the last extension counts, and dots in directory names do not.
@@ -259,6 +360,97 @@ mod tests {
         assert_eq!(range("a.cpp", CPP_SRC, 9), Ok(((9, 9), "C++ function")));
         // A namespace is not a unit.
         assert_eq!(range("a.cpp", CPP_SRC, 1), Ok(((1, 1), "Line")));
+    }
+
+    const JS_SRC: &str = "export function a() {\n  return 1;\n}\nconst b = (x) => {\n  return x;\n};\nexport const c = async () => 2;\nclass K {\n  static s = 1;\n  m() {\n    return 3;\n  }\n}\nconst plain = 5;\nfunction* g() {}\n";
+
+    #[test]
+    fn javascript_functions_arrows_classes_and_methods() {
+        // `export` belongs to the function.
+        assert_eq!(range("a.js", JS_SRC, 2), Ok(((1, 3), "JavaScript function")));
+        assert_eq!(range("a.js", JS_SRC, 1), Ok(((1, 3), "JavaScript function")));
+        // A named arrow function is a function, with its `const`.
+        assert_eq!(range("a.js", JS_SRC, 5), Ok(((4, 6), "JavaScript function")));
+        assert_eq!(range("a.mjs", JS_SRC, 7), Ok(((7, 7), "JavaScript function")));
+        // A method is its own unit, a field belongs to the class.
+        assert_eq!(range("a.jsx", JS_SRC, 11), Ok(((10, 12), "JavaScript function")));
+        assert_eq!(range("a.cjs", JS_SRC, 9), Ok(((8, 13), "JavaScript class")));
+        assert_eq!(range("a.js", JS_SRC, 14), Ok(((14, 14), "Line")));
+        assert_eq!(range("a.js", JS_SRC, 15), Ok(((15, 15), "JavaScript function")));
+    }
+
+    const TS_SRC: &str = "export interface I {\n  a: number;\n}\ntype T = { b: string };\nenum E { A, B }\nexport abstract class C {\n  abstract f(): void;\n  g(): number {\n    return 1;\n  }\n}\nexport const h = (x: number): number => x;\nfunction k<T>(t: T): T { return t; }\n";
+
+    #[test]
+    fn typescript_types_classes_and_functions() {
+        assert_eq!(range("a.ts", TS_SRC, 2), Ok(((1, 3), "TypeScript type")));
+        assert_eq!(range("a.ts", TS_SRC, 4), Ok(((4, 4), "TypeScript type")));
+        assert_eq!(range("a.mts", TS_SRC, 5), Ok(((5, 5), "TypeScript type")));
+        assert_eq!(range("a.cts", TS_SRC, 9), Ok(((8, 10), "TypeScript function")));
+        assert_eq!(range("a.ts", TS_SRC, 7), Ok(((6, 11), "TypeScript class")));
+        assert_eq!(range("a.ts", TS_SRC, 12), Ok(((12, 12), "TypeScript function")));
+        assert_eq!(range("a.ts", TS_SRC, 13), Ok(((13, 13), "TypeScript function")));
+    }
+
+    #[test]
+    fn tsx_reads_elements_that_plain_typescript_would_not() {
+        let src = "export function App() {\n  return <div>{1}</div>;\n}\nconst B = () => <b>x</b>;\n";
+        assert_eq!(range("a.tsx", src, 2), Ok(((1, 3), "TypeScript function")));
+        assert_eq!(range("a.tsx", src, 4), Ok(((4, 4), "TypeScript function")));
+    }
+
+    const GO_SRC: &str = "package p\n\ntype S struct {\n\tA int\n}\n\ntype (\n\tX int\n\tY string\n)\n\nfunc (s S) M() int {\n\treturn 1\n}\n\nfunc F() {}\n";
+
+    #[test]
+    fn go_functions_methods_and_types() {
+        assert_eq!(range("a.go", GO_SRC, 4), Ok(((3, 5), "Go type")));
+        // In a group, each type is its own unit.
+        assert_eq!(range("a.go", GO_SRC, 9), Ok(((9, 9), "Go type")));
+        assert_eq!(range("a.go", GO_SRC, 13), Ok(((12, 14), "Go function")));
+        assert_eq!(range("a.go", GO_SRC, 16), Ok(((16, 16), "Go function")));
+        assert_eq!(range("a.go", GO_SRC, 1), Ok(((1, 1), "Line")));
+    }
+
+    const JAVA_SRC: &str = "package p;\n\n@Deprecated\npublic class A {\n  int f;\n  A() {}\n  @Override\n  public String toString() {\n    return \"\";\n  }\n  interface Inner {\n    void x();\n  }\n}\nenum E { X }\nrecord R(int a) {}\n";
+
+    #[test]
+    fn java_types_methods_and_constructors() {
+        // An annotation belongs to its declaration.
+        assert_eq!(range("A.java", JAVA_SRC, 3), Ok(((3, 14), "Java type")));
+        assert_eq!(range("A.java", JAVA_SRC, 5), Ok(((3, 14), "Java type")));
+        assert_eq!(range("A.java", JAVA_SRC, 6), Ok(((6, 6), "Java method")));
+        assert_eq!(range("A.java", JAVA_SRC, 7), Ok(((7, 10), "Java method")));
+        assert_eq!(range("A.java", JAVA_SRC, 9), Ok(((7, 10), "Java method")));
+        assert_eq!(range("A.java", JAVA_SRC, 11), Ok(((11, 13), "Java type")));
+        assert_eq!(range("A.java", JAVA_SRC, 12), Ok(((12, 12), "Java method")));
+        assert_eq!(range("A.java", JAVA_SRC, 15), Ok(((15, 15), "Java type")));
+        assert_eq!(range("A.java", JAVA_SRC, 16), Ok(((16, 16), "Java type")));
+        assert_eq!(range("A.java", JAVA_SRC, 1), Ok(((1, 1), "Line")));
+    }
+
+    const LUA_SRC: &str = "local M = {}\n\nfunction M.f(x)\n  return x\nend\n\nlocal function g()\nend\n\nreturn M\n";
+
+    #[test]
+    fn lua_function_declarations() {
+        assert_eq!(range("a.lua", LUA_SRC, 4), Ok(((3, 5), "Lua function")));
+        assert_eq!(range("a.lua", LUA_SRC, 7), Ok(((7, 8), "Lua function")));
+        assert_eq!(range("a.lua", LUA_SRC, 1), Ok(((1, 1), "Line")));
+        assert_eq!(range("a.lua", LUA_SRC, 10), Ok(((10, 10), "Line")));
+    }
+
+    #[test]
+    fn nested_wrappers_all_belong_to_the_unit() {
+        let src = "template <class T>\ntemplate <class U>\nvoid f(T, U) {}\n";
+        assert_eq!(range("a.cpp", src, 1), Ok(((1, 3), "C++ function")));
+    }
+
+    #[test]
+    fn a_broken_javascript_function_does_not_hide_its_neighbours() {
+        let src = "function good() {\n  return 1;\n}\nfoo(;\nfunction fine() {\n  return 2;\n}\n";
+        assert_eq!(range("a.js", src, 2), Ok(((1, 3), "JavaScript function")));
+        assert_eq!(range("a.js", src, 6), Ok(((5, 7), "JavaScript function")));
+        // The broken statement has no unit: the caller falls back to lines.
+        assert_eq!(range("a.js", src, 4), Err(()));
     }
 
     #[test]
