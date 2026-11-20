@@ -3,6 +3,13 @@ CVB_END_MARKER_PREFIX=$'\e]777;CVB;END;'
 CVB_SKIP_MARKER=$'\e]777;CVB;SKIP\a'
 CVB_COMMAND_MARKER_PREFIX=$'\e]777;CVB;COMMAND;'
 
+# Private command used by CVB to force the final Readline line of a pasted
+# command block to execute. The DEBUG trap records the invocation itself;
+# commands inside this function are not traced as top-level commands.
+__cvb_batch_end() {
+    :
+}
+
 # Top-level simple commands run since the last prompt, recorded by the DEBUG
 # trap. Used to decide whether an empty capture may be skipped (see
 # cvb_control_skip_listed).

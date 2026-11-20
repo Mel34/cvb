@@ -81,6 +81,11 @@ struct CaptureState {
     captured: Vec<u8>,
 }
 
+struct CommandBlockCapture {
+    commands: Vec<String>,
+    results: Vec<(i32, Vec<u8>)>,
+}
+
 impl CaptureState {
     fn start(&mut self) {
         if !self.capturing {
@@ -1148,6 +1153,7 @@ fn dispatch_paste_events(
     stdout: &io::Stdout,
     screen_terminal: &mut vt100::Parser,
     state: &mut PatchState,
+    command_block: &mut Option<CommandBlockCapture>,
 ) -> Result<(), String> {
     use crate::patch::deliver;
     use crate::patch::paste::PasteEvent;
@@ -1161,6 +1167,23 @@ fn dispatch_paste_events(
                 if !bytes.is_empty() {
                     write_to_master(master, &bytes)?;
                 }
+            }
+            PasteEvent::CommandBlock { body, commands } => {
+                let mut bytes =
+                    gate_input(state, body, master, child, stdout, screen_terminal)?;
+                if bytes.is_empty() {
+                    continue;
+                }
+
+                if !bytes.ends_with(b"\n") && !bytes.ends_with(b"\r") {
+                    bytes.push(b'\n');
+                }
+                bytes.extend_from_slice(b"__cvb_batch_end\r");
+                write_to_master(master, &bytes)?;
+                *command_block = Some(CommandBlockCapture {
+                    commands,
+                    results: Vec::new(),
+                });
             }
             PasteEvent::Patch(text) => {
                 debug_log("patch_paste", &format!("bytes={} review={}", text.len(), state.review_on));
@@ -1456,6 +1479,7 @@ fn proxy(
     // Set by the SKIP marker: the finished command line consisted only of
     // commands from the skip list. Consumed by the next END marker.
     let mut skip_requested = false;
+    let mut command_block: Option<CommandBlockCapture> = None;
     // Recognizes a patch pasted at an idle prompt (see src/patch/). Everything
     // else typed or pasted goes to the shell unchanged.
     let mut patch_input = crate::patch::input::PatchInput::new(crate::patch::deliver::enabled());
@@ -1505,6 +1529,7 @@ fn proxy(
                 &stdout,
                 &mut screen_terminal,
                 &mut patch_state,
+                &mut command_block,
             )?;
         }
 
@@ -1530,6 +1555,7 @@ fn proxy(
                     &stdout,
                     &mut screen_terminal,
                     &mut patch_state,
+                    &mut command_block,
                 )?;
             }
         }
@@ -1671,6 +1697,7 @@ fn proxy(
                     &stdout,
                     &mut screen_terminal,
                     &mut patch_state,
+                    &mut command_block,
                 )?;
             }
         } else if stdin_events.intersects(
@@ -1772,6 +1799,103 @@ fn proxy(
                         }
 
                         let _captured = capture.end();
+
+                        if let Some(block) = command_block.as_mut() {
+                            let sentinel = commands
+                                .iter()
+                                .any(|command| command == "__cvb_batch_end");
+
+                            if sentinel {
+                                let mut report = String::from("Command block results:\n\n");
+                                let mut passed = 0usize;
+                                let mut failed = 0usize;
+
+                                for (index, (command, (exit_status, rendered))) in block
+                                    .commands
+                                    .iter()
+                                    .zip(block.results.iter())
+                                    .enumerate()
+                                {
+                                    report.push_str(&format!(
+                                        "Command {}/{}: {}\n",
+                                        index + 1,
+                                        block.commands.len(),
+                                        command
+                                    ));
+                                    report.push_str(
+                                        &String::from_utf8_lossy(rendered),
+                                    );
+                                    if !rendered.ends_with(b"\n") {
+                                        report.push('\n');
+                                    }
+                                    if *exit_status == 0 {
+                                        passed += 1;
+                                        report.push_str("Exit status: 0 (PASS)\n\n");
+                                    } else {
+                                        failed += 1;
+                                        report.push_str(&format!(
+                                            "Exit status: {} (FAIL)\n\n",
+                                            exit_status
+                                        ));
+                                    }
+                                }
+
+                                if block.results.len() != block.commands.len() {
+                                    report.push_str(&format!(
+                                        "Accounting mismatch: expected {} command result(s), received {}.\n",
+                                        block.commands.len(),
+                                        block.results.len()
+                                    ));
+                                }
+
+                                report.push_str(&format!(
+                                    "Command block: {} passed, {} failed.\n",
+                                    passed, failed
+                                ));
+
+                                let rendered = report.into_bytes();
+                                let captured_bytes = rendered.len();
+                                let buffer =
+                                    crate::clipboard::ClipboardBuffer::new(rendered);
+                                debug_log(
+                                    "command_block_dispatch",
+                                    &format!(
+                                        "expected={} completed={} passed={} failed={} captured_bytes={captured_bytes}",
+                                        block.commands.len(),
+                                        block.results.len(),
+                                        passed,
+                                        failed
+                                    ),
+                                );
+                                crate::clipboard::process(&buffer)?;
+                                command_block = None;
+                            } else {
+                                let index = block.results.len();
+                                let command = block
+                                    .commands
+                                    .get(index)
+                                    .cloned()
+                                    .unwrap_or_else(|| {
+                                        format!("<unexpected command {}>", index + 1)
+                                    });
+                                let rendered =
+                                    render_transcript(&transcript, rows, cols, status, &commands);
+                                block.results.push((status, rendered));
+                                debug_log(
+                                    "command_block_result",
+                                    &format!(
+                                        "index={} expected={} status={status} skip_listed={skip_listed}",
+                                        index + 1,
+                                        block.commands.len()
+                                    ),
+                                );
+                                let _ = command;
+                            }
+
+                            transcript = Transcript::default();
+                            commands.clear();
+                            continue;
+                        }
 
                         // A skip-listed command line with no visible output
                         // leaves the clipboard untouched. Any output, such as

@@ -51,6 +51,11 @@ pub(crate) enum RejectReason {
 pub(crate) enum PasteEvent {
     /// Send these bytes to the shell unchanged.
     Forward(Vec<u8>),
+    /// Send a safe ordinary paste as one independently-accounted command block.
+    CommandBlock {
+        body: Vec<u8>,
+        commands: Vec<String>,
+    },
     /// A complete patch, normalized: starts with `*** Begin Patch`, ends with
     /// `*** End Patch` and one line feed. Nothing was sent to the shell.
     Patch(String),
@@ -417,18 +422,38 @@ impl PasteRecognizer {
 /// when the complete body is valid UTF-8 and contains no control characters
 /// other than tab and line endings. Otherwise preserve the original wrapper.
 fn forward_command_paste(body: Vec<u8>, events: &mut Vec<PasteEvent>) {
-    let safe = std::str::from_utf8(&body).is_ok_and(|text| {
-        text.chars()
-            .all(|ch| !ch.is_control() || matches!(ch, '\n' | '\r' | '\t'))
-    });
-    if safe {
+    let Ok(text) = std::str::from_utf8(&body) else {
+        forward_wrapped(body, events);
+        return;
+    };
+
+    if !text
+        .chars()
+        .all(|ch| !ch.is_control() || matches!(ch, '\n' | '\r' | '\t'))
+    {
+        forward_wrapped(body, events);
+        return;
+    }
+
+    let commands: Vec<String> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_owned)
+        .collect();
+
+    if commands.is_empty() {
         push_forward(events, body);
     } else {
-        let mut bytes = PASTE_START.to_vec();
-        bytes.extend_from_slice(&body);
-        bytes.extend_from_slice(PASTE_END);
-        push_forward(events, bytes);
+        events.push(PasteEvent::CommandBlock { body, commands });
     }
+}
+
+fn forward_wrapped(body: Vec<u8>, events: &mut Vec<PasteEvent>) {
+    let mut bytes = PASTE_START.to_vec();
+    bytes.extend_from_slice(&body);
+    bytes.extend_from_slice(PASTE_END);
+    push_forward(events, bytes);
 }
 
 /// A unified diff: the whole paste, without blank lines around it, ending in
@@ -582,10 +607,18 @@ mod tests {
             .iter()
             .filter_map(|e| match e {
                 PasteEvent::Forward(b) => Some(b.clone()),
+                PasteEvent::CommandBlock { body, .. } => Some(body.clone()),
                 _ => None,
             })
             .flatten()
             .collect()
+    }
+
+    fn reaches_shell(event: &PasteEvent) -> bool {
+        matches!(
+            event,
+            PasteEvent::Forward(_) | PasteEvent::CommandBlock { .. }
+        )
     }
 
     fn expected_patch() -> Vec<PasteEvent> {
@@ -648,10 +681,7 @@ mod tests {
         for size in 1..=input.len() {
             let (events, r) = run(&input, &[size], true);
             assert_eq!(forwarded(&events), expected, "chunk size {size}");
-            assert!(
-                events.iter().all(|e| matches!(e, PasteEvent::Forward(_))),
-                "chunk size {size}"
-            );
+            assert!(events.iter().all(reaches_shell), "chunk size {size}");
             assert_eq!(r.pending(), Pending::Nothing, "chunk size {size}");
         }
     }
@@ -671,10 +701,7 @@ mod tests {
             for size in [1, 2, 5, usize::MAX] {
                 let (events, r) = run(&input, &[size], true);
                 assert_eq!(forwarded(&events), body.as_bytes(), "{body:?} chunk {size}");
-                assert!(
-                    events.iter().all(|e| matches!(e, PasteEvent::Forward(_))),
-                    "{body:?} chunk {size}"
-                );
+                assert!(events.iter().all(reaches_shell), "{body:?} chunk {size}");
                 assert_eq!(r.pending(), Pending::Nothing, "{body:?} chunk {size}");
             }
         }
@@ -713,9 +740,32 @@ mod tests {
         assert_eq!(r.pending(), Pending::Paste);
         assert_eq!(
             r.feed(b"echo two\n\x1b[201~", true),
-            vec![PasteEvent::Forward(b"echo one\necho two\n".to_vec())]
+            vec![PasteEvent::CommandBlock {
+                body: b"echo one\necho two\n".to_vec(),
+                commands: vec!["echo one".to_owned(), "echo two".to_owned()],
+            }]
         );
         assert_eq!(r.pending(), Pending::Nothing);
+    }
+
+    #[test]
+    fn command_block_ignores_blank_and_comment_only_rows() {
+        let body = b"\n# comment\n  echo one  \n \t\n# another comment\nfalse\n";
+        let (events, _) = run(&wrapped(std::str::from_utf8(body).unwrap()), &[3], true);
+        assert_eq!(
+            events,
+            vec![PasteEvent::CommandBlock {
+                body: body.to_vec(),
+                commands: vec!["echo one".to_owned(), "false".to_owned()],
+            }]
+        );
+    }
+
+    #[test]
+    fn comment_only_paste_does_not_create_a_command_block() {
+        let body = "# just a comment\n\n";
+        let (events, _) = run(&wrapped(body), &[usize::MAX], true);
+        assert_eq!(events, vec![PasteEvent::Forward(body.as_bytes().to_vec())]);
     }
 
     #[test]
@@ -1001,7 +1051,7 @@ mod tests {
             for size in [usize::MAX, 7, 1] {
                 let (events, r) = run(&input, &[size], true);
                 assert_eq!(forwarded(&events), text.as_bytes(), "{text:?} chunk {size}");
-                assert!(!events.iter().any(|e| !matches!(e, PasteEvent::Forward(_))), "{text:?}");
+                assert!(events.iter().all(reaches_shell), "{text:?}");
                 assert_eq!(r.pending(), Pending::Nothing);
             }
         }
