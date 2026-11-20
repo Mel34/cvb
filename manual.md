@@ -24,7 +24,7 @@ The user directs the work and is your only hands. You cannot run commands or rea
 
 ## 3. Reading code: `cvb pull`
 
-`cvb pull` searches the files of the repository, tracked or untracked but not ignored by `.gitignore` (so a new file is found before it is committed), and prints line-numbered units. Matching is case-sensitive. The hit is shown as the smallest enclosing syntactic unit: Rust item; Bash function; Python function or class (with its decorators); Zig function, test or type (`const T = struct {...}`); C and C++ function or type (a C++ `template <...>` line and a `typedef` belong to the unit; `.h` is read as C); JavaScript and TypeScript function (including a named arrow function and a method), class, and for TypeScript interface, type alias and enum (`export` belongs to the unit; `.tsx` and `.jsx` are read too); Go function, method or type; Java method, constructor or type (class, interface, enum, record), with annotations; Lua function; Markdown heading section. Any other file type is searched by line. A file that cannot be parsed falls back to lines with a warning, so results may be incomplete. `callers:` and `cascade:` understand Rust only.
+`cvb pull` searches the files of the repository, tracked or untracked but not ignored by `.gitignore` (so a new file is found before it is committed), and prints line-numbered units. Matching is case-sensitive. The hit is shown as the smallest enclosing syntactic unit: Rust item; Bash function; Python function or class (with its decorators); Zig function, test or type (`const T = struct {...}`); C and C++ function or type (a C++ `template <...>` line and a `typedef` belong to the unit; `.h` is read as C); JavaScript and TypeScript function (including a named arrow function and a method), class, and for TypeScript interface, type alias and enum (`export` belongs to the unit; `.tsx` and `.jsx` are read too); Go function, method or type; Java method, constructor or type (class, interface, enum, record), with annotations; Lua function; Markdown heading section. Any other file type is searched by line. A file that cannot be parsed falls back to lines with a warning, so results may be incomplete. `callers:` works in every language above except Markdown; `cascade:` understands Rust only.
 
 | Command | Meaning |
 |---|---|
@@ -36,7 +36,7 @@ The user directs the work and is your only hands. You cannot run commands or rea
 | `cvb pull file:PATH` | The whole file, empty files reported as empty |
 | `cvb pull file:PATH foo` | Search only in that file (one `file:` scope allowed; a bad path is an error, there is no repository-wide fallback) |
 | `cvb pull file:PATH lines:N` or `lines:START-END` | Inclusive line range; several `lines:` selections are allowed; cannot be combined with search terms |
-| `cvb pull callers:NAME` | Syntactic Rust call sites (candidates, not proof); `file:PATH` scopes the scan; cannot be combined with `lines:` |
+| `cvb pull callers:NAME` | Syntactic call sites (candidates, not proof; `a.f()` is a method-call candidate because the receiver type is unknown); `file:PATH` scopes the scan; cannot be combined with `lines:` |
 | `cvb pull +foo cascade:N` | Also include dependencies of matching Rust units, depth 0 to 5 |
 
 Selectors (`file:`, `lines:`, `callers:`, `cascade:`) are syntax, not search terms, and cannot be negated.

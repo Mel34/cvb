@@ -28,6 +28,9 @@ pub(crate) struct Lang {
     /// A unit that is the direct child of one of these nodes takes the parent's
     /// whole range.
     wrappers: &'static [&'static str],
+    /// Call-expression node kinds, each with the field that holds the callee
+    /// (`callers:`).
+    calls: &'static [(&'static str, &'static str)],
 }
 
 const fn unit(kind: &'static str, label: &'static str) -> Unit {
@@ -37,6 +40,8 @@ const fn unit(kind: &'static str, label: &'static str) -> Unit {
 const fn unit_with(kind: &'static str, label: &'static str, needs_child: &'static [&'static str]) -> Unit {
     Unit { kind, label, needs_child }
 }
+
+const CALLS_FUNCTION: &[(&str, &str)] = &[("call_expression", "function")];
 
 const BODY_C: &[&str] = &["field_declaration_list", "enumerator_list"];
 
@@ -53,6 +58,7 @@ static ZIG: Lang = Lang {
         ),
     ],
     wrappers: &[],
+    calls: CALLS_FUNCTION,
 };
 
 static PYTHON: Lang = Lang {
@@ -63,6 +69,7 @@ static PYTHON: Lang = Lang {
         unit("class_definition", "Python class"),
     ],
     wrappers: &["decorated_definition"],
+    calls: &[("call", "function")],
 };
 
 static C: Lang = Lang {
@@ -75,6 +82,7 @@ static C: Lang = Lang {
         unit_with("enum_specifier", "C type", BODY_C),
     ],
     wrappers: &["type_definition"],
+    calls: CALLS_FUNCTION,
 };
 
 static CPP: Lang = Lang {
@@ -88,6 +96,7 @@ static CPP: Lang = Lang {
         unit_with("enum_specifier", "C++ type", BODY_C),
     ],
     wrappers: &["template_declaration", "type_definition"],
+    calls: CALLS_FUNCTION,
 };
 
 /// An arrow function or function expression bound to a name
@@ -105,6 +114,7 @@ static JAVASCRIPT: Lang = Lang {
         unit("class_declaration", "JavaScript class"),
     ],
     wrappers: &["export_statement", "lexical_declaration", "variable_declaration"],
+    calls: CALLS_FUNCTION,
 };
 
 const TYPESCRIPT_UNITS: &[Unit] = &[
@@ -126,6 +136,7 @@ static TYPESCRIPT: Lang = Lang {
     language: || tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
     units: TYPESCRIPT_UNITS,
     wrappers: TYPESCRIPT_WRAPPERS,
+    calls: CALLS_FUNCTION,
 };
 
 /// `.tsx` needs its own grammar: `<T>` is a type assertion in `.ts` and an
@@ -135,6 +146,7 @@ static TSX: Lang = Lang {
     language: || tree_sitter_typescript::LANGUAGE_TSX.into(),
     units: TYPESCRIPT_UNITS,
     wrappers: TYPESCRIPT_WRAPPERS,
+    calls: CALLS_FUNCTION,
 };
 
 static GO: Lang = Lang {
@@ -147,6 +159,7 @@ static GO: Lang = Lang {
         unit("type_alias", "Go type"),
     ],
     wrappers: &[],
+    calls: CALLS_FUNCTION,
 };
 
 static JAVA: Lang = Lang {
@@ -162,6 +175,7 @@ static JAVA: Lang = Lang {
         unit("annotation_type_declaration", "Java type"),
     ],
     wrappers: &[],
+    calls: &[("method_invocation", "name")],
 };
 
 static LUA: Lang = Lang {
@@ -169,6 +183,17 @@ static LUA: Lang = Lang {
     language: || tree_sitter_lua::LANGUAGE.into(),
     units: &[unit("function_declaration", "Lua function")],
     wrappers: &[],
+    calls: &[("function_call", "name")],
+};
+
+/// Bash is read by `pull` itself; this table only serves `callers:`, so it is
+/// not in `LANGUAGES`.
+static BASH: Lang = Lang {
+    extensions: &["sh", "bash"],
+    language: || tree_sitter_bash::LANGUAGE.into(),
+    units: &[unit("function_definition", "Bash function")],
+    wrappers: &[],
+    calls: &[("command", "name")],
 };
 
 static LANGUAGES: [&Lang; 10] = [
@@ -212,6 +237,125 @@ pub(crate) fn unit_range(
         Some(found) => Ok(found),
         None if root.has_error() => Err(()),
         None => Ok(((hit_line, hit_line), "Line")),
+    }
+}
+
+/// The language `callers:` uses for `path`: Bash by extension, else the unit
+/// languages.
+pub(crate) fn callers_language_for(path: &str) -> Option<&'static Lang> {
+    let extension = path.rsplit_once('.')?.1;
+    if BASH.extensions.contains(&extension) {
+        return Some(&BASH);
+    }
+    language_for(path)
+}
+
+/// A call to the searched name.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct CallSite {
+    pub line: usize,
+    /// Name of the function around the call, when there is one.
+    pub enclosing: Option<String>,
+    /// `obj.name(...)`: the receiver is not known, so this is only a candidate.
+    pub member: bool,
+}
+
+/// Calls to `target` in `source`, by line, plus whether the file has syntax
+/// errors (the scan then skips the broken calls and may be incomplete). `None`
+/// when the file cannot be parsed at all.
+pub(crate) fn callers(lang: &Lang, source: &str, target: &str) -> Option<(Vec<CallSite>, bool)> {
+    let mut parser = Parser::new();
+    parser.set_language(&(lang.language)()).ok()?;
+    let tree = parser.parse(source, None)?;
+    let root = tree.root_node();
+    let mut found = Vec::new();
+    scan_calls(lang, root, source.as_bytes(), target, None, &mut found);
+    found.sort_by_key(|site| site.line);
+    Some((found, root.has_error()))
+}
+
+/// Whether a unit label names something that can contain calls.
+fn is_callable(label: &str) -> bool {
+    label.ends_with(" function") || label.ends_with(" method")
+}
+
+/// The name of a function-like node: its `name` field, or the name inside its
+/// `declarator` chain (C and C++).
+fn unit_name(node: Node, source: &[u8]) -> Option<String> {
+    let mut current = node;
+    loop {
+        if let Some(name) = current.child_by_field_name("name") {
+            return name.utf8_text(source).ok().map(str::to_string);
+        }
+        match current.child_by_field_name("declarator") {
+            Some(next)
+                if matches!(next.kind(), "identifier" | "field_identifier" | "qualified_identifier") =>
+            {
+                return next.utf8_text(source).ok().map(str::to_string);
+            }
+            Some(next) => current = next,
+            None => return None,
+        }
+    }
+}
+
+/// The called name of a callee expression, and whether it was reached through a
+/// receiver or namespace member (`a.f`, `a->f`, `a:f`).
+fn callee_name<'s>(node: Node, source: &'s [u8]) -> Option<(&'s str, bool)> {
+    match node.kind() {
+        "identifier" => Some((node.utf8_text(source).ok()?, false)),
+        "command_name" => {
+            let word = node.named_child(0).filter(|child| child.kind() == "word")?;
+            Some((word.utf8_text(source).ok()?, false))
+        }
+        "member_expression" | "attribute" | "selector_expression" | "field_expression"
+        | "dot_index_expression" | "method_index_expression" => {
+            let field = ["property", "attribute", "field", "member", "method"]
+                .iter()
+                .find_map(|name| node.child_by_field_name(name))?;
+            Some((field.utf8_text(source).ok()?, true))
+        }
+        // `ns::f(...)` and `f<T>(...)` call `f`.
+        "qualified_identifier" | "template_function" => {
+            callee_name(node.child_by_field_name("name")?, source)
+        }
+        _ => None,
+    }
+}
+
+fn scan_calls(
+    lang: &Lang,
+    node: Node,
+    source: &[u8],
+    target: &str,
+    enclosing: Option<&str>,
+    found: &mut Vec<CallSite>,
+) {
+    let mut inner = None;
+    if !node.has_error() {
+        if let Some(spec) = unit_of(lang, node)
+            && is_callable(spec.label)
+        {
+            inner = unit_name(node, source);
+        }
+        if let Some((_, field)) = lang.calls.iter().find(|(kind, _)| *kind == node.kind())
+            && let Some(callee) = node.child_by_field_name(field)
+            && let Some((name, mut member)) = callee_name(callee, source)
+            && name == target
+        {
+            // Java names the method directly; a receiver makes it a candidate.
+            member |= node.child_by_field_name("object").is_some();
+            found.push(CallSite {
+                line: node.start_position().row + 1,
+                enclosing: enclosing.map(str::to_string),
+                member,
+            });
+        }
+    }
+    let enclosing = inner.as_deref().or(enclosing);
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        scan_calls(lang, child, source, target, enclosing, found);
     }
 }
 
@@ -451,6 +595,122 @@ mod tests {
         assert_eq!(range("a.js", src, 6), Ok(((5, 7), "JavaScript function")));
         // The broken statement has no unit: the caller falls back to lines.
         assert_eq!(range("a.js", src, 4), Err(()));
+    }
+
+    /// (line, enclosing function, through a receiver)
+    fn sites(path: &str, source: &str, target: &str) -> Vec<(usize, Option<String>, bool)> {
+        let lang = callers_language_for(path).expect("language");
+        callers(lang, source, target)
+            .expect("parses")
+            .0
+            .into_iter()
+            .map(|site| (site.line, site.enclosing, site.member))
+            .collect()
+    }
+
+    fn at(line: usize, function: &str, member: bool) -> (usize, Option<String>, bool) {
+        (line, Some(function.to_string()), member)
+    }
+
+    #[test]
+    fn python_and_javascript_calls() {
+        let py = "def f():\n    run()\n    a.run(1)\n    runner()\nrun()\n";
+        assert_eq!(
+            sites("a.py", py, "run"),
+            vec![at(2, "f", false), at(3, "f", true), (5, None, false)]
+        );
+        let js = "function f() {\n  run();\n  a?.run();\n  const g = () => run();\n}\nclass K {\n  m() { return run(); }\n}\n";
+        assert_eq!(
+            sites("a.js", js, "run"),
+            vec![at(2, "f", false), at(3, "f", true), at(4, "g", false), at(7, "m", false)]
+        );
+    }
+
+    #[test]
+    fn typescript_generic_calls_and_tsx() {
+        let ts = "function f() {\n  run<number>(1);\n  a.run();\n}\n";
+        assert_eq!(sites("a.ts", ts, "run"), vec![at(2, "f", false), at(3, "f", true)]);
+        let tsx = "export function App() {\n  return <div>{run()}</div>;\n}\n";
+        assert_eq!(sites("a.tsx", tsx, "run"), vec![at(2, "App", false)]);
+    }
+
+    #[test]
+    fn go_calls_and_methods() {
+        let src = "package p\n\nfunc f() {\n\trun()\n\tpkg.run(1)\n}\n\nfunc (s S) m() {\n\trun()\n}\n";
+        assert_eq!(
+            sites("a.go", src, "run"),
+            vec![at(4, "f", false), at(5, "f", true), at(9, "m", false)]
+        );
+    }
+
+    #[test]
+    fn java_calls_with_and_without_a_receiver() {
+        let src = "class A {\n  void f() {\n    run();\n    this.run();\n    new Run();\n  }\n  A() { run(); }\n}\n";
+        assert_eq!(
+            sites("A.java", src, "run"),
+            vec![at(3, "f", false), at(4, "f", true), at(7, "A", false)]
+        );
+    }
+
+    #[test]
+    fn lua_zig_and_bash_calls() {
+        let lua = "local function f()\n  run()\n  a.run()\n  a:run()\nend\n";
+        assert_eq!(
+            sites("a.lua", lua, "run"),
+            vec![at(2, "f", false), at(3, "f", true), at(4, "f", true)]
+        );
+        let zig = "pub fn m() void {\n    run();\n    a.run(1);\n}\n";
+        assert_eq!(sites("a.zig", zig, "run"), vec![at(2, "m", false), at(3, "m", true)]);
+        let sh = "f() {\n  run a b\n  x=$(run c)\n  runner\n}\nrun\n";
+        assert_eq!(
+            sites("a.sh", sh, "run"),
+            vec![at(2, "f", false), at(3, "f", false), (6, None, false)]
+        );
+        assert_eq!(sites("a.bash", sh, "runner"), vec![at(4, "f", false)]);
+    }
+
+    #[test]
+    fn c_and_cpp_calls_name_the_function_around_them() {
+        let c = "int f(void) {\n  run();\n  s.run(1);\n  p->run(2);\n  return 0;\n}\n";
+        assert_eq!(
+            sites("a.c", c, "run"),
+            vec![at(2, "f", false), at(3, "f", true), at(4, "f", true)]
+        );
+        let cpp = "int C::h() {\n  run();\n  ns::run();\n  run<int>(1);\n  a.run();\n}\n";
+        assert_eq!(
+            sites("a.cpp", cpp, "run"),
+            vec![at(2, "C::h", false), at(3, "C::h", false), at(4, "C::h", false), at(5, "C::h", true)]
+        );
+    }
+
+    #[test]
+    fn mentions_in_comments_and_strings_are_not_calls() {
+        let src = "def f():\n    # run()\n    s = \"run()\"\n    return run\n";
+        assert!(sites("a.py", src, "run").is_empty());
+    }
+
+    #[test]
+    fn a_broken_file_still_reports_the_calls_that_parsed_and_says_it_is_broken() {
+        let src = "def good():\n    run()\n\ndef bad(:\n    run(\n";
+        let lang = callers_language_for("a.py").unwrap();
+        let (found, broken) = callers(lang, src, "run").unwrap();
+        assert!(broken);
+        assert!(found.iter().any(|site| site.line == 2 && site.enclosing.as_deref() == Some("good")), "{found:?}");
+        let (_, broken) = callers(lang, "def f():\n    run()\n", "run").unwrap();
+        assert!(!broken);
+    }
+
+    #[test]
+    fn callable_labels_are_functions_and_methods_only() {
+        for lang in LANGUAGES.iter().copied().chain([&BASH]) {
+            for unit in lang.units {
+                let callable = is_callable(unit.label);
+                let expected = !(unit.label.ends_with(" type")
+                    || unit.label.ends_with(" class")
+                    || unit.label.ends_with(" test"));
+                assert_eq!(callable, expected, "{}", unit.label);
+            }
+        }
     }
 
     #[test]

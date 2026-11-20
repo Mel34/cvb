@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use crate::cascade;
+use crate::units;
 
 const PATCH_REMINDER: &str =
     "Edit with a patch: apply_patch format or git diff, pasted at the prompt of this session.";
@@ -454,6 +455,22 @@ pub fn filter_matches(query: &SearchQuery, matches: &str) -> String {
     filtered
 }
 
+/// A plain name: letters, digits, `_`, `$`, and `-` after the first character
+/// (Bash function names). Paths such as `module::run` are not names.
+fn is_callable_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$')
+        && chars.all(|c| c.is_alphanumeric() || matches!(c, '_' | '$' | '-'))
+}
+
+/// Whether `callers:` reads `path`: Rust, or a language `units` knows (Bash
+/// included).
+fn callers_understands(path: &str) -> bool {
+    Path::new(path).extension() == Some(OsStr::new("rs")) || units::callers_language_for(path).is_some()
+}
+
 fn extract_callers_scope(args: &[String]) -> Result<Option<(String, Option<String>)>, String> {
     for arg in args {
         if arg.starts_with("-callers:")
@@ -483,9 +500,9 @@ fn extract_callers_scope(args: &[String]) -> Result<Option<(String, Option<Strin
         .strip_prefix("callers:")
         .expect("selector prefix was checked");
 
-    if target.is_empty() || syn::parse_str::<syn::Ident>(target).is_err() {
+    if !is_callable_name(target) {
         return Err(
-            "CVB pull: callers: must be followed by a Rust function or method name.".to_string(),
+            "CVB pull: callers: must be followed by a function or method name.".to_string(),
         );
     }
 
@@ -503,8 +520,12 @@ fn extract_callers_scope(args: &[String]) -> Result<Option<(String, Option<Strin
             if scope.is_some() {
                 return Err("CVB pull: only one file: scope is allowed.".to_string());
             }
-            if Path::new(path).extension() != Some(OsStr::new("rs")) {
-                return Err("CVB pull: callers: file scope must be a Rust .rs file.".to_string());
+            if !callers_understands(path) {
+                return Err(
+                    "CVB pull: callers: file scope must be a source file in a supported language \
+                     (Rust, Bash, Python, Zig, C, C++, JavaScript, TypeScript, Go, Java, Lua)."
+                        .to_string(),
+                );
             }
             scope = Some(path.to_string());
         } else if arg.starts_with("lines:") {
@@ -540,16 +561,17 @@ fn run_callers(
         }
     };
 
-    let rust_files: Vec<OsString> = files
+    let source_files: Vec<OsString> = files
         .into_iter()
-        .filter(|path| Path::new(path).extension() == Some(OsStr::new("rs")))
+        .filter(|path| callers_understands(&path.to_string_lossy()))
         .collect();
 
     let mut found = false;
     let mut incomplete = false;
 
-    for path in rust_files {
+    for path in source_files {
         let display_path = path.to_string_lossy();
+        let is_rust = Path::new(&path).extension() == Some(OsStr::new("rs"));
         let full_path = if let Some(d) = dir {
             d.join(&path)
         } else {
@@ -560,7 +582,7 @@ fn run_callers(
             Ok(source) => source,
             Err(error) => {
                 stderr.push_str(&format!(
-                    "CVB pull: warning: unable to read Rust file {display_path}: {error}; \
+                    "CVB pull: warning: unable to read file {display_path}: {error}; \
                      caller results may be incomplete.\n"
                 ));
                 incomplete = true;
@@ -568,16 +590,39 @@ fn run_callers(
             }
         };
 
-        let matches = match rust_callers(&source, target) {
-            Some(matches) => matches,
-            None => {
-                stderr.push_str(&format!(
-                    "CVB pull: warning: skipping unparseable Rust file {display_path}; \
-                     caller results may be incomplete.\n"
-                ));
-                incomplete = true;
-                continue;
-            }
+        let matches = if is_rust {
+            rust_callers(&source, target)
+        } else {
+            let lang = units::callers_language_for(&display_path).expect("checked by the filter");
+            units::callers(lang, &source, target).map(|(sites, has_errors)| {
+                if has_errors {
+                    stderr.push_str(&format!(
+                        "CVB pull: warning: {display_path} has syntax errors; calls in the \
+                         broken parts are skipped and caller results may be incomplete.\n"
+                    ));
+                    incomplete = true;
+                }
+                sites
+                    .into_iter()
+                    .map(|site| RustCallerMatch {
+                        line: site.line,
+                        enclosing_function: site.enclosing,
+                        kind: if site.member {
+                            RustCallKind::Method
+                        } else {
+                            RustCallKind::Function
+                        },
+                    })
+                    .collect()
+            })
+        };
+        let Some(matches) = matches else {
+            stderr.push_str(&format!(
+                "CVB pull: warning: skipping unparseable file {display_path}; \
+                 caller results may be incomplete.\n"
+            ));
+            incomplete = true;
+            continue;
         };
 
         for item in matches {
@@ -2084,6 +2129,18 @@ mod pull_tests {
     }
 
     #[test]
+    fn callers_accept_names_and_files_of_every_supported_language() {
+        for target in ["run", "_run", "run2", "do-it", "$el"] {
+            let args = [format!("callers:{target}")];
+            assert!(extract_callers_scope(&args).unwrap().is_some(), "{target}");
+        }
+        for file in ["a.rs", "a.py", "a.go", "a.sh", "a.tsx", "a.java", "a.lua", "a.zig", "a.cpp", "a.js"] {
+            let args = [format!("file:{file}"), "callers:run".to_string()];
+            assert!(extract_callers_scope(&args).is_ok(), "{file}");
+        }
+    }
+
+    #[test]
     fn extract_callers_scope_rejects_invalid_combinations() {
         for args in [
             vec!["callers:".to_string()],
@@ -2097,6 +2154,9 @@ mod pull_tests {
             ],
             vec!["file:manual.md".to_string(), "callers:run".to_string()],
             vec!["callers:module::run".to_string()],
+            vec!["callers:-run".to_string()],
+            vec!["callers:a b".to_string()],
+            vec!["file:notes.txt".to_string(), "callers:run".to_string()],
             vec!["-callers:run".to_string()],
         ] {
             assert!(
@@ -2294,6 +2354,45 @@ fn target() {
         assert!(out.contains("C function: lib.c:1-3"), "{out}");
         // The whole unit is printed, not only the matching line.
         assert!(out.contains("return 7;") && out.contains("return 8") && out.contains("return 9;"), "{out}");
+    }
+
+    #[test]
+    fn callers_scans_every_supported_language() {
+        let dir = scratch_repo("callers-langs");
+        std::fs::write(dir.join("a.py"), "def f():\n    run()\n").unwrap();
+        std::fs::write(dir.join("b.go"), "package p\n\nfunc g() {\n\ts.run()\n}\n").unwrap();
+        std::fs::write(dir.join("c.sh"), "h() {\n  run now\n}\n").unwrap();
+        std::fs::write(dir.join("d.rs"), "fn k() { run(); }\n").unwrap();
+        let (code, out, err) = run_capture(&["callers:run".into()], Some(&dir));
+        assert_eq!(code, 0, "{err}");
+        assert!(out.contains("a.py:2: function call to run inside f"), "{out}");
+        assert!(out.contains("b.go:4: method-call candidate to run inside g"), "{out}");
+        assert!(out.contains("c.sh:2: function call to run inside h"), "{out}");
+        assert!(out.contains("d.rs:1: function call to run inside k"), "{out}");
+
+        let (code, out, _) = run_capture(&["file:a.py".into(), "callers:run".into()], Some(&dir));
+        assert_eq!(code, 0);
+        assert!(out.contains("a.py:2") && !out.contains("b.go"), "{out}");
+
+        let (code, out, _) = run_capture(&["callers:nothing_calls_this".into()], Some(&dir));
+        assert_eq!(code, 1);
+        assert!(out.contains("No callers found for: nothing_calls_this"), "{out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn callers_in_a_broken_file_are_found_but_an_empty_result_is_not_trusted() {
+        let dir = scratch_repo("callers-broken");
+        std::fs::write(dir.join("a.py"), "def good():\n    run()\n\ndef bad(:\n    x = (\n").unwrap();
+        let (code, out, err) = run_capture(&["callers:run".into()], Some(&dir));
+        assert_eq!(code, 0, "{out}{err}");
+        assert!(out.contains("a.py:2: function call to run inside good"), "{out}");
+        assert!(err.contains("a.py has syntax errors"), "{err}");
+
+        let (code, _, err) = run_capture(&["callers:absent".into()], Some(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(code, 2, "{err}");
+        assert!(err.contains("no reliable no-callers conclusion"), "{err}");
     }
 
     #[test]

@@ -234,7 +234,7 @@ cvb pull foo -test        leave out units containing test
 cvb pull file:PATH        the whole file
 cvb pull file:PATH foo    search one file
 cvb pull file:PATH lines:10-40
-cvb pull callers:NAME     syntactic call sites (Rust)
+cvb pull callers:NAME     syntactic call sites (every supported language except Markdown)
 cvb pull +foo cascade:2   also the Rust units the matches depend on
 ```
 
