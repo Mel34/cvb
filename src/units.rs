@@ -323,6 +323,104 @@ fn callee_name<'s>(node: Node, source: &'s [u8]) -> Option<(&'s str, bool)> {
     }
 }
 
+/// A function or method defined in a file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Definition {
+    /// As written (`C::h`, `M.f`).
+    pub name: String,
+    pub label: &'static str,
+    pub start: usize,
+    pub end: usize,
+}
+
+impl Definition {
+    /// The name a call uses: `h` for `C::h`, `f` for `M.f` and `M:f`.
+    pub fn bare_name(&self) -> &str {
+        self.name.rsplit([':', '.']).next().unwrap_or(&self.name)
+    }
+}
+
+/// A call in a file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CallEdge {
+    pub name: String,
+    pub line: usize,
+    /// `obj.name(...)`: reached through a receiver or namespace.
+    pub member: bool,
+    /// The receiver when it is `self`, `this` or a plain variable name.
+    pub receiver: Option<String>,
+    /// Range of the function or method around the call.
+    pub within: Option<(usize, usize)>,
+}
+
+pub(crate) struct Outline {
+    pub definitions: Vec<Definition>,
+    pub calls: Vec<CallEdge>,
+    pub has_errors: bool,
+}
+
+/// Every function definition and every call of `source`, for the cascade. Nodes
+/// that contain a syntax error are skipped; `None` when the file cannot be parsed.
+pub(crate) fn outline(lang: &Lang, source: &str) -> Option<Outline> {
+    let mut parser = Parser::new();
+    parser.set_language(&(lang.language)()).ok()?;
+    let tree = parser.parse(source, None)?;
+    let root = tree.root_node();
+    let mut out = Outline { definitions: Vec::new(), calls: Vec::new(), has_errors: root.has_error() };
+    outline_node(lang, root, source.as_bytes(), None, &mut out);
+    Some(out)
+}
+
+fn receiver_of(call: Node, callee: Node, source: &[u8]) -> Option<String> {
+    let object = call.child_by_field_name("object").or_else(|| {
+        ["object", "operand", "argument", "table"]
+            .iter()
+            .find_map(|field| callee.child_by_field_name(field))
+    })?;
+    matches!(object.kind(), "identifier" | "this" | "self")
+        .then(|| object.utf8_text(source).ok().map(str::to_string))
+        .flatten()
+}
+
+fn outline_node(
+    lang: &Lang,
+    node: Node,
+    source: &[u8],
+    within: Option<(usize, usize)>,
+    out: &mut Outline,
+) {
+    let mut inner = within;
+    if !node.has_error() {
+        if let Some(spec) = unit_of(lang, node)
+            && is_callable(spec.label)
+            && let Some(name) = unit_name(node, source)
+        {
+            let outer = outer_node(lang, node);
+            let range = (outer.start_position().row + 1, outer.end_position().row + 1);
+            out.definitions.push(Definition { name, label: spec.label, start: range.0, end: range.1 });
+            inner = Some(range);
+        }
+        if let Some((_, field)) = lang.calls.iter().find(|(kind, _)| *kind == node.kind())
+            && let Some(callee) = node.child_by_field_name(field)
+            && let Some((name, mut member)) = callee_name(callee, source)
+        {
+            member |= node.child_by_field_name("object").is_some();
+            let receiver = if member { receiver_of(node, callee, source) } else { None };
+            out.calls.push(CallEdge {
+                name: name.to_string(),
+                line: node.start_position().row + 1,
+                member,
+                receiver,
+                within: inner,
+            });
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        outline_node(lang, child, source, inner, out);
+    }
+}
+
 fn scan_calls(
     lang: &Lang,
     node: Node,
@@ -371,6 +469,20 @@ fn unit_of<'a>(lang: &'a Lang, node: Node) -> Option<&'a Unit> {
     has.then_some(spec)
 }
 
+/// The unit together with its wrappers. Wrappers can nest (`export const f = ...`
+/// is an export around a declaration around the declarator), so this climbs while
+/// they continue.
+fn outer_node<'t>(lang: &Lang, node: Node<'t>) -> Node<'t> {
+    let mut outer = node;
+    while let Some(parent) = outer.parent()
+        && lang.wrappers.contains(&parent.kind())
+        && !parent.has_error()
+    {
+        outer = parent;
+    }
+    outer
+}
+
 fn collect(
     lang: &Lang,
     node: Node,
@@ -390,15 +502,7 @@ fn collect(
     if !node.has_error()
         && let Some(spec) = unit_of(lang, node)
     {
-        // Wrappers can nest (`export const f = ...` is an export around a
-        // declaration around the declarator), so climb while they continue.
-        let mut outer = node;
-        while let Some(parent) = outer.parent()
-            && lang.wrappers.contains(&parent.kind())
-            && !parent.has_error()
-        {
-            outer = parent;
-        }
+        let outer = outer_node(lang, node);
         let range = (outer.start_position().row + 1, outer.end_position().row + 1);
         // Units nest and the walk goes outside in, so the last one found is
         // the innermost that holds the line.
@@ -698,6 +802,43 @@ mod tests {
         assert!(found.iter().any(|site| site.line == 2 && site.enclosing.as_deref() == Some("good")), "{found:?}");
         let (_, broken) = callers(lang, "def f():\n    run()\n", "run").unwrap();
         assert!(!broken);
+    }
+
+    #[test]
+    fn the_outline_lists_definitions_and_calls_with_their_surroundings() {
+        let src = "export function a() {\n  return b() + this.c() + o.d();\n}\nclass K {\n  b() { return a(); }\n}\n";
+        let lang = callers_language_for("a.js").unwrap();
+        let outline = outline(lang, src).unwrap();
+        let defs: Vec<(&str, usize, usize)> = outline
+            .definitions
+            .iter()
+            .map(|d| (d.name.as_str(), d.start, d.end))
+            .collect();
+        assert_eq!(defs, vec![("a", 1, 3), ("b", 5, 5)]);
+        let calls: Vec<(&str, usize, bool, Option<&str>, Option<(usize, usize)>)> = outline
+            .calls
+            .iter()
+            .map(|c| (c.name.as_str(), c.line, c.member, c.receiver.as_deref(), c.within))
+            .collect();
+        assert_eq!(
+            calls,
+            vec![
+                ("b", 2, false, None, Some((1, 3))),
+                ("c", 2, true, Some("this"), Some((1, 3))),
+                ("d", 2, true, Some("o"), Some((1, 3))),
+                ("a", 5, false, None, Some((5, 5))),
+            ]
+        );
+    }
+
+    #[test]
+    fn definitions_know_the_name_a_call_uses() {
+        let cpp = outline(callers_language_for("a.cpp").unwrap(), "int C::h() { return 1; }\n").unwrap();
+        assert_eq!(cpp.definitions[0].name, "C::h");
+        assert_eq!(cpp.definitions[0].bare_name(), "h");
+        let lua = outline(callers_language_for("a.lua").unwrap(), "function M.f()\nend\nfunction M:g()\nend\n").unwrap();
+        let bare: Vec<&str> = lua.definitions.iter().map(Definition::bare_name).collect();
+        assert_eq!(bare, vec!["f", "g"]);
     }
 
     #[test]

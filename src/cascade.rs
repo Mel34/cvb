@@ -5,6 +5,7 @@ use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
 use crate::pull::{self, MatchingSeed, RustItemKind, UnitKey, is_call_invocation};
+use crate::units::{self, CallEdge};
 
 pub const MAX_DEPTH: usize = 5;
 pub const MAX_ADDED_UNITS: usize = 25;
@@ -67,7 +68,7 @@ pub fn extract_directive(args: &[String]) -> Result<(Option<usize>, Vec<String>)
 #[derive(Debug, Clone)]
 pub struct IndexedDef {
     pub path: String,
-    pub kind: RustItemKind,
+    pub label: &'static str,
     pub name: String,
     #[allow(dead_code)]
     pub owner: Option<String>,
@@ -97,6 +98,134 @@ pub struct Index {
     pub file_sources: HashMap<String, String>,
     pub parse_warnings: Vec<String>,
     pub total_callers_count: HashMap<UnitKey, usize>,
+    /// Functions and calls of the tree-sitter languages (everything but Rust).
+    pub generic: GenericIndex,
+}
+
+/// The index of the languages `units` reads. Kept apart from the Rust index so
+/// Rust results cannot change when a repository also holds other languages.
+#[derive(Default)]
+pub struct GenericIndex {
+    /// (language, bare name) to the function definitions of that name, test
+    /// files excluded.
+    pub fns: HashMap<(usize, String), Vec<IndexedDef>>,
+    /// Per file: its language and its calls.
+    pub calls: HashMap<String, (usize, Vec<CallEdge>)>,
+    /// Per file: its function definitions, to name the unit around a call.
+    pub defs: HashMap<String, Vec<units::Definition>>,
+    pub sources: HashMap<String, String>,
+}
+
+impl Index {
+    /// The text of an indexed file of any language.
+    fn source(&self, path: &str) -> Option<&String> {
+        self.file_sources
+            .get(path)
+            .or_else(|| self.generic.sources.get(path))
+    }
+}
+
+/// The identity of a language, for keeping same-named functions of different
+/// languages apart.
+fn language_id(lang: &units::Lang) -> usize {
+    lang as *const units::Lang as usize
+}
+
+/// Test code is not followed: files named or placed like tests.
+fn is_test_path(path: &str) -> bool {
+    let path = Path::new(path);
+    let in_test_dir = path.components().any(|part| {
+        matches!(
+            part.as_os_str().to_str(),
+            Some("test" | "tests" | "__tests__" | "spec" | "specs")
+        )
+    });
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    in_test_dir
+        || stem.starts_with("test_")
+        || ["_test", ".test", ".spec", "_spec", "Test", "Tests"]
+            .iter()
+            .any(|suffix| stem.ends_with(suffix))
+}
+
+fn add_generic_files(index: &mut Index, files: &[String], dir: Option<&Path>) {
+    for path in files {
+        if Path::new(path).extension() == Some(OsStr::new("rs")) || is_test_path(path) {
+            continue;
+        }
+        let Some(lang) = units::callers_language_for(path) else {
+            continue;
+        };
+        let full_path = dir.map_or_else(|| Path::new(path).to_path_buf(), |d| d.join(path));
+        let source = match std::fs::read_to_string(&full_path) {
+            Ok(source) => source,
+            Err(error) => {
+                index
+                    .parse_warnings
+                    .push(format!("skipping unreadable file {path}: {error}; index incomplete."));
+                continue;
+            }
+        };
+        let Some(outline) = units::outline(lang, &source) else {
+            index
+                .parse_warnings
+                .push(format!("skipping unparseable file {path}; index incomplete."));
+            continue;
+        };
+        if outline.has_errors {
+            index.parse_warnings.push(format!(
+                "{path} has syntax errors; functions in the broken parts are missing; index incomplete."
+            ));
+        }
+        let id = language_id(lang);
+        for def in &outline.definitions {
+            index
+                .generic
+                .fns
+                .entry((id, def.bare_name().to_string()))
+                .or_default()
+                .push(IndexedDef {
+                    path: path.clone(),
+                    label: def.label,
+                    name: def.bare_name().to_string(),
+                    owner: None,
+                    start: def.start,
+                    end: def.end,
+                    param_types: Vec::new(),
+                });
+        }
+        index.generic.defs.insert(path.clone(), outline.definitions);
+        index.generic.calls.insert(path.clone(), (id, outline.calls));
+        index.generic.sources.insert(path.clone(), source);
+    }
+
+    // How many distinct units call each function, to recognise utilities.
+    let mut callers: HashMap<UnitKey, HashSet<UnitKey>> = HashMap::new();
+    for (path, (id, calls)) in &index.generic.calls {
+        for call in calls {
+            let Some((start, end)) = call.within else {
+                continue;
+            };
+            if call.member && !is_own_receiver(call.receiver.as_deref()) {
+                continue;
+            }
+            if let Some(defs) = index.generic.fns.get(&(*id, call.name.clone()))
+                && defs.len() == 1
+            {
+                callers
+                    .entry(defs[0].unit_key())
+                    .or_default()
+                    .insert(UnitKey { path: path.clone(), start, end });
+            }
+        }
+    }
+    for (key, set) in callers {
+        index.total_callers_count.insert(key, set.len());
+    }
+}
+
+fn is_own_receiver(receiver: Option<&str>) -> bool {
+    matches!(receiver, Some("self" | "this" | "cls"))
 }
 
 fn extract_type_name_from_type(ty: &syn::Type) -> Option<String> {
@@ -219,9 +348,15 @@ pub fn build_index(dir: Option<&Path>) -> Index {
                 file_sources,
                 parse_warnings,
                 total_callers_count: HashMap::new(),
+                generic: GenericIndex::default(),
             };
         }
     };
+
+    let all_files: Vec<String> = tracked
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
 
     let rs_files: Vec<String> = tracked
         .into_iter()
@@ -314,7 +449,7 @@ pub fn build_index(dir: Option<&Path>) -> Index {
 
                     let def = IndexedDef {
                         path: path.clone(),
-                        kind: item.kind,
+                        label: item.kind.label(),
                         name: name.clone(),
                         owner: item.owner.clone(),
                         start: item.start,
@@ -332,7 +467,7 @@ pub fn build_index(dir: Option<&Path>) -> Index {
                     let name = item.name.clone().unwrap_or_default();
                     let def = IndexedDef {
                         path: path.clone(),
-                        kind: item.kind,
+                        label: item.kind.label(),
                         name: name.clone(),
                         owner: None,
                         start: item.start,
@@ -345,7 +480,7 @@ pub fn build_index(dir: Option<&Path>) -> Index {
                     let name = item.name.clone().unwrap_or_default();
                     let def = IndexedDef {
                         path: path.clone(),
-                        kind: item.kind,
+                        label: item.kind.label(),
                         name: name.clone(),
                         owner: None,
                         start: item.start,
@@ -468,7 +603,7 @@ pub fn build_index(dir: Option<&Path>) -> Index {
         total_callers_count.insert(k, set.len());
     }
 
-    Index {
+    let mut index = Index {
         free_fns,
         methods,
         types,
@@ -477,7 +612,10 @@ pub fn build_index(dir: Option<&Path>) -> Index {
         file_sources,
         parse_warnings,
         total_callers_count,
-    }
+        generic: GenericIndex::default(),
+    };
+    add_generic_files(&mut index, &all_files, dir);
+    index
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1151,6 +1289,93 @@ pub fn resolve_edge(
     }
 }
 
+fn locations(defs: &[&IndexedDef]) -> Vec<String> {
+    defs.iter()
+        .map(|d| format!("{}:{}-{}", d.path, d.start, d.end))
+        .collect()
+}
+
+/// Resolves one call of a non-Rust unit by name. There are no types and no
+/// imports: a plain call is a function of the same file when that is unique,
+/// else the one function of that name in the repository. `self.f()` and
+/// `this.f()` are looked up in the same file only. A call through any other
+/// receiver is listed, not followed.
+fn resolve_generic_call(
+    call: &CallEdge,
+    language: usize,
+    from: &UnitKey,
+    caller_name: &str,
+    index: &Index,
+) -> Resolution {
+    let Some(defs) = index.generic.fns.get(&(language, call.name.clone())) else {
+        return Resolution::External;
+    };
+    let relationship = format!("callee of {caller_name} (call at :{})", call.line);
+    let found = |target: &IndexedDef, reason: &str| Resolution::Resolved {
+        target: target.clone(),
+        reason: reason.to_string(),
+        relationship: relationship.clone(),
+        confidence: 1,
+        is_type: false,
+    };
+    let ambiguous = |defs: &[&IndexedDef]| Resolution::Ambiguous {
+        name: call.name.clone(),
+        line: call.line,
+        locations: locations(defs),
+    };
+    let same_file: Vec<&IndexedDef> = defs.iter().filter(|d| d.path == from.path).collect();
+
+    if call.member {
+        if !is_own_receiver(call.receiver.as_deref()) {
+            return Resolution::UnresolvedUnknownReceiver {
+                name: call.name.clone(),
+                line: call.line,
+            };
+        }
+        return match same_file.as_slice() {
+            [one] => found(one, "resolved by name on self/this in the same file"),
+            [] => Resolution::UnresolvedUnknownReceiver {
+                name: call.name.clone(),
+                line: call.line,
+            },
+            many => ambiguous(many),
+        };
+    }
+
+    match same_file.as_slice() {
+        [one] => found(one, "resolved by name in same file"),
+        [] => match defs.as_slice() {
+            [one] => found(one, "resolved by unique name repo-wide"),
+            many => ambiguous(&many.iter().collect::<Vec<_>>()),
+        },
+        many => ambiguous(many),
+    }
+}
+
+/// The calls of a non-Rust unit, resolved; each with the name to count when it
+/// turns out to be external.
+fn generic_resolutions(unit: &UnitKey, index: &Index) -> Vec<(Resolution, Option<String>)> {
+    let Some((language, calls)) = index.generic.calls.get(&unit.path) else {
+        return Vec::new();
+    };
+    let name = index
+        .generic
+        .defs
+        .get(&unit.path)
+        .and_then(|defs| defs.iter().find(|d| d.start == unit.start && d.end == unit.end))
+        .map_or_else(|| "seed".to_string(), |d| d.bare_name().to_string());
+    calls
+        .iter()
+        .filter(|call| unit.start <= call.line && call.line <= unit.end)
+        .map(|call| {
+            (
+                resolve_generic_call(call, *language, unit, &name, index),
+                Some(call.name.clone()),
+            )
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone)]
 pub struct Candidate {
     pub target: IndexedDef,
@@ -1261,7 +1486,13 @@ pub fn run_with_reserved_chars(
 
     for (u, _) in matching_seeds {
         if !u.key.path.ends_with(".rs") {
-            non_rust_or_test_seeds += 1;
+            // Another language is followed when it is indexed (so not a test
+            // file) and the hit is a unit.
+            if u.label != "Line" && index.generic.calls.contains_key(&u.key.path) {
+                seeds.push(u.key.clone());
+            } else {
+                non_rust_or_test_seeds += 1;
+            }
             continue;
         }
 
@@ -1309,15 +1540,34 @@ pub fn run_with_reserved_chars(
 
         frontier.sort();
         for u in &frontier {
-            let Some(source) = index.file_sources.get(&u.path) else {
+            let Some(source) = index.source(&u.path) else {
                 continue;
             };
 
-            let (caller_name, edges) = extract_unit_edges(source, u, &index);
-            let caller_display = caller_name.unwrap_or_else(|| "seed".to_string());
+            let resolutions: Vec<(Resolution, Option<String>)> = if u.path.ends_with(".rs") {
+                let (caller_name, edges) = extract_unit_edges(source, u, &index);
+                let caller_display = caller_name.unwrap_or_else(|| "seed".to_string());
+                edges
+                    .into_iter()
+                    .map(|edge| {
+                        let resolution = resolve_edge(&edge, u, &caller_display, &index);
+                        let name = match edge {
+                            EdgeKind::PathCall { name, .. }
+                            | EdgeKind::MethodCallTyped { method: name, .. }
+                            | EdgeKind::MethodCallUnknown { method: name, .. }
+                            | EdgeKind::MacroCall { name, .. }
+                            | EdgeKind::FnAsValue { name, .. } => Some(name),
+                            _ => None,
+                        };
+                        (resolution, name)
+                    })
+                    .collect()
+            } else {
+                generic_resolutions(u, &index)
+            };
 
-            for edge in edges {
-                match resolve_edge(&edge, u, &caller_display, &index) {
+            for (resolution, external_name) in resolutions {
+                match resolution {
                     Resolution::Resolved {
                         target,
                         reason,
@@ -1380,14 +1630,7 @@ pub fn run_with_reserved_chars(
                         }
                     }
                     Resolution::External => {
-                        if let Some(n) = match edge {
-                            EdgeKind::PathCall { name, .. }
-                            | EdgeKind::MethodCallTyped { method: name, .. }
-                            | EdgeKind::MethodCallUnknown { method: name, .. }
-                            | EdgeKind::MacroCall { name, .. }
-                            | EdgeKind::FnAsValue { name, .. } => Some(name),
-                            _ => None,
-                        } {
+                        if let Some(n) = external_name {
                             external_count.insert(n);
                         }
                     }
@@ -1429,13 +1672,13 @@ pub fn run_with_reserved_chars(
                 continue;
             }
 
-            let Some(src) = index.file_sources.get(&cand.target.path) else {
+            let Some(src) = index.source(&cand.target.path) else {
                 continue;
             };
             let body = render_unit_lines(src, cand.target.start, cand.target.end);
             let unit_header = format!(
                 "  {}: {}:{}-{}\n  cascade: depth {depth} | {} | {}\n",
-                cand.target.kind.label(),
+                cand.target.label,
                 cand.target.path,
                 cand.target.start,
                 cand.target.end,
@@ -1489,7 +1732,7 @@ pub fn run_with_reserved_chars(
         for (cand, body) in items {
             out.push_str(&format!(
                 "  {}: {}:{}-{}\n  cascade: depth {d} | {} | {}\n",
-                cand.target.kind.label(),
+                cand.target.label,
                 cand.target.path,
                 cand.target.start,
                 cand.target.end,
@@ -1521,12 +1764,18 @@ pub fn run_with_reserved_chars(
 
     let first_seed_name = seeds
         .first()
-        .and_then(|k| index.file_sources.get(&k.path))
-        .and_then(|src| syn::parse_file(src).ok())
-        .and_then(|f| {
-            pull::rust_items(&f)
+        .and_then(|k| {
+            if let Some(defs) = index.generic.defs.get(&k.path) {
+                return defs
+                    .iter()
+                    .find(|d| d.start == k.start && d.end == k.end)
+                    .map(|d| d.bare_name().to_string());
+            }
+            let src = index.file_sources.get(&k.path)?;
+            let file = syn::parse_file(src).ok()?;
+            pull::rust_items(&file)
                 .into_iter()
-                .find(|it| it.start == seeds[0].start && it.end == seeds[0].end)
+                .find(|it| it.start == k.start && it.end == k.end)
                 .and_then(|it| it.name)
         })
         .unwrap_or_else(|| "IDENT".to_string());
@@ -1651,7 +1900,7 @@ pub fn run_with_reserved_chars(
 
     if non_rust_or_test_seeds > 0 {
         out.push_str(&format!(
-            "{non_rust_or_test_seeds} initial units not followed (non-Rust / test code).\n"
+            "{non_rust_or_test_seeds} initial units not followed (test code, no function or type unit, or a file type cascade does not read).\n"
         ));
     }
 
@@ -2123,6 +2372,7 @@ fn innocent_bystander_c() {}
             file_sources: [("test.rs".to_string(), source.to_string())].into(),
             parse_warnings: Vec::new(),
             total_callers_count: HashMap::new(),
+            generic: GenericIndex::default(),
         };
 
         let (_, edges) = extract_unit_edges(source, &key, &index);
@@ -2149,6 +2399,7 @@ fn innocent_bystander_c() {}
             file_sources: [("test.rs".to_string(), source.to_string())].into(),
             parse_warnings: Vec::new(),
             total_callers_count: HashMap::new(),
+            generic: GenericIndex::default(),
         };
 
         let (_, edges) = extract_unit_edges(source, &key, &index);
@@ -2158,6 +2409,194 @@ fn innocent_bystander_c() {}
                 .any(|e| matches!(e, EdgeKind::PathCall { name, .. } if name == "chunk_messages"))
         );
         assert!(edges.iter().any(|e| matches!(e, EdgeKind::MethodCallTyped { receiver_type, method, .. } if receiver_type == "ClipboardBuffer" && method == "len")));
+    }
+
+    /// A temporary repository with `files` committed, for `cvb pull ... cascade:N`.
+    fn repo_with(name: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("cvb-test-gc-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .env("GIT_CEILING_DIRECTORIES", dir.parent().unwrap())
+                .output()
+                .unwrap();
+        };
+        git(&["init", "-q"]);
+        for (path, text) in files {
+            let full = dir.join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, text).unwrap();
+        }
+        git(&["add", "-A"]);
+        dir
+    }
+
+    fn cascade_of(dir: &std::path::Path, args: &[&str]) -> String {
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        let (code, out, err) = crate::pull::run_capture(&args, Some(dir));
+        let _ = std::fs::remove_dir_all(dir);
+        assert_eq!(code, 0, "{out}{err}");
+        out
+    }
+
+    #[test]
+    fn cascade_follows_calls_in_python_and_names_how_it_resolved_them() {
+        let dir = repo_with(
+            "py",
+            &[
+                ("app.py", "def main():\n    helper()\n    other.thing()\n    print(1)\n"),
+                ("lib.py", "def helper():\n    deep()\n\ndef deep():\n    return 1\n"),
+            ],
+        );
+        let out = cascade_of(&dir, &["def main", "cascade:2"]);
+        assert!(out.contains("== CASCADE depth 1 (1 unit) =="), "{out}");
+        assert!(out.contains("Python function: lib.py:1-2"), "{out}");
+        assert!(out.contains("cascade: depth 1 | callee of main (call at :2) | resolved by unique name repo-wide"), "{out}");
+        assert!(out.contains("== CASCADE depth 2 (1 unit) ==") && out.contains("Python function: lib.py:4-5"), "{out}");
+        // `other.thing()` and `print()` name nothing in the repository: external, not listed.
+        assert!(out.contains("Not followed, external or std: 2 distinct names"), "{out}");
+        assert!(!out.contains("unresolved"), "{out}");
+        assert!(out.contains("Stopped: depth limit (2)."), "{out}");
+    }
+
+    #[test]
+    fn cascade_prefers_the_same_file_and_reports_ambiguity() {
+        let dir = repo_with(
+            "go",
+            &[
+                ("a.go", "package p\n\nfunc Main() {\n\tlocal()\n\tshared()\n}\n\nfunc local() {}\n\nfunc shared() {}\n"),
+                ("b.go", "package p\n\nfunc shared() {}\n"),
+            ],
+        );
+        let out = cascade_of(&dir, &["func Main", "cascade:1"]);
+        assert!(out.contains("Go function: a.go:8-8") && out.contains("resolved by name in same file"), "{out}");
+        // `shared` exists in both files, one of them next to the caller: same file wins.
+        assert!(out.contains("Go function: a.go:10-10"), "{out}");
+        assert!(!out.contains("b.go:3-3"), "{out}");
+    }
+
+    #[test]
+    fn cascade_lists_an_ambiguous_name_instead_of_guessing() {
+        let dir = repo_with(
+            "amb",
+            &[
+                ("main.js", "export function start() {\n  load();\n}\n"),
+                ("x.js", "export function load() {}\n"),
+                ("y.js", "export function load() {}\n"),
+            ],
+        );
+        let out = cascade_of(&dir, &["function start", "cascade:1"]);
+        assert!(out.contains("Not followed, unresolved (1):"), "{out}");
+        assert!(out.contains("load") && out.contains("ambiguous (2 candidates"), "{out}");
+        assert!(!out.contains("== CASCADE depth 1"), "{out}");
+    }
+
+    #[test]
+    fn cascade_follows_self_and_this_calls_but_lists_other_receivers() {
+        let dir = repo_with(
+            "self",
+            &[(
+                "a.py",
+                "class A:\n    def run(self):\n        self.step()\n        dep.step()\n        dep.known()\n\n    def step(self):\n        pass\n\n    def known(self):\n        pass\n",
+            )],
+        );
+        let out = cascade_of(&dir, &["def run", "cascade:1"]);
+        assert!(out.contains("Python function: a.py:7-8"), "{out}");
+        assert!(out.contains("resolved by name on self/this in the same file"), "{out}");
+        // `dep.known()` could be `A.known`, but the receiver is not `self`.
+        assert!(!out.contains("a.py:10-11"), "{out}");
+        assert!(out.contains("method call, receiver type unknown"), "{out}");
+    }
+
+    #[test]
+    fn cascade_follows_bash_functions_and_java_methods() {
+        let dir = repo_with(
+            "bash",
+            &[("run.sh", "main() {\n  setup now\n  ls -l\n}\n\nsetup() {\n  echo hi\n}\n")],
+        );
+        let out = cascade_of(&dir, &["main()", "cascade:1"]);
+        assert!(out.contains("Bash function: run.sh:6-8"), "{out}");
+
+        let dir = repo_with(
+            "java",
+            &[(
+                "A.java",
+                "class A {\n  void run() {\n    helper();\n  }\n  void helper() {\n  }\n}\n",
+            )],
+        );
+        let out = cascade_of(&dir, &["void run", "cascade:1"]);
+        assert!(out.contains("Java method: A.java:5-6"), "{out}");
+    }
+
+    #[test]
+    fn cascade_does_not_mix_languages_or_follow_into_test_files() {
+        let dir = repo_with(
+            "mix",
+            &[
+                ("a.py", "def main():\n    helper()\n"),
+                ("b.go", "package p\n\nfunc helper() {}\n"),
+                ("test_a.py", "def helper():\n    pass\n"),
+            ],
+        );
+        let out = cascade_of(&dir, &["def main", "cascade:1"]);
+        assert!(!out.contains("== CASCADE depth 1"), "{out}");
+        assert!(out.contains("Not followed, external or std: 1 distinct names"), "{out}");
+    }
+
+    #[test]
+    fn a_seed_in_a_test_file_or_a_plain_line_is_shown_but_not_followed() {
+        let dir = repo_with(
+            "seed",
+            &[
+                ("test_a.py", "def check():\n    helper()\n"),
+                ("a.py", "def helper():\n    pass\n"),
+            ],
+        );
+        let out = cascade_of(&dir, &["check", "cascade:1"]);
+        assert!(out.contains("1 initial units not followed"), "{out}");
+        assert!(!out.contains("== CASCADE depth 1"), "{out}");
+    }
+
+    #[test]
+    fn a_function_called_from_many_units_is_a_utility_leaf() {
+        let mut calls = String::new();
+        for i in 0..8 {
+            calls.push_str(&format!("def f{i}():\n    util()\n\n"));
+        }
+        let dir = repo_with(
+            "util",
+            &[
+                ("a.py", &calls),
+                ("u.py", "def util():\n    inner()\n\ndef inner():\n    pass\n"),
+                ("m.py", "def main():\n    util()\n"),
+            ],
+        );
+        let out = cascade_of(&dir, &["def main", "cascade:3"]);
+        assert!(out.contains("utility, called from 9 units"), "{out}");
+        // A utility is shown but not expanded.
+        assert!(!out.contains("u.py:4-5"), "{out}");
+    }
+
+    #[test]
+    fn rust_cascade_is_unaffected_by_other_languages_in_the_repository() {
+        let rust = &[("src/lib.rs", "pub fn a() { b(); }\npub fn b() {}\n")];
+        let alone = cascade_of(&repo_with("rs1", rust), &["fn a", "cascade:1"]);
+        let mixed = cascade_of(
+            &repo_with(
+                "rs2",
+                &[
+                    rust[0],
+                    ("b.py", "def b():\n    pass\n"),
+                    ("lib.py", "def a():\n    pass\n"),
+                ],
+            ),
+            &["fn a", "cascade:1"],
+        );
+        assert!(alone.contains("Rust function: src/lib.rs:2-2"), "{alone}");
+        assert_eq!(alone, mixed);
     }
 
     #[test]
