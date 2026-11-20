@@ -56,9 +56,11 @@ Capture your terminal session and bridge command output to the clipboard.
 Usage:
     cvb
     cvb <PATH>...
-    cvb pull [file:PATH] [cascade:N] <search-term>...
-    cvb pull file:PATH lines:N|START-END
-    cvb pull callers:NAME [file:PATH]
+    cvb pull [file:PATH]... [cascade:N] <search-term>...
+    cvb pull file:PATH [head:N|tail:N]
+    cvb pull file:PATH lines:N|START-END... [head:N|tail:N]
+    cvb pull file:PATH lines:N|START-END... <search-term>...
+    cvb pull callers:NAME [file:PATH]...
     cvb context
     cvb --help
     cvb --version
@@ -91,7 +93,7 @@ A capture session ends with:
         },
         cli::Command::Pull(args) => {
             if args.is_empty() {
-                eprintln!("Usage: cvb pull [file:PATH] [cascade:N] <search-term>...");
+                eprintln!("Usage: cvb pull [file:PATH]... [cascade:N] <search-term>...");
                 std::process::exit(2);
             }
 

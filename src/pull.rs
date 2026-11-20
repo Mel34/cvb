@@ -11,7 +11,9 @@ use crate::units;
 const PATCH_REMINDER: &str =
     "Edit with a patch: apply_patch format or git diff, pasted at the prompt of this session.";
 
-type FileScope = (Option<String>, Vec<(usize, usize)>, Vec<String>);
+/// The `file:` scopes (exact duplicates removed, first-seen order), the `lines:`
+/// ranges and the remaining query arguments of a pull.
+type FileScope = (Vec<String>, Vec<(usize, usize)>, Vec<String>);
 
 fn append_patch_reminder(stdout: &mut String) {
     stdout.push_str(PATCH_REMINDER);
@@ -81,6 +83,75 @@ pub fn normalize_path_str(path: &str, base_dir: Option<&Path>) -> String {
     parts.join("/")
 }
 
+/// `head:N` / `tail:N`: how many lines of a whole file or of `lines:` output to keep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trim {
+    Head(usize),
+    Tail(usize),
+}
+
+fn parse_trim_count(name: &str, value: &str) -> Result<usize, String> {
+    let error = || {
+        format!("CVB pull: {name}: must be followed by a positive integer (digits only, at least 1).")
+    };
+    if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(error());
+    }
+    match value.parse::<usize>() {
+        Ok(n) if n >= 1 => Ok(n),
+        _ => Err(error()),
+    }
+}
+
+/// Splits `head:N` / `tail:N` out of the arguments.
+fn extract_trim(args: &[String]) -> Result<(Option<Trim>, Vec<String>), String> {
+    let mut head = None;
+    let mut tail = None;
+    let mut remaining = Vec::new();
+
+    for arg in args {
+        if arg.starts_with("-head:") || arg.starts_with("-tail:") {
+            return Err(format!(
+                "CVB pull: negated selector '{arg}' is not supported; exclusions only apply to content terms."
+            ));
+        }
+        if let Some(value) = arg.strip_prefix("head:") {
+            if head.is_some() {
+                return Err("CVB pull: only one head: directive is allowed.".to_string());
+            }
+            head = Some(parse_trim_count("head", value)?);
+        } else if let Some(value) = arg.strip_prefix("tail:") {
+            if tail.is_some() {
+                return Err("CVB pull: only one tail: directive is allowed.".to_string());
+            }
+            tail = Some(parse_trim_count("tail", value)?);
+        } else {
+            remaining.push(arg.clone());
+        }
+    }
+
+    match (head, tail) {
+        (Some(_), Some(_)) => Err("CVB pull: head: and tail: cannot be combined.".to_string()),
+        (Some(n), None) => Ok((Some(Trim::Head(n)), remaining)),
+        (None, Some(n)) => Ok((Some(Trim::Tail(n)), remaining)),
+        (None, None) => Ok((None, remaining)),
+    }
+}
+
+fn format_ranges(ranges: &[(usize, usize)]) -> String {
+    ranges
+        .iter()
+        .map(|&(start, end)| {
+            if start == end {
+                start.to_string()
+            } else {
+                format!("{start}-{end}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn parse_line_range(range: &str) -> Result<(usize, usize), String> {
     let Some((start, end)) = range.split_once('-') else {
         let line = range.parse::<usize>().map_err(|_| {
@@ -146,7 +217,8 @@ fn read_line_range(path: &str, start: usize, end: usize) -> Result<String, Strin
 }
 
 fn extract_file_scope(args: &[String]) -> Result<FileScope, String> {
-    let mut scope = None;
+    let mut scopes: Vec<String> = Vec::new();
+    let mut file_args = 0;
     let mut line_ranges = Vec::new();
     let mut query_args = Vec::new();
 
@@ -165,10 +237,10 @@ fn extract_file_scope(args: &[String]) -> Result<FileScope, String> {
             if path.is_empty() {
                 return Err("CVB pull: file: must be followed by a path.".to_string());
             }
-            if scope.is_some() {
-                return Err("CVB pull: only one file: scope is allowed.".to_string());
+            file_args += 1;
+            if !scopes.iter().any(|known| known == path) {
+                scopes.push(path.to_string());
             }
-            scope = Some(path.to_string());
         } else if let Some(range) = arg.strip_prefix("lines:") {
             line_ranges.push(parse_line_range(range)?);
         } else {
@@ -176,45 +248,71 @@ fn extract_file_scope(args: &[String]) -> Result<FileScope, String> {
         }
     }
 
-    if !line_ranges.is_empty() && scope.is_none() {
+    if !line_ranges.is_empty() && scopes.is_empty() {
         return Err("CVB pull: lines: requires a file: scope.".to_string());
     }
 
+    if !line_ranges.is_empty() && scopes.len() > 1 {
+        return Err("CVB pull: lines: requires exactly one file: scope.".to_string());
+    }
+
     if query_args.is_empty() && line_ranges.is_empty() {
+        if file_args > 1 {
+            return Err(
+                "CVB pull: several file: scopes need a search term; a whole-file capture takes exactly one file:."
+                    .to_string(),
+            );
+        }
         return Err("CVB pull: search query is empty.".to_string());
     }
 
-    Ok((scope, line_ranges, query_args))
+    Ok((scopes, line_ranges, query_args))
 }
 
+fn scope_matches(path: &OsStr, scope: &str, norm_scope: &str, base_dir: Option<&Path>) -> bool {
+    let path_str = path.to_string_lossy();
+    path == OsStr::new(scope)
+        || path_str == norm_scope
+        || normalize_path_str(&path_str, base_dir) == norm_scope
+}
+
+/// Keeps the files named by any of `scopes`. An empty list keeps everything.
+/// Every scope must match a file; the first one that does not fails the whole
+/// call, so a typo never yields partial results. The kept files stay in the
+/// order of `files`, so the order of the scopes never shows in the output.
 pub fn filter_file_scope(
     files: Vec<OsString>,
-    scope: Option<&str>,
+    scopes: &[String],
     base_dir: Option<&Path>,
 ) -> Result<Vec<OsString>, String> {
-    let Some(scope) = scope else {
+    if scopes.is_empty() {
         return Ok(files);
-    };
-
-    let norm_scope = normalize_path_str(scope, base_dir);
-
-    let matching = files
-        .into_iter()
-        .filter(|path| {
-            let path_str = path.to_string_lossy();
-            path == OsStr::new(scope)
-                || path_str == norm_scope
-                || normalize_path_str(&path_str, base_dir) == norm_scope
-        })
-        .collect::<Vec<_>>();
-
-    if matching.is_empty() {
-        return Err(format!(
-            "CVB pull: file scope matches no searchable file (tracked, or untracked and not ignored by Git): {scope}"
-        ));
     }
 
-    Ok(matching)
+    let normalized: Vec<(&str, String)> = scopes
+        .iter()
+        .map(|scope| (scope.as_str(), normalize_path_str(scope, base_dir)))
+        .collect();
+
+    for (scope, norm_scope) in &normalized {
+        if !files
+            .iter()
+            .any(|path| scope_matches(path, scope, norm_scope, base_dir))
+        {
+            return Err(format!(
+                "CVB pull: file scope matches no searchable file (tracked, or untracked and not ignored by Git): {scope}"
+            ));
+        }
+    }
+
+    Ok(files
+        .into_iter()
+        .filter(|path| {
+            normalized
+                .iter()
+                .any(|(scope, norm_scope)| scope_matches(path, scope, norm_scope, base_dir))
+        })
+        .collect())
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -471,7 +569,7 @@ fn callers_understands(path: &str) -> bool {
     Path::new(path).extension() == Some(OsStr::new("rs")) || units::callers_language_for(path).is_some()
 }
 
-fn extract_callers_scope(args: &[String]) -> Result<Option<(String, Option<String>)>, String> {
+fn extract_callers_scope(args: &[String]) -> Result<Option<(String, Vec<String>)>, String> {
     for arg in args {
         if arg.starts_with("-callers:")
             || arg.starts_with("-file:")
@@ -506,7 +604,7 @@ fn extract_callers_scope(args: &[String]) -> Result<Option<(String, Option<Strin
         );
     }
 
-    let mut scope = None;
+    let mut scopes: Vec<String> = Vec::new();
 
     for arg in args {
         if arg == selectors[0] {
@@ -517,9 +615,6 @@ fn extract_callers_scope(args: &[String]) -> Result<Option<(String, Option<Strin
             if path.is_empty() {
                 return Err("CVB pull: file: must be followed by a path.".to_string());
             }
-            if scope.is_some() {
-                return Err("CVB pull: only one file: scope is allowed.".to_string());
-            }
             if !callers_understands(path) {
                 return Err(
                     "CVB pull: callers: file scope must be a source file in a supported language \
@@ -527,7 +622,9 @@ fn extract_callers_scope(args: &[String]) -> Result<Option<(String, Option<Strin
                         .to_string(),
                 );
             }
-            scope = Some(path.to_string());
+            if !scopes.iter().any(|known| known == path) {
+                scopes.push(path.to_string());
+            }
         } else if arg.starts_with("lines:") {
             return Err("CVB pull: callers: cannot be combined with lines:.".to_string());
         } else {
@@ -535,12 +632,12 @@ fn extract_callers_scope(args: &[String]) -> Result<Option<(String, Option<Strin
         }
     }
 
-    Ok(Some((target.to_string(), scope)))
+    Ok(Some((target.to_string(), scopes)))
 }
 
 fn run_callers(
     target: &str,
-    scope: Option<&str>,
+    scopes: &[String],
     dir: Option<&Path>,
     stdout: &mut String,
     stderr: &mut String,
@@ -553,7 +650,7 @@ fn run_callers(
         }
     };
 
-    let files = match filter_file_scope(files, scope, dir) {
+    let files = match filter_file_scope(files, scopes, dir) {
         Ok(files) => files,
         Err(error) => {
             stderr.push_str(&format!("{error}\n"));
@@ -781,11 +878,17 @@ fn resolve_unit(path: &str, line: usize, source: &str) -> SearchUnit {
     }
 }
 
+/// An empty list means no restriction.
+fn line_in_ranges(line: usize, ranges: &[(usize, usize)]) -> bool {
+    ranges.is_empty() || ranges.iter().any(|&(start, end)| start <= line && line <= end)
+}
+
 fn count_units_for_term(
     term: &str,
     files: &[OsString],
     file_cache: &mut HashMap<String, String>,
     dir: Option<&Path>,
+    restrict: &[(usize, usize)],
 ) -> usize {
     let output = match run_search("rg", term, files, dir) {
         Ok(output) => output,
@@ -802,6 +905,9 @@ fn count_units_for_term(
     let mut unique_units = HashSet::new();
 
     for (path, line, _) in records {
+        if !line_in_ranges(line, restrict) {
+            continue;
+        }
         let source = if let Some(src) = file_cache.get(&path) {
             src.clone()
         } else {
@@ -853,9 +959,34 @@ pub fn run_capture(args: &[String], dir: Option<&Path>) -> (i32, String, String)
         }
     };
 
+    let (trim, args_without_cascade) = match extract_trim(&args_without_cascade) {
+        Ok(result) => result,
+        Err(error) => {
+            stderr.push_str(&format!("{error}\n"));
+            return (2, stdout, stderr);
+        }
+    };
+
+    if trim.is_some() {
+        let conflict = if cascade_depth.is_some() {
+            Some("CVB pull: head:/tail: cannot be combined with cascade:.")
+        } else if args_without_cascade
+            .iter()
+            .any(|arg| arg.starts_with("callers:"))
+        {
+            Some("CVB pull: head:/tail: cannot be combined with callers:.")
+        } else {
+            None
+        };
+        if let Some(message) = conflict {
+            stderr.push_str(&format!("{message}\n"));
+            return (2, stdout, stderr);
+        }
+    }
+
     match extract_callers_scope(&args_without_cascade) {
-        Ok(Some((target, scope))) => {
-            let status = run_callers(&target, scope.as_deref(), dir, &mut stdout, &mut stderr);
+        Ok(Some((target, scopes))) => {
+            let status = run_callers(&target, &scopes, dir, &mut stdout, &mut stderr);
             return (status, stdout, stderr);
         }
         Ok(None) => {}
@@ -865,20 +996,35 @@ pub fn run_capture(args: &[String], dir: Option<&Path>) -> (i32, String, String)
         }
     }
 
-    let whole_file_capture =
-        args_without_cascade.len() == 1 && args_without_cascade[0].starts_with("file:");
-
     if args_without_cascade.is_empty() {
-        stderr.push_str(format_usage());
+        if trim.is_some() {
+            stderr.push_str("CVB pull: head:/tail: requires a file: scope.\n");
+        } else {
+            stderr.push_str(format_usage());
+        }
         return (2, stdout, stderr);
     }
+
+    if trim.is_some()
+        && args_without_cascade
+            .iter()
+            .filter(|arg| arg.starts_with("file:"))
+            .count()
+            > 1
+    {
+        stderr.push_str("CVB pull: head:/tail: requires exactly one file: scope.\n");
+        return (2, stdout, stderr);
+    }
+
+    let whole_file_capture =
+        args_without_cascade.len() == 1 && args_without_cascade[0].starts_with("file:");
 
     let parsed = if whole_file_capture {
         extract_file_scope(&[args_without_cascade[0].clone(), "lines:1".to_string()])
     } else {
         extract_file_scope(&args_without_cascade)
     };
-    let (scope, mut line_ranges, query_args) = match parsed {
+    let (scopes, mut line_ranges, query_args) = match parsed {
         Ok(parsed) => parsed,
         Err(error) => {
             stderr.push_str(&format!("{error}\n"));
@@ -886,12 +1032,20 @@ pub fn run_capture(args: &[String], dir: Option<&Path>) -> (i32, String, String)
         }
     };
 
-    if !line_ranges.is_empty() && !query_args.is_empty() {
-        stderr.push_str("CVB pull: lines: cannot be combined with search terms.\n");
+    if trim.is_some() && !query_args.is_empty() {
+        stderr.push_str("CVB pull: head:/tail: cannot be combined with search terms.\n");
+        return (2, stdout, stderr);
+    }
+    if trim.is_some() && scopes.is_empty() {
+        stderr.push_str("CVB pull: head:/tail: requires a file: scope.\n");
         return (2, stdout, stderr);
     }
 
-    let query = if !line_ranges.is_empty() {
+    // `lines:` without search terms prints raw lines; with search terms it
+    // restricts where hits may come from.
+    let restrict_search = !line_ranges.is_empty() && !query_args.is_empty();
+
+    let query = if !line_ranges.is_empty() && query_args.is_empty() {
         SearchQuery::default()
     } else {
         match parse_query(&query_args) {
@@ -911,7 +1065,7 @@ pub fn run_capture(args: &[String], dir: Option<&Path>) -> (i32, String, String)
         }
     };
 
-    let files = match filter_file_scope(files, scope.as_deref(), dir) {
+    let files = match filter_file_scope(files, &scopes, dir) {
         Ok(files) => files,
         Err(error) => {
             stderr.push_str(&format!("{error}\n"));
@@ -920,7 +1074,7 @@ pub fn run_capture(args: &[String], dir: Option<&Path>) -> (i32, String, String)
     };
 
     if whole_file_capture {
-        let Some(path) = scope.as_deref() else {
+        let Some(path) = scopes.first().map(String::as_str) else {
             stderr.push_str("CVB pull: internal error: missing whole-file path.\n");
             return (2, stdout, stderr);
         };
@@ -943,10 +1097,19 @@ pub fn run_capture(args: &[String], dir: Option<&Path>) -> (i32, String, String)
             stdout.push_str(&format!("{path}: file is empty.\n"));
             return (0, stdout, stderr);
         }
-        line_ranges = vec![(1, line_count)];
+        // A trim larger than the file simply returns the whole file.
+        line_ranges = match trim {
+            Some(Trim::Head(n)) => vec![(1, n.min(line_count))],
+            Some(Trim::Tail(n)) => vec![(line_count - n.min(line_count) + 1, line_count)],
+            None => vec![(1, line_count)],
+        };
     }
 
-    if let Some(path) = scope.as_deref().filter(|_| !line_ranges.is_empty()) {
+    // Ranges as they apply to the file: validated, and clamped at its end.
+    let mut restriction_note = String::new();
+    let mut restriction: Vec<(usize, usize)> = Vec::new();
+
+    if let Some(path) = scopes.first().filter(|_| !line_ranges.is_empty()) {
         let full_path = if let Some(d) = dir {
             d.join(path)
         } else {
@@ -963,7 +1126,13 @@ pub fn run_capture(args: &[String], dir: Option<&Path>) -> (i32, String, String)
         };
         let lines: Vec<&str> = source.lines().collect();
 
-        for (start, end) in line_ranges {
+        enum Out {
+            Warning(String),
+            Line(usize),
+        }
+        let mut output: Vec<Out> = Vec::new();
+
+        for &(start, end) in &line_ranges {
             if start == 0 || end == 0 || start > end {
                 stderr.push_str(
                     "CVB pull: invalid line range; expected positive START not exceeding END.\n",
@@ -979,21 +1148,61 @@ pub fn run_capture(args: &[String], dir: Option<&Path>) -> (i32, String, String)
             }
             let actual_end = end.min(lines.len());
             if actual_end < end {
-                stdout.push_str(&format!(
+                output.push(Out::Warning(format!(
                     "CVB pull: warning: requested line range {start}-{end} extends past EOF; truncated to {start}-{actual_end} ({path} has {} lines).\n",
                     lines.len()
-                ));
+                )));
             }
+            restriction.push((start, actual_end));
             for number in start..=actual_end {
-                stdout.push_str(&format!("{path}:{number}: {}\n", lines[number - 1]));
+                output.push(Out::Line(number));
             }
         }
-        append_patch_reminder(&mut stdout);
-        return (0, stdout, stderr);
+
+        if !restrict_search {
+            // head:/tail: trim the combined line output.
+            let total = output
+                .iter()
+                .filter(|item| matches!(item, Out::Line(_)))
+                .count();
+            let (skip, keep) = match trim {
+                Some(Trim::Head(n)) => (0, n.min(total)),
+                Some(Trim::Tail(n)) => (total - n.min(total), n.min(total)),
+                None => (0, total),
+            };
+            let mut seen = 0;
+            for item in &output {
+                match item {
+                    Out::Warning(text) => stdout.push_str(text),
+                    Out::Line(number) => {
+                        if seen >= skip && seen < skip + keep {
+                            stdout.push_str(&format!("{path}:{number}: {}\n", lines[number - 1]));
+                        }
+                        seen += 1;
+                    }
+                }
+            }
+            append_patch_reminder(&mut stdout);
+            return (0, stdout, stderr);
+        }
+
+        restriction_note.push_str(&format!(
+            "Restricted to lines {} of {path}: hits must fall in range; units are returned whole and may extend beyond it.\n",
+            format_ranges(&restriction)
+        ));
+        for item in &output {
+            if let Out::Warning(text) = item {
+                restriction_note.push_str(text);
+            }
+        }
     }
 
     let search_terms: Vec<&str> = if !query.alternatives.is_empty() {
         query.alternatives.iter().map(String::as_str).collect()
+    } else if restrict_search {
+        // Any required term may seed a unit, so a range that holds only the
+        // second required term still finds the unit.
+        query.required.iter().map(String::as_str).collect()
     } else if let Some(required) = query.required.first() {
         vec![required.as_str()]
     } else {
@@ -1050,6 +1259,9 @@ pub fn run_capture(args: &[String], dir: Option<&Path>) -> (i32, String, String)
 
     candidate_records.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     candidate_records.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
+    // lines: restricts the hits (the seeds); operators and unit expansion below
+    // still look at the whole unit.
+    candidate_records.retain(|(_, line, _)| line_in_ranges(*line, &restriction));
 
     let mut file_cache: HashMap<String, String> = HashMap::new();
     let mut resolved_units: HashMap<UnitKey, SearchUnit> = HashMap::new();
@@ -1167,16 +1379,17 @@ pub fn run_capture(args: &[String], dir: Option<&Path>) -> (i32, String, String)
         }
 
         stdout.push_str(&format!("{}\n", query.format_echo()));
+        stdout.push_str(&restriction_note);
         stdout.push_str("No matches.\n");
 
         let mut pos_counts = Vec::new();
         for alt in &query.alternatives {
-            let count = count_units_for_term(alt, &files, &mut file_cache, dir);
+            let count = count_units_for_term(alt, &files, &mut file_cache, dir, &restriction);
             let unit_str = if count == 1 { "unit" } else { "units" };
             pos_counts.push(format!("{alt}: {count} {unit_str}"));
         }
         for req in &query.required {
-            let count = count_units_for_term(req, &files, &mut file_cache, dir);
+            let count = count_units_for_term(req, &files, &mut file_cache, dir, &restriction);
             let unit_str = if count == 1 { "unit" } else { "units" };
             pos_counts.push(format!("+{req}: {count} {unit_str}"));
         }
@@ -1197,11 +1410,12 @@ pub fn run_capture(args: &[String], dir: Option<&Path>) -> (i32, String, String)
     }
 
     stdout.push_str(&format!("{}\n", query.format_echo()));
+    stdout.push_str(&restriction_note);
 
     if let Some(depth) = cascade_depth
         && depth > 0 {
-            let scope_desc = if let Some(s) = scope.as_deref() {
-                format!("initial search in {s}, dependencies repo-wide")
+            let scope_desc = if !scopes.is_empty() {
+                format!("initial search in {}, dependencies repo-wide", scopes.join(", "))
             } else {
                 "repo-wide".to_string()
             };
@@ -1271,9 +1485,11 @@ pub fn run_capture(args: &[String], dir: Option<&Path>) -> (i32, String, String)
 }
 
 fn format_usage() -> &'static str {
-    "Usage: cvb pull [file:PATH] [cascade:N] <search-term>...\n\
-           cvb pull file:PATH lines:LINE|START-END\n\
-           cvb pull [file:PATH] callers:IDENT\n\n\
+    "Usage: cvb pull [file:PATH]... [cascade:N] <search-term>...\n\
+           cvb pull file:PATH [head:N|tail:N]\n\
+           cvb pull file:PATH lines:LINE|START-END... [head:N|tail:N]\n\
+           cvb pull file:PATH lines:LINE|START-END... <search-term>...\n\
+           cvb pull [file:PATH]... callers:IDENT\n\n\
      Operators:\n\
          foo bar          OR: match either term\n\
          +foo             AND: require term anywhere in the matching unit\n\
@@ -1286,7 +1502,10 @@ fn format_usage() -> &'static str {
          cvb pull +CRLF +BOM cascade:2\n\
          cvb pull CRLF BOM +split_inclusive -tests\n\
          cvb pull callers:run\n\
-         cvb pull file:src/pull.rs lines:10-25\n"
+         cvb pull file:src/pull.rs lines:10-25\n\
+         cvb pull file:a.rs file:b.rs term\n\
+         cvb pull file:src/pull.rs tail:40\n\
+         cvb pull file:src/pull.rs lines:100-300 foo\n"
 }
 
 fn bash_unit_range(source: &str, hit_line: usize) -> Result<((usize, usize), &'static str), ()> {
@@ -2119,12 +2338,12 @@ mod pull_tests {
     fn extract_callers_scope_accepts_target_with_optional_file_scope() {
         assert_eq!(
             extract_callers_scope(&["callers:run".to_string()]).unwrap(),
-            Some(("run".to_string(), None))
+            Some(("run".to_string(), Vec::new()))
         );
         assert_eq!(
             extract_callers_scope(&["file:src/pull.rs".to_string(), "callers:run".to_string(),])
                 .unwrap(),
-            Some(("run".to_string(), Some("src/pull.rs".to_string())))
+            Some(("run".to_string(), vec!["src/pull.rs".to_string()]))
         );
     }
 
@@ -2150,7 +2369,7 @@ mod pull_tests {
             vec![
                 "file:src/pull.rs".to_string(),
                 "callers:run".to_string(),
-                "file:src/main.rs".to_string(),
+                "file:manual.md".to_string(),
             ],
             vec!["file:manual.md".to_string(), "callers:run".to_string()],
             vec!["callers:module::run".to_string()],
@@ -2291,21 +2510,21 @@ fn target() {
             OsString::from("manual.md"),
         ];
 
-        let filtered = filter_file_scope(files, Some("src/pull.rs"), None).unwrap();
+        let filtered = filter_file_scope(files, &["src/pull.rs".into()], None).unwrap();
         assert_eq!(filtered, vec![OsString::from("src/pull.rs")]);
     }
 
     #[test]
     fn filter_file_scope_normalizes_relative_dot_prefix() {
         let files = vec![OsString::from("src/pull.rs")];
-        let filtered = filter_file_scope(files, Some("./src/pull.rs"), None).unwrap();
+        let filtered = filter_file_scope(files, &["./src/pull.rs".into()], None).unwrap();
         assert_eq!(filtered, vec![OsString::from("src/pull.rs")]);
     }
 
     #[test]
     fn filter_file_scope_without_scope_preserves_all_files() {
         let files = vec![OsString::from("src/pull.rs"), OsString::from("manual.md")];
-        assert_eq!(filter_file_scope(files.clone(), None, None).unwrap(), files);
+        assert_eq!(filter_file_scope(files.clone(), &[], None).unwrap(), files);
     }
 
     fn scratch_repo(label: &str) -> PathBuf {
@@ -2425,14 +2644,14 @@ fn target() {
         let dir = scratch_repo("scope");
         let files = tracked_files(Some(&dir)).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
-        let matching = filter_file_scope(files, Some("fresh.rs"), None).unwrap();
+        let matching = filter_file_scope(files, &["fresh.rs".into()], None).unwrap();
         assert_eq!(matching, vec![OsString::from("fresh.rs")]);
     }
 
     #[test]
     fn filter_file_scope_rejects_untracked_path() {
         let files = vec![OsString::from("src/pull.rs")];
-        let error = filter_file_scope(files, Some("manual.md"), None).unwrap_err();
+        let error = filter_file_scope(files, &["manual.md".into()], None).unwrap_err();
         assert!(error.contains("no searchable file"));
         assert!(error.contains("manual.md"));
     }
@@ -2494,23 +2713,43 @@ fn target() {
         ];
 
         let (scope, lines, query) = extract_file_scope(&args).unwrap();
-        assert_eq!(scope.as_deref(), Some("src/pull.rs"));
+        assert_eq!(scope, vec!["src/pull.rs"]);
         assert!(lines.is_empty());
         assert_eq!(query, vec!["protocol", "+line-endings", "-example"]);
     }
 
     #[test]
-    fn extract_file_scope_rejects_empty_or_multiple_scopes() {
+    fn extract_file_scope_accepts_several_scopes_and_dedupes() {
+        let (scopes, lines, query) = extract_file_scope(&[
+            "file:src/b.rs".into(),
+            "file:src/a.rs".into(),
+            "file:src/b.rs".into(),
+            "needle".into(),
+        ])
+        .unwrap();
+        assert_eq!(scopes, vec!["src/b.rs", "src/a.rs"]);
+        assert!(lines.is_empty());
+        assert_eq!(query, vec!["needle"]);
+    }
+
+    #[test]
+    fn extract_file_scope_rejects_empty_path_and_scope_without_terms() {
         assert!(extract_file_scope(&["file:".into(), "needle".into()]).is_err());
-        assert!(
-            extract_file_scope(&[
-                "file:src/pull.rs".into(),
-                "file:manual.md".into(),
-                "needle".into(),
-            ])
-            .is_err()
-        );
         assert!(extract_file_scope(&["file:src/pull.rs".into()]).is_err());
+        let error = extract_file_scope(&["file:a.rs".into(), "file:b.rs".into()]).unwrap_err();
+        assert!(error.contains("several file: scopes"), "{error}");
+    }
+
+    #[test]
+    fn extract_file_scope_lines_need_exactly_one_scope() {
+        let error = extract_file_scope(&[
+            "file:a.rs".into(),
+            "file:b.rs".into(),
+            "lines:1-2".into(),
+        ])
+        .unwrap_err();
+        assert_eq!(error, "CVB pull: lines: requires exactly one file: scope.");
+        assert!(extract_file_scope(&["file:a.rs".into(), "file:a.rs".into(), "lines:1".into()]).is_ok());
     }
 
     #[test]
@@ -2532,13 +2771,13 @@ fn target() {
     fn extract_file_scope_parses_line_ranges() {
         let args = vec!["file:src/pull.rs".into(), "lines:96-110".into()];
         let (scope, lines, query) = extract_file_scope(&args).unwrap();
-        assert_eq!(scope.as_deref(), Some("src/pull.rs"));
+        assert_eq!(scope, vec!["src/pull.rs"]);
         assert_eq!(lines, vec![(96, 110)]);
         assert!(query.is_empty());
 
         let single_line = vec!["file:manual.md".into(), "lines:155".into()];
         let (scope, lines, query) = extract_file_scope(&single_line).unwrap();
-        assert_eq!(scope.as_deref(), Some("manual.md"));
+        assert_eq!(scope, vec!["manual.md"]);
         assert_eq!(lines, vec![(155, 155)]);
         assert!(query.is_empty());
 
@@ -2549,7 +2788,7 @@ fn target() {
             "lines:7".into(),
         ])
         .unwrap();
-        assert_eq!(multiple.0.as_deref(), Some("src/pull.rs"));
+        assert_eq!(multiple.0, vec!["src/pull.rs"]);
         assert_eq!(multiple.1, vec![(96, 110), (5, 8), (7, 7)]);
         assert!(multiple.2.is_empty());
 
@@ -3125,5 +3364,360 @@ fn other() {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- multiple file: scopes, head:/tail:, lines: with search terms ----
+
+    fn pull_repo(label: &str, files: &[(&str, &str)]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("cvb-pull-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let status = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&dir)
+            .env("GIT_CEILING_DIRECTORIES", dir.parent().unwrap())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        for (name, text) in files {
+            let path = dir.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        dir
+    }
+
+    fn pull(dir: &Path, args: &[&str]) -> (i32, String, String) {
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        run_capture(&args, Some(dir))
+    }
+
+    const TWO_FILES: [(&str, &str); 3] = [
+        ("a.rs", "fn alpha() {\n    let needle = 1;\n}\n"),
+        ("b.rs", "fn beta() {\n    let needle = 2;\n}\n"),
+        ("c.rs", "fn gamma() {\n    let needle = 3;\n}\n"),
+    ];
+
+    #[test]
+    fn two_file_scopes_search_both_files_only() {
+        let dir = pull_repo("two-scopes", &TWO_FILES);
+        let (code, out, err) = pull(&dir, &["file:a.rs", "file:b.rs", "needle"]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(code, 0, "{err}");
+        assert!(out.contains("a.rs:1-3") && out.contains("b.rs:1-3"), "{out}");
+        assert!(!out.contains("c.rs"), "{out}");
+    }
+
+    #[test]
+    fn one_matching_scope_among_several_is_enough_for_results() {
+        let dir = pull_repo("one-hits", &[
+            ("a.rs", "fn alpha() {\n    let needle = 1;\n}\n"),
+            ("b.rs", "fn beta() {}\n"),
+        ]);
+        let (code, out, err) = pull(&dir, &["file:a.rs", "file:b.rs", "needle"]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(code, 0, "{err}");
+        assert!(out.contains("a.rs:1-3") && !out.contains("b.rs"), "{out}");
+    }
+
+    #[test]
+    fn duplicate_file_scopes_are_deduplicated_silently() {
+        let dir = pull_repo("dup-scopes", &TWO_FILES);
+        let (code, once, err) = pull(&dir, &["file:a.rs", "needle"]);
+        assert_eq!(code, 0, "{err}");
+        let (code, twice, err) = pull(&dir, &["file:a.rs", "file:./a.rs", "file:a.rs", "needle"]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(code, 0, "{err}");
+        assert!(err.is_empty(), "{err}");
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn a_missing_scope_fails_the_whole_command() {
+        let dir = pull_repo("missing-scope", &TWO_FILES);
+        let (code, out, err) = pull(&dir, &["file:a.rs", "file:nope.rs", "needle"]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(code, 2);
+        assert!(out.is_empty(), "no partial results: {out}");
+        assert!(err.contains("file scope matches no searchable file") && err.contains("nope.rs"), "{err}");
+    }
+
+    #[test]
+    fn output_does_not_depend_on_the_order_of_file_arguments() {
+        let dir = pull_repo("scope-order", &TWO_FILES);
+        let (_, forward, _) = pull(&dir, &["file:a.rs", "file:c.rs", "needle"]);
+        let (_, backward, _) = pull(&dir, &["file:c.rs", "file:a.rs", "needle"]);
+        let (_, callers_f, _) = pull(&dir, &["file:a.rs", "file:c.rs", "callers:alpha"]);
+        let (_, callers_b, _) = pull(&dir, &["file:c.rs", "file:a.rs", "callers:alpha"]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(forward, backward);
+        assert_eq!(callers_f, callers_b);
+        assert!(forward.find("a.rs").unwrap() < forward.find("c.rs").unwrap());
+    }
+
+    #[test]
+    fn callers_accepts_two_file_scopes() {
+        let dir = pull_repo("callers-two", &[
+            ("a.rs", "fn one() { run(); }\n"),
+            ("b.rs", "fn two() { run(); }\n"),
+            ("c.rs", "fn three() { run(); }\n"),
+        ]);
+        let (code, out, err) = pull(&dir, &["file:a.rs", "file:b.rs", "callers:run"]);
+        assert_eq!(code, 0, "{err}");
+        assert!(out.contains("a.rs:1") && out.contains("b.rs:1") && !out.contains("c.rs"), "{out}");
+        let (code, _, err) = pull(&dir, &["file:a.rs", "file:missing.rs", "callers:run"]);
+        assert_eq!(code, 2);
+        assert!(err.contains("missing.rs"), "{err}");
+        let (code, _, err) = pull(&dir, &["file:a.rs", "file:notes.txt", "callers:run"]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(code, 2);
+        assert!(err.contains("callers: file scope must be a source file"), "{err}");
+    }
+
+    #[test]
+    fn several_scopes_without_terms_or_lines_are_an_error() {
+        let dir = pull_repo("scopes-bare", &TWO_FILES);
+        let (code, out, err) = pull(&dir, &["file:a.rs", "file:b.rs"]);
+        assert_eq!(code, 2);
+        assert!(out.is_empty());
+        assert!(err.contains("several file: scopes"), "{err}");
+        let (code, _, err) = pull(&dir, &["file:a.rs", "file:b.rs", "lines:1-2"]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(code, 2);
+        assert!(err.contains("lines: requires exactly one file: scope."), "{err}");
+    }
+
+    #[test]
+    fn a_lone_file_scope_is_still_a_whole_file_capture() {
+        let dir = pull_repo("lone-file", &TWO_FILES);
+        let (code, out, _) = pull(&dir, &["file:a.rs"]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(code, 0);
+        assert!(out.starts_with("a.rs:1: fn alpha() {\na.rs:2:     let needle = 1;\na.rs:3: }\n"), "{out}");
+    }
+
+    fn numbered(count: usize) -> String {
+        (1..=count).map(|n| format!("line {n}\n")).collect()
+    }
+
+    fn line_numbers(out: &str, path: &str) -> Vec<usize> {
+        out.lines()
+            .filter_map(|l| l.strip_prefix(path)?.strip_prefix(':')?.split(':').next()?.parse().ok())
+            .collect()
+    }
+
+    #[test]
+    fn head_and_tail_on_a_long_file() {
+        let dir = pull_repo("headtail", &[("long.txt", &numbered(300)), ("short.txt", &numbered(3))]);
+        let (code, out, err) = pull(&dir, &["file:long.txt", "head:50"]);
+        assert_eq!(code, 0, "{err}");
+        assert_eq!(line_numbers(&out, "long.txt"), (1..=50).collect::<Vec<_>>());
+        assert!(out.contains("long.txt:50: line 50\n"));
+
+        let (code, out, _) = pull(&dir, &["tail:20", "file:long.txt"]);
+        assert_eq!(code, 0);
+        assert_eq!(line_numbers(&out, "long.txt"), (281..=300).collect::<Vec<_>>());
+        assert!(out.contains("long.txt:281: line 281\n"));
+
+        let (_, out, _) = pull(&dir, &["file:short.txt", "head:2"]);
+        assert_eq!(line_numbers(&out, "short.txt"), vec![1, 2]);
+        let (_, out, _) = pull(&dir, &["file:short.txt", "tail:1"]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(line_numbers(&out, "short.txt"), vec![3]);
+    }
+
+    #[test]
+    fn head_and_tail_equal_below_and_above_the_file_length() {
+        let dir = pull_repo("headtail-len", &[("f.txt", &numbered(5))]);
+        let whole = pull(&dir, &["file:f.txt"]).1;
+        for arg in ["head:5", "tail:5", "head:6", "tail:500"] {
+            let (code, out, err) = pull(&dir, &["file:f.txt", arg]);
+            assert_eq!(code, 0, "{arg}: {err}");
+            assert_eq!(out, whole, "{arg}");
+        }
+        let (_, out, _) = pull(&dir, &["file:f.txt", "head:4"]);
+        assert_eq!(line_numbers(&out, "f.txt"), vec![1, 2, 3, 4]);
+        let (_, out, _) = pull(&dir, &["file:f.txt", "tail:4"]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(line_numbers(&out, "f.txt"), vec![2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn head_and_tail_on_an_empty_file_behave_like_a_plain_capture() {
+        let dir = pull_repo("headtail-empty", &[("e.txt", "")]);
+        let plain = pull(&dir, &["file:e.txt"]);
+        let head = pull(&dir, &["file:e.txt", "head:3"]);
+        let tail = pull(&dir, &["file:e.txt", "tail:3"]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(plain.0, 0);
+        assert_eq!(plain, head);
+        assert_eq!(plain, tail);
+    }
+
+    #[test]
+    fn head_and_tail_reject_zero_and_non_numeric_counts() {
+        let dir = pull_repo("headtail-bad", &[("f.txt", &numbered(5))]);
+        for arg in ["head:0", "tail:0", "head:abc", "tail:-3", "head:+3", "head:", "tail:1.5", "head: 3", "head:99999999999999999999999"] {
+            let (code, out, err) = pull(&dir, &["file:f.txt", arg]);
+            assert_eq!(code, 2, "{arg}");
+            assert!(out.is_empty(), "{arg}: {out}");
+            assert!(err.contains("positive integer"), "{arg}: {err}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn head_and_tail_reject_every_combination_but_a_single_file_and_lines() {
+        let dir = pull_repo("headtail-combos", &[("f.rs", "fn f() { run(); }\n"), ("g.rs", "fn g() {}\n")]);
+        let cases: [(&[&str], &str); 9] = [
+            (&["file:f.rs", "head:1", "tail:1"], "head: and tail: cannot be combined"),
+            (&["file:f.rs", "head:1", "head:2"], "only one head:"),
+            (&["file:f.rs", "head:1", "run"], "head:/tail: cannot be combined with search terms."),
+            (&["head:1", "run"], "head:/tail: cannot be combined with search terms."),
+            (&["file:f.rs", "tail:1", "lines:1", "run"], "head:/tail: cannot be combined with search terms."),
+            (&["callers:run", "head:1"], "head:/tail: cannot be combined with callers:."),
+            (&["file:f.rs", "head:1", "cascade:1"], "head:/tail: cannot be combined with cascade:."),
+            (&["head:1"], "head:/tail: requires a file: scope."),
+            (&["file:f.rs", "file:g.rs", "tail:1"], "head:/tail: requires exactly one file: scope."),
+        ];
+        for (args, expected) in cases {
+            let (code, out, err) = pull(&dir, args);
+            assert_eq!(code, 2, "{args:?}");
+            assert!(out.is_empty(), "{args:?}: {out}");
+            assert!(err.contains(expected), "{args:?}: {err}");
+        }
+        let (code, _, err) = pull(&dir, &["-head:3", "file:f.rs"]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(code, 2);
+        assert!(err.contains("negated selector"), "{err}");
+    }
+
+    #[test]
+    fn head_and_tail_trim_the_combined_lines_output() {
+        let dir = pull_repo("headtail-lines", &[("f.txt", &numbered(30))]);
+        let (code, out, err) = pull(&dir, &["file:f.txt", "lines:2-4", "lines:10-12", "head:4"]);
+        assert_eq!(code, 0, "{err}");
+        assert_eq!(line_numbers(&out, "f.txt"), vec![2, 3, 4, 10]);
+        let (_, out, _) = pull(&dir, &["file:f.txt", "lines:2-4", "lines:10-12", "tail:4"]);
+        assert_eq!(line_numbers(&out, "f.txt"), vec![4, 10, 11, 12]);
+        let (_, out, _) = pull(&dir, &["file:f.txt", "lines:2-4", "tail:50"]);
+        assert_eq!(line_numbers(&out, "f.txt"), vec![2, 3, 4]);
+        // Out-of-range lines: stays an error.
+        let (code, _, err) = pull(&dir, &["file:f.txt", "lines:40-50", "head:3"]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(code, 2);
+        assert!(err.contains("starts beyond"), "{err}");
+    }
+
+    const FN_FILE: &str = "fn before() {\n    let x = 1;\n}\n\nfn target() {\n    let first = 1;\n    let needle = 2;\n    let last = 3;\n}\n\nfn after() {\n    let needle = 4;\n}\n";
+
+    #[test]
+    fn lines_with_terms_return_the_whole_unit_beyond_the_range() {
+        let dir = pull_repo("lines-terms", &[("x.rs", FN_FILE)]);
+        // The range covers only the line with the hit, inside target() (5-9).
+        let (code, out, err) = pull(&dir, &["file:x.rs", "lines:7", "needle"]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(code, 0, "{err}");
+        assert!(out.contains("Rust function: x.rs:5-9"), "{out}");
+        assert!(out.contains("let first = 1;") && out.contains("let last = 3;"), "{out}");
+        assert!(!out.contains("fn after"), "{out}");
+        assert!(out.contains("Query: needle\nRestricted to lines 7 of x.rs"), "{out}");
+    }
+
+    #[test]
+    fn lines_with_terms_ignore_hits_outside_the_range() {
+        let dir = pull_repo("lines-outside", &[("x.rs", FN_FILE)]);
+        let (code, out, _) = pull(&dir, &["file:x.rs", "lines:1-9", "needle"]);
+        assert_eq!(code, 0);
+        assert!(out.contains("x.rs:5-9") && !out.contains("x.rs:11-13") && !out.contains("let needle = 4;"), "{out}");
+        let (code, out, err) = pull(&dir, &["file:x.rs", "lines:10-13", "needle"]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(code, 0, "{err}");
+        assert!(out.contains("x.rs:11-13") && !out.contains("x.rs:5-9"), "{out}");
+    }
+
+    #[test]
+    fn several_line_ranges_are_ored() {
+        let dir = pull_repo("lines-multi", &[("x.rs", FN_FILE)]);
+        let (code, out, err) = pull(&dir, &["file:x.rs", "lines:7", "lines:12", "needle"]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(code, 0, "{err}");
+        assert!(out.contains("x.rs:5-9") && out.contains("x.rs:11-13"), "{out}");
+        assert!(out.contains("Restricted to lines 7, 12 of x.rs"), "{out}");
+    }
+
+    #[test]
+    fn no_hit_in_range_is_the_normal_no_match_result() {
+        let dir = pull_repo("lines-nomatch", &[("x.rs", FN_FILE)]);
+        let (code, out, err) = pull(&dir, &["file:x.rs", "lines:1-3", "needle"]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(code, 1, "{err}");
+        assert!(out.contains("Query: needle\n") && out.contains("Restricted to lines 1-3 of x.rs"), "{out}");
+        assert!(out.contains("No matches.") && out.contains("needle: 0 units"), "{out}");
+    }
+
+    #[test]
+    fn lines_with_terms_range_beyond_the_file() {
+        let dir = pull_repo("lines-eof", &[("x.rs", FN_FILE)]);
+        let (code, out, err) = pull(&dir, &["file:x.rs", "lines:12-99", "needle"]);
+        assert_eq!(code, 0, "{err}");
+        assert!(out.contains("truncated to 12-13") && out.contains("x.rs:11-13"), "{out}");
+        let (code, out, err) = pull(&dir, &["file:x.rs", "lines:50-60", "needle"]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(code, 2);
+        assert!(out.is_empty() && err.contains("starts beyond"), "{out}{err}");
+    }
+
+    #[test]
+    fn operators_see_the_whole_unit_but_hits_must_be_in_range() {
+        let dir = pull_repo("lines-ops", &[("x.rs", FN_FILE)]);
+        // +last is outside the range but inside the unit: still satisfied.
+        let (code, out, err) = pull(&dir, &["file:x.rs", "lines:7", "needle", "+last"]);
+        assert_eq!(code, 0, "{err}");
+        assert!(out.contains("x.rs:5-9"), "{out}");
+        // -first is outside the range but inside the unit: still excludes it.
+        let (code, out, _) = pull(&dir, &["file:x.rs", "lines:7", "needle", "-first"]);
+        assert_eq!(code, 1);
+        assert!(out.contains("-first: would have removed 1 unit"), "{out}");
+        // Required-only query: a hit of any required term in range seeds the unit.
+        let (code, out, err) = pull(&dir, &["file:x.rs", "lines:8", "+needle", "+last"]);
+        assert_eq!(code, 0, "{err}");
+        assert!(out.contains("x.rs:5-9"), "{out}");
+        let (code, out, _) = pull(&dir, &["file:x.rs", "lines:6", "+needle", "+last"]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(code, 1, "no required term hits line 6: {out}");
+    }
+
+    #[test]
+    fn lines_without_terms_are_unchanged_and_callers_still_reject_lines() {
+        let dir = pull_repo("lines-plain", &[("x.rs", FN_FILE)]);
+        let (code, out, _) = pull(&dir, &["file:x.rs", "lines:6-7"]);
+        assert_eq!(code, 0);
+        assert!(out.starts_with("x.rs:6:     let first = 1;\nx.rs:7:     let needle = 2;\n"), "{out}");
+        assert!(!out.contains("Restricted"), "{out}");
+        let (code, _, err) = pull(&dir, &["file:x.rs", "lines:6", "callers:needle"]);
+        assert_eq!(code, 2);
+        assert!(err.contains("callers: cannot be combined with lines:"), "{err}");
+        let (code, _, err) = pull(&dir, &["lines:6", "needle"]);
+        assert_eq!(code, 2);
+        assert!(err.contains("lines: requires a file: scope."), "{err}");
+        let (code, _, err) = pull(&dir, &["file:x.rs", "file:y.rs", "lines:6", "needle"]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(code, 2);
+        assert!(err.contains("lines: requires exactly one file: scope."), "{err}");
+    }
+
+    #[test]
+    fn lines_with_terms_restrict_markdown_and_bash_units_too() {
+        let md = "# One\nalpha\nneedle here\n# Two\nbeta\nneedle again\n";
+        let sh = "first() {\n  echo needle\n}\nsecond() {\n  echo one\n  echo needle\n}\n";
+        let dir = pull_repo("lines-md-sh", &[("d.md", md), ("s.sh", sh)]);
+        let (code, out, err) = pull(&dir, &["file:d.md", "lines:6", "needle"]);
+        assert_eq!(code, 0, "{err}");
+        assert!(out.contains("d.md:4-6") && out.contains("beta") && !out.contains("alpha"), "{out}");
+        let (code, out, err) = pull(&dir, &["file:s.sh", "lines:6", "needle"]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(code, 0, "{err}");
+        assert!(out.contains("Bash function: s.sh:4-7") && out.contains("echo one") && !out.contains("first()"), "{out}");
     }
 }

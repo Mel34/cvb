@@ -5,13 +5,23 @@ cvb - terminal-to-LLM exchange utility
 .B cvb
 .br
 .B cvb pull
-.RI [ file:PATH ]
+.RI [ file:PATH ]...
 .RI [ cascade:N ]
 .I search-term...
 .br
 .B cvb pull
 .BI file: PATH
+.RB [ head:\fIN\fR | tail:\fIN\fR ]
+.br
+.B cvb pull
+.BI file: PATH
 .BI lines: SPEC
+.RB [ head:\fIN\fR | tail:\fIN\fR ]
+.br
+.B cvb pull
+.BI file: PATH
+.BI lines: SPEC
+.I search-term...
 .br
 .B cvb pull
 .BI callers: NAME
@@ -42,7 +52,7 @@ Commands entered in the session are captured when they complete. Their visible t
 The active session is indicated by a red dot in the shell prompt. The session ends with the shell's own
 .BR exit .
 .TP
-.B pull \fR[\fBfile:\fIPATH\fR] [\fBcascade:\fIN\fR] \fIsearch-term...\fR
+.B pull \fR[\fBfile:\fIPATH\fR]... [\fBcascade:\fIN\fR] \fIsearch-term...\fR
 Search source files: Git-tracked ones and untracked ones that .gitignore does not hide. Rust is parsed syntactically by item, Bash by function, Python (.py, .pyi) by function and class, Zig (.zig) by function, test and type, C (.c, .h) and C++ (.cc, .cpp, .cxx, .hh, .hpp, .hxx) by function and type, JavaScript (.js, .mjs, .cjs, .jsx) by function and class, TypeScript (.ts, .mts, .cts, .tsx) by function, class and type, Go (.go) by function and type, Java (.java) by method and type, Lua (.lua) by function, and Markdown by heading. Other files are searched by line. Callers and cascade work on every language listed here except Markdown.
 
 Matching is case-sensitive. Bare terms are alternatives (OR),
@@ -51,9 +61,15 @@ is required and
 .BI - term
 excludes units that contain it (at least one positive term is needed); a quoted argument is an exact phrase.
 .BI file: PATH
-restricts the search to one file (only one is allowed) or, alone, prints the whole file.
+restricts the search to the named files (any number; repeats are ignored and their order does not matter; a path that matches no file fails the whole command) or, alone, prints the whole file.
+.BI head: N
+and
+.BI tail: N
+(N at least 1) print the first or last N lines of a whole file, or trim
+.B lines:
+output; they cannot be combined with search terms, callers:, cascade: or each other.
 .BI lines: SPEC
-(N or START-END, several allowed) prints those lines of the file and cannot be combined with search terms.
+(N or START-END, several allowed, exactly one file:) prints those lines of the file. With search terms it instead restricts the search: a hit must lie in one of the ranges, and the unit around it is returned whole, so it may extend beyond the range. + and - terms are still checked over the whole unit.
 .BI callers: NAME
 lists syntactic call sites in Rust, Bash, Python, Zig, C, C++, JavaScript, TypeScript, Go, Java and Lua (candidates, not proof; a call through a receiver, such as a.f(), is reported as a method-call candidate).
 .BI cascade: N

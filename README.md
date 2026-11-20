@@ -232,8 +232,10 @@ cvb pull foo bar          units containing foo OR bar
 cvb pull +foo +bar        units containing all + terms
 cvb pull foo -test        leave out units containing test
 cvb pull file:PATH        the whole file
-cvb pull file:PATH foo    search one file
+cvb pull file:A file:B foo  search the named files
+cvb pull file:PATH head:50  first 50 lines (tail:N: last N)
 cvb pull file:PATH lines:10-40
+cvb pull file:PATH lines:10-300 foo  hits inside the range, whole units returned
 cvb pull callers:NAME     syntactic call sites (every supported language except Markdown)
 cvb pull +foo cascade:2   also the units the matches depend on
 ```
@@ -332,9 +334,11 @@ Screen captures copy the textual contents of the currently visible terminal scre
 
 ```text
 cvb
-cvb pull [file:PATH] [cascade:N] <search-term>...
-cvb pull file:PATH lines:N|START-END
-cvb pull callers:NAME [file:PATH]
+cvb pull [file:PATH]... [cascade:N] <search-term>...
+cvb pull file:PATH [head:N|tail:N]
+cvb pull file:PATH lines:N|START-END... [head:N|tail:N]
+cvb pull file:PATH lines:N|START-END... <search-term>...
+cvb pull callers:NAME [file:PATH]...
 cvb context
 cvb --help
 cvb --version

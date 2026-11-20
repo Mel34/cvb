@@ -34,9 +34,11 @@ The user directs the work and is your only hands. You cannot run commands or rea
 | `cvb pull "line ending"` | Exact phrase |
 | `cvb pull "--dry-run"` | Quote a term that would otherwise parse as an operator |
 | `cvb pull file:PATH` | The whole file, empty files reported as empty |
-| `cvb pull file:PATH foo` | Search only in that file (one `file:` scope allowed; a bad path is an error, there is no repository-wide fallback) |
-| `cvb pull file:PATH lines:N` or `lines:START-END` | Inclusive line range; several `lines:` selections are allowed; cannot be combined with search terms |
-| `cvb pull callers:NAME` | Syntactic call sites (candidates, not proof; `a.f()` is a method-call candidate because the receiver type is unknown); `file:PATH` scopes the scan; cannot be combined with `lines:` |
+| `cvb pull file:PATH head:N` or `tail:N` | The first or last N lines (N at least 1; larger than the file returns the whole file) with original line numbers; also trims `lines:` output; cannot be combined with search terms, `callers:`, `cascade:` or each other |
+| `cvb pull file:A file:B foo` | Search only in the named files (any number of `file:` scopes; repeats are ignored, their order does not matter; a bad path fails the whole command, there is no repository-wide fallback; several `file:` scopes need a search term) |
+| `cvb pull file:PATH lines:N` or `lines:START-END` | Inclusive line range; several `lines:` selections are allowed; needs exactly one `file:` |
+| `cvb pull file:PATH lines:A-B foo` | Search restricted to those lines: a hit must lie in a range, and the unit around it is returned whole, so it may extend beyond the range (ask for the range, get the whole function). `+`/`-` terms are still checked over the whole unit, not only the range; the `Query:` echo is followed by a `Restricted to lines …` line |
+| `cvb pull callers:NAME` | Syntactic call sites (candidates, not proof; `a.f()` is a method-call candidate because the receiver type is unknown); `file:PATH` (one or more) scopes the scan; cannot be combined with `lines:` |
 | `cvb pull +foo cascade:N` | Also include dependencies of the matching units, depth 0 to 5 |
 
 Selectors (`file:`, `lines:`, `callers:`, `cascade:`) are syntax, not search terms, and cannot be negated.
