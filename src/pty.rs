@@ -462,69 +462,69 @@ impl MarkerScanner {
 
             let end_position = find_subslice(&self.pending, &self.end_prefix);
 
-            if let Some(command_position) = command_position {
-                if marker
+            if let Some(command_position) = command_position
+                && marker
                     .as_ref()
                     .is_none_or(|(position, _, _)| command_position <= *position)
-                    && end_position.is_none_or(|position| command_position <= position)
-                {
-                    if command_position > 0 {
-                        events.push(MarkerEvent::Data(
-                            self.pending.drain(..command_position).collect(),
-                        ));
-                        continue;
-                    }
-
-                    let payload_start = self.command_prefix.len();
-                    let Some(payload_end) = self.pending[payload_start..]
-                        .iter()
-                        .position(|byte| *byte == b'\x07')
-                        .map(|position| payload_start + position)
-                    else {
-                        break;
-                    };
-
-                    let decoded = decode_hex(&self.pending[payload_start..payload_end]);
-                    self.pending.drain(..=payload_end);
-
-                    if let Some(command) = decoded {
-                        events.push(MarkerEvent::Command(
-                            String::from_utf8_lossy(&command).into_owned(),
-                        ));
-                    }
+                && end_position.is_none_or(|position| command_position <= position)
+            {
+                if command_position > 0 {
+                    events.push(MarkerEvent::Data(
+                        self.pending.drain(..command_position).collect(),
+                    ));
                     continue;
                 }
+
+                let payload_start = self.command_prefix.len();
+                let Some(payload_end) = self.pending[payload_start..]
+                    .iter()
+                    .position(|byte| *byte == b'\x07')
+                    .map(|position| payload_start + position)
+                else {
+                    break;
+                };
+
+                let decoded = decode_hex(&self.pending[payload_start..payload_end]);
+                self.pending.drain(..=payload_end);
+
+                if let Some(command) = decoded {
+                    events.push(MarkerEvent::Command(
+                        String::from_utf8_lossy(&command).into_owned(),
+                    ));
+                }
+                continue;
             }
 
-            if let Some(end_position) = end_position {
-                if marker.as_ref().map_or(true, |(position, _, _)| end_position <= *position) {
-                    if end_position > 0 {
-                        events.push(MarkerEvent::Data(
-                            self.pending.drain(..end_position).collect(),
-                        ));
-                        continue;
-                    }
-
-                    let marker_length = self.end_prefix.len() + 4;
-                    if self.pending.len() < marker_length {
-                        break;
-                    }
-
-                    let status_bytes =
-                        &self.pending[self.end_prefix.len()..self.end_prefix.len() + 3];
-                    let terminator = self.pending[self.end_prefix.len() + 3];
-
-                    if status_bytes.iter().all(u8::is_ascii_digit) && terminator == b'\x07' {
-                        let status = status_bytes
-                            .iter()
-                            .fold(0, |value, digit| value * 10 + i32::from(digit - b'0'));
-                        self.pending.drain(..marker_length);
-                        events.push(MarkerEvent::End(status));
-                    } else {
-                        events.push(MarkerEvent::Data(self.pending.drain(..1).collect()));
-                    }
+            if let Some(end_position) = end_position
+                && marker
+                    .as_ref()
+                    .is_none_or(|(position, _, _)| end_position <= *position)
+            {
+                if end_position > 0 {
+                    events.push(MarkerEvent::Data(
+                        self.pending.drain(..end_position).collect(),
+                    ));
                     continue;
                 }
+
+                let marker_length = self.end_prefix.len() + 4;
+                if self.pending.len() < marker_length {
+                    break;
+                }
+
+                let status_bytes = &self.pending[self.end_prefix.len()..self.end_prefix.len() + 3];
+                let terminator = self.pending[self.end_prefix.len() + 3];
+
+                if status_bytes.iter().all(u8::is_ascii_digit) && terminator == b'\x07' {
+                    let status = status_bytes
+                        .iter()
+                        .fold(0, |value, digit| value * 10 + i32::from(digit - b'0'));
+                    self.pending.drain(..marker_length);
+                    events.push(MarkerEvent::End(status));
+                } else {
+                    events.push(MarkerEvent::Data(self.pending.drain(..1).collect()));
+                }
+                continue;
             }
 
             let Some((position, length, event)) = marker else {
@@ -540,13 +540,12 @@ impl MarkerScanner {
         }
 
         if !self.pending.is_empty() {
-            let keep = if self.pending.starts_with(&self.command_prefix)
-                && !self.pending[self.command_prefix.len()..].contains(&b'\x07')
-            {
-                self.pending.len()
-            } else if self.pending.starts_with(&self.end_prefix)
-                && self.pending.len() < self.end_prefix.len() + 4
-            {
+            // An unfinished command or end marker is held back whole.
+            let command_unfinished = self.pending.starts_with(&self.command_prefix)
+                && !self.pending[self.command_prefix.len()..].contains(&b'\x07');
+            let end_unfinished = self.pending.starts_with(&self.end_prefix)
+                && self.pending.len() < self.end_prefix.len() + 4;
+            let keep = if command_unfinished || end_unfinished {
                 self.pending.len()
             } else {
                 [
@@ -578,7 +577,7 @@ impl MarkerScanner {
 }
 
 fn decode_hex(bytes: &[u8]) -> Option<Vec<u8>> {
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return None;
     }
 

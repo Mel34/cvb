@@ -23,14 +23,18 @@ trap 'rm -rf "$work"' EXIT
 python3 - "$root/data/cvb-control.bash" "$work" <<'PY'
 import os
 import pty
+import re
 import select
 import sys
 import time
 
 control_script, work = sys.argv[1:]
 start_marker = b"\x1b]777;CVB;START\x07"
-end_marker = b"\x1b]777;CVB;END\x07"
+# The end marker carries the exit status: ESC ]777;CVB;END; NNN BEL.
+end_prefix = b"\x1b]777;CVB;END;"
 skip_marker = b"\x1b]777;CVB;SKIP\x07"
+# A command that ran is reported by name (hex) just before the end marker.
+command_marker = re.compile(rb"\x1b\]777;CVB;COMMAND;([0-9a-f]*)\x07")
 
 passed = 0
 failed = 0
@@ -52,6 +56,27 @@ def check(name, condition, detail=""):
             print(f"     {detail!r}", flush=True)
 
 
+def read_more(deadline, marker):
+    """Read what the terminal has, or fail once the deadline has passed."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError(f"timed out waiting for marker {marker!r}")
+
+    ready, _, _ = select.select([master], [], [], remaining)
+    if not ready:
+        return
+
+    try:
+        chunk = os.read(master, 65536)
+    except OSError as error:
+        raise RuntimeError(f"PTY read failed: {error}") from error
+
+    if not chunk:
+        raise RuntimeError("Bash exited before emitting the expected marker")
+
+    buffer.extend(chunk)
+
+
 def read_until(marker, timeout=5):
     """Return bytes before marker, retaining any bytes after it."""
     deadline = time.monotonic() + timeout
@@ -63,31 +88,40 @@ def read_until(marker, timeout=5):
             del buffer[:position + len(marker)]
             return result
 
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError(f"timed out waiting for marker {marker!r}")
+        read_more(deadline, marker)
 
-        ready, _, _ = select.select([master], [], [], remaining)
-        if not ready:
-            continue
 
-        try:
-            chunk = os.read(master, 65536)
-        except OSError as error:
-            raise RuntimeError(f"PTY read failed: {error}") from error
+def read_until_end(timeout=5):
+    """Return bytes before the end marker, retaining any bytes after it."""
+    deadline = time.monotonic() + timeout
+    marker_length = len(end_prefix) + 4
 
-        if not chunk:
-            raise RuntimeError("Bash exited before emitting the expected marker")
+    while True:
+        position = buffer.find(end_prefix)
+        if position >= 0 and len(buffer) >= position + marker_length:
+            status = buffer[position + len(end_prefix):position + len(end_prefix) + 3]
+            terminator = buffer[position + len(end_prefix) + 3]
+            if status.isdigit() and terminator == 0x07:
+                result = bytes(buffer[:position])
+                del buffer[:position + marker_length]
+                return result
 
-        buffer.extend(chunk)
+        read_more(deadline, end_prefix)
+
+
+def command_names(output):
+    """The command names the control script reported for this capture."""
+    return [bytes.fromhex(hexed.decode()) for hexed in command_marker.findall(output)]
 
 
 def run_command(name, command, expected=None, expect_empty=False):
-    """Run one complete Bash command and inspect its captured output."""
+    """Run one complete Bash command and inspect its captured output. The
+    command markers are metadata, not output: they are removed from what is
+    returned and checked."""
     try:
         os.write(master, command.encode() + b"\n")
         read_until(start_marker)
-        output = read_until(end_marker)
+        output = command_marker.sub(b"", read_until_end())
 
         if expect_empty:
             check(name, output == b"", output)
@@ -141,7 +175,7 @@ try:
     child_pid = pid
 
     # The initial prompt hook emits END before the first command.
-    read_until(end_marker)
+    read_until_end()
 
     # 1. Ordinary single-line command.
     run_command(
@@ -203,12 +237,13 @@ CVB_TEST_EOF""",
     check("heredoc preserves blank line", b"ONE\r\n\r\nHEREDOC_LINE_TWO" in output, output)
     check("heredoc preserves final line", b"HEREDOC_LINE_TWO" in output, output)
 
-    # 6. A silent, failing command still reaches its end marker.
-    run_command(
-        "silent failing command",
-        "false",
-        expect_empty=True,
-    )
+    # 6. A silent, failing command still reaches its end marker, and is reported
+    #    by name so the capture can say which command failed.
+    os.write(master, b"false\n")
+    read_until(start_marker)
+    raw = read_until_end()
+    check("silent failing command", command_marker.sub(b"", raw) == b"", raw)
+    check("silent failing command is reported by name", command_names(raw) == [b"false"], raw)
 
     # 7. The next command starts cleanly after the failure.
     run_command(
@@ -236,7 +271,7 @@ CVB_TEST_EOF""",
         try:
             os.write(master, command.encode() + b"\n")
             read_until(start_marker)
-            output = read_until(end_marker)
+            output = read_until_end()
             has_skip = skip_marker in output
             ok = has_skip == expect_skip and (expected is None or expected in output)
             check(name, ok, output)
@@ -275,6 +310,8 @@ CVB_TEST_EOF""",
     run_skip("skip: next command starts clean", "printf 'CLEAN\\n'", False, b"CLEAN")
 
 except Exception as error:
+    # A runner that stops early has failed, whatever it counted so far.
+    failed += 1
     print(f"FAIL: test runner stopped: {error}", file=sys.stderr, flush=True)
 
 finally:

@@ -304,9 +304,11 @@ The command completed successfully (exit 0) and produced no visible output.
 The command failed (exit 1) and produced no visible output.
 ```
 
-Visible terminal output is preserved and labeled Terminal output:.
-Skip list
-Some commands, such as cd, normally print nothing. Commands listed in the skip list leave the clipboard untouched when they produce no visible output.
+Visible terminal output is preserved and labeled `Terminal output:`.
+
+### Skip list
+
+Some commands, such as `cd`, normally print nothing. Commands listed in the skip list leave the clipboard untouched when they produce no visible output.
 
 CVB creates `~/.config/cvb/skip` when a resident session starts. If `XDG_CONFIG_HOME` is set, the file is instead located at `$XDG_CONFIG_HOME/cvb/skip`.
 
