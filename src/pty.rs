@@ -1178,7 +1178,6 @@ fn dispatch_paste_events(
                 if !bytes.ends_with(b"\n") && !bytes.ends_with(b"\r") {
                     bytes.push(b'\n');
                 }
-                bytes.extend_from_slice(b"__cvb_batch_end\r");
                 write_to_master(master, &bytes)?;
                 *command_block = Some(CommandBlockCapture {
                     commands,
@@ -1801,21 +1800,32 @@ fn proxy(
                         let _captured = capture.end();
 
                         if let Some(block) = command_block.as_mut() {
-                            let sentinel = commands
-                                .iter()
-                                .any(|command| command == "__cvb_batch_end");
+                            let index = block.results.len();
+                            let rendered =
+                                render_transcript(&transcript, rows, cols, status, &commands);
+                            block.results.push((status, rendered));
+                            debug_log(
+                                "command_block_result",
+                                &format!(
+                                    "index={} expected={} status={status} skip_listed={skip_listed}",
+                                    index + 1,
+                                    block.commands.len()
+                                ),
+                            );
 
-                            if sentinel {
+                            if block.results.len() >= block.commands.len() {
                                 let mut report = String::from("Command block results:\n\n");
                                 let mut passed = 0usize;
                                 let mut failed = 0usize;
 
-                                for (index, (command, (exit_status, rendered))) in block
-                                    .commands
-                                    .iter()
-                                    .zip(block.results.iter())
-                                    .enumerate()
+                                for (index, (exit_status, rendered)) in
+                                    block.results.iter().enumerate()
                                 {
+                                    let command = block
+                                        .commands
+                                        .get(index)
+                                        .map(String::as_str)
+                                        .unwrap_or("<unexpected command result>");
                                     report.push_str(&format!(
                                         "Command {}/{}: {}\n",
                                         index + 1,
@@ -1869,27 +1879,6 @@ fn proxy(
                                 );
                                 crate::clipboard::process(&buffer)?;
                                 command_block = None;
-                            } else {
-                                let index = block.results.len();
-                                let command = block
-                                    .commands
-                                    .get(index)
-                                    .cloned()
-                                    .unwrap_or_else(|| {
-                                        format!("<unexpected command {}>", index + 1)
-                                    });
-                                let rendered =
-                                    render_transcript(&transcript, rows, cols, status, &commands);
-                                block.results.push((status, rendered));
-                                debug_log(
-                                    "command_block_result",
-                                    &format!(
-                                        "index={} expected={} status={status} skip_listed={skip_listed}",
-                                        index + 1,
-                                        block.commands.len()
-                                    ),
-                                );
-                                let _ = command;
                             }
 
                             transcript = Transcript::default();

@@ -785,26 +785,28 @@ fi""",
                 b"\x1b[200~" + bracketed_body + b"\x1b[201~",
             )
             bracketed_payloads = wait_for_payload(
-                clipboard_dir, bracketed_before + len(bracketed_commands)
+                clipboard_dir, bracketed_before + 1
             )
-            bracketed_payloads = bracketed_payloads[
-                bracketed_before:bracketed_before + len(bracketed_commands)
-            ]
-            bracketed_expected = [
+            bracketed_payload = bracketed_payloads[bracketed_before]
+            bracketed_expected = (
+                b"Command 1/5: printf 'PTY_BRACKETED_1\\n'",
                 b"PTY_BRACKETED_1",
-                b"The command `CVB_BRACKETED_VALUE=preserved`",
+                b"Command 2/5: CVB_BRACKETED_VALUE=preserved",
+                b"The command `CVB_BRACKETED_VALUE=preserved` completed successfully",
+                b"Command 3/5:",
                 b"PTY_BRACKETED_2_preserved",
+                b"Command 4/5: false",
                 b"The command `false` failed (exit 1)",
+                b"Command 5/5:",
                 b"PTY_BRACKETED_3",
-            ]
-            for index, (payload, expected) in enumerate(
-                zip(bracketed_payloads, bracketed_expected), start=1
-            ):
-                check(
-                    f"bracketed paste command {index} captured separately",
-                    expected in payload,
-                    payload,
-                )
+                b"Command block: 4 passed, 1 failed.",
+            )
+            check(
+                "bracketed paste produces one complete command-block report",
+                len(clipboard_files(clipboard_dir)) == bracketed_before + 1
+                and all(item in bracketed_payload for item in bracketed_expected),
+                bracketed_payload,
+            )
 
             # Send several commands without waiting between them.
             burst_before = len(clipboard_files(clipboard_dir))
@@ -926,7 +928,7 @@ fi""",
                 "cd /",
                 clipboard_dir,
             )
-            # The sentinel's command text is `PTY_SKIP_%s`, so the expected
+            # The command's format string is `PTY_SKIP_%s`, so the expected
             # `PTY_SKIP_NEXT` can only come from real command output, never
             # from an echoed command line.
             run_command(
