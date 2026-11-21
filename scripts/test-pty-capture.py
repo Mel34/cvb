@@ -816,6 +816,91 @@ fi""",
                 bracketed_payload,
             )
 
+            # Commands that span lines are grouped by the shell, not by CVB:
+            # compound commands, comments, blank lines, heredocs, quoted
+            # strings and backslash continuations each count once.
+            multiline_before = len(clipboard_files(clipboard_dir))
+            multiline_body = (
+                "if true; then\n"
+                "  printf 'PTY_ML_IF\\n'\n"
+                "fi\n"
+                "\n"
+                "# a comment line\n"
+                "cat <<PTY_EOF\n"
+                "PTY_ML_HEREDOC\n"
+                "\n"
+                "PTY_EOF\n"
+                "printf 'PTY_ML_%s\\n' \\\n"
+                "  continued\n"
+                "printf 'PTY_ML_QUOTE_%s\\n' 'one\n"
+                "two'\n"
+                "false\n"
+                "printf 'PTY_ML_LAST\\n'\n"
+            ).encode()
+            os.write(master, b"\x1b[200~" + multiline_body + b"\x1b[201~")
+            multiline_payloads = wait_for_payload(clipboard_dir, multiline_before + 1)
+            multiline_payload = multiline_payloads[multiline_before]
+            check(
+                "multi-line commands in a pasted block are grouped by the shell",
+                len(clipboard_files(clipboard_dir)) == multiline_before + 1
+                and all(item in multiline_payload for item in (
+                    b"Command 1/6:\n    if true; then\n      printf 'PTY_ML_IF",
+                    b"PTY_ML_IF",
+                    b"Command 2/6:\n    cat <<PTY_EOF\n    PTY_ML_HEREDOC\n",
+                    b"PTY_ML_HEREDOC",
+                    b"Command 3/6:\n    printf 'PTY_ML_%s",
+                    b"PTY_ML_continued",
+                    b"Command 4/6:\n    printf 'PTY_ML_QUOTE_%s",
+                    b"PTY_ML_QUOTE_one\ntwo",
+                    b"Command 5/6: false",
+                    b"Exit status: 1 (FAIL)",
+                    b"Command 6/6: printf 'PTY_ML_LAST",
+                    b"Command block: 5 passed, 1 failed, 0 incomplete.",
+                )),
+                multiline_payload,
+            )
+
+            # Input the shell refuses to run is reported, not lost.
+            refused_before = len(clipboard_files(clipboard_dir))
+            os.write(
+                master,
+                b"\x1b[200~printf 'PTY_REFUSED_BEFORE\\n'\nfi\n"
+                b"printf 'PTY_REFUSED_AFTER\\n'\n\x1b[201~",
+            )
+            refused_payloads = wait_for_payload(clipboard_dir, refused_before + 1)
+            refused_payload = refused_payloads[refused_before]
+            check(
+                "a pasted line the shell refuses to run is reported",
+                all(item in refused_payload for item in (
+                    b"Command 2/3: fi",
+                    b"The shell did not run this input",
+                    b"PTY_REFUSED_AFTER",
+                    b"Command block: 2 passed, 1 failed, 0 incomplete.",
+                )),
+                refused_payload,
+            )
+
+            # A paste that ends inside a compound command is reported at once.
+            open_before = len(clipboard_files(clipboard_dir))
+            os.write(
+                master,
+                b"\x1b[200~printf 'PTY_OPEN_FIRST\\n'\nif true; then\n\x1b[201~",
+            )
+            open_payloads = wait_for_payload(clipboard_dir, open_before + 1)
+            open_payload = open_payloads[open_before]
+            check(
+                "a paste that ends inside a compound command is reported incomplete",
+                all(item in open_payload for item in (
+                    b"Command 1/2: printf 'PTY_OPEN_FIRST",
+                    b"Command 2/2: if true; then",
+                    b"Exit status: INCOMPLETE",
+                    b"Command block: 1 passed, 0 failed, 1 incomplete.",
+                )),
+                open_payload,
+            )
+            os.write(master, b"\x03")
+            drain_terminal()
+
             # Send several commands without waiting between them.
             burst_before = len(clipboard_files(clipboard_dir))
             burst_commands = [

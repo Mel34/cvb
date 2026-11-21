@@ -138,6 +138,13 @@ printf '\nCVB context initialization ready.\nPaste into your LLM to begin.\n\n'
 CVB_SAVED_PS1=$PS1
 PS1='\[\e[31m\]●\[\e[0m\] '"$CVB_SAVED_PS1"
 
+# Every line the shell reads from a pasted command block ends either in a
+# completed prompt (PROMPT_COMMAND prints the END marker) or in a continuation
+# prompt. The continuation prompt prints this marker so CVB can tell that the
+# line was read but the command is not finished yet (an if block, a heredoc, a
+# trailing backslash, an open quote).
+PS2='\[\e]777;CVB;CONT\a\]'"${PS2-> }"
+
 # Paste-to-apply: after CVB prints the result of a pasted patch it sends this
 # private key sequence, which redraws the prompt and anything half-typed without
 # running a command or touching history. Bound in every editing mode.

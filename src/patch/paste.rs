@@ -52,10 +52,8 @@ pub(crate) enum PasteEvent {
     /// Send these bytes to the shell unchanged.
     Forward(Vec<u8>),
     /// Send a safe ordinary paste as one independently-accounted command block.
-    CommandBlock {
-        body: Vec<u8>,
-        commands: Vec<String>,
-    },
+    /// The shell decides where its commands begin and end; see `pty.rs`.
+    CommandBlock { body: Vec<u8> },
     /// A complete patch, normalized: starts with `*** Begin Patch`, ends with
     /// `*** End Patch` and one line feed. Nothing was sent to the shell.
     Patch(String),
@@ -435,17 +433,15 @@ fn forward_command_paste(body: Vec<u8>, events: &mut Vec<PasteEvent>) {
         return;
     }
 
-    let commands: Vec<String> = text
+    let has_command = text
         .lines()
         .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(str::to_owned)
-        .collect();
+        .any(|line| !line.is_empty() && !line.starts_with('#'));
 
-    if commands.is_empty() {
-        push_forward(events, body);
+    if has_command {
+        events.push(PasteEvent::CommandBlock { body });
     } else {
-        events.push(PasteEvent::CommandBlock { body, commands });
+        push_forward(events, body);
     }
 }
 
@@ -742,7 +738,6 @@ mod tests {
             r.feed(b"echo two\n\x1b[201~", true),
             vec![PasteEvent::CommandBlock {
                 body: b"echo one\necho two\n".to_vec(),
-                commands: vec!["echo one".to_owned(), "echo two".to_owned()],
             }]
         );
         assert_eq!(r.pending(), Pending::Nothing);
@@ -756,7 +751,6 @@ mod tests {
             events,
             vec![PasteEvent::CommandBlock {
                 body: body.to_vec(),
-                commands: vec!["echo one".to_owned(), "false".to_owned()],
             }]
         );
     }

@@ -62,6 +62,8 @@ enum MarkerEvent {
     Start,
     Pathop,
     Skip,
+    /// The shell read a line and needs more input to finish the command.
+    Continue,
     Command(String),
     End(i32),
 }
@@ -71,6 +73,7 @@ struct MarkerScanner {
     end_prefix: Vec<u8>,
     pathop: Vec<u8>,
     skip: Vec<u8>,
+    cont: Vec<u8>,
     command_prefix: Vec<u8>,
     pending: Vec<u8>,
 }
@@ -81,73 +84,189 @@ struct CaptureState {
     captured: Vec<u8>,
 }
 
-struct CommandBlockCapture {
-    commands: Vec<String>,
-    results: Vec<(i32, Vec<u8>)>,
+/// One command of a pasted block as the shell grouped it: the source lines the
+/// shell read for it, and how it ended.
+struct BlockResult {
+    source: Vec<String>,
+    status: i32,
+    rendered: Vec<u8>,
 }
 
-fn render_command_block_report(block: &CommandBlockCapture) -> Vec<u8> {
-    let mut report = String::from("Command block results:\n\n");
-    let mut passed = 0usize;
-    let mut failed = 0usize;
-    let mut incomplete = 0usize;
+/// A pasted block of commands. CVB does not parse the text. It hands the lines
+/// to the shell and lets the shell say where each command ends: every line
+/// read ends in either a continuation prompt (CONT marker) or a completed
+/// prompt (END marker), so counting those markers accounts for every line,
+/// whatever the line holds (a compound command, a heredoc, an open quote, a
+/// trailing backslash, a blank line, a comment).
+struct CommandBlockCapture {
+    /// Every line of the paste as written to the shell, blank ones included.
+    lines: Vec<String>,
+    /// Lines the shell has finished reading.
+    consumed: usize,
+    /// Lines of the command the shell is still reading.
+    open: Vec<String>,
+    results: Vec<BlockResult>,
+}
 
-    for (index, command) in block.commands.iter().enumerate() {
-        report.push_str(&format!(
-            "Command {}/{}: {}\n",
-            index + 1,
-            block.commands.len(),
-            command
-        ));
+fn is_command_line(line: &str) -> bool {
+    let line = line.trim();
+    !line.is_empty() && !line.starts_with('#')
+}
 
-        if let Some((exit_status, rendered)) = block.results.get(index) {
-            report.push_str(&String::from_utf8_lossy(rendered));
-            if !rendered.ends_with(b"\n") {
-                report.push('\n');
+/// Splits pasted text the way the shell reads it: `\n`, `\r\n` and a lone `\r`
+/// each end a line.
+fn split_pasted_lines(text: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    let mut chars = text.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\n' => lines.push(std::mem::take(&mut line)),
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                lines.push(std::mem::take(&mut line));
             }
+            _ => line.push(ch),
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
 
-            if *exit_status == 0 {
-                passed += 1;
-                report.push_str("Exit status: 0 (PASS)\n\n");
-            } else {
-                failed += 1;
-                report.push_str(&format!(
-                    "Exit status: {} (FAIL)\n\n",
-                    exit_status
-                ));
-            }
-        } else {
-            incomplete += 1;
-            report.push_str("Exit status: INCOMPLETE (no completion marker received)\n\n");
+impl CommandBlockCapture {
+    fn new(bytes: &[u8]) -> Self {
+        Self {
+            lines: split_pasted_lines(&String::from_utf8_lossy(bytes)),
+            consumed: 0,
+            open: Vec::new(),
+            results: Vec::new(),
         }
     }
 
-    if block.results.len() > block.commands.len() {
-        let extra_count = block.results.len() - block.commands.len();
-        report.push_str(&format!(
-            "Unexpected results: {extra_count}\n"
-        ));
+    /// The shell read the next line and wants more input for the command.
+    fn line_continues(&mut self) {
+        if let Some(line) = self.lines.get(self.consumed) {
+            self.open.push(line.clone());
+            self.consumed += 1;
+        }
+    }
 
-        for (index, (exit_status, rendered)) in
-            block.results.iter().enumerate().skip(block.commands.len())
-        {
-            report.push_str(&format!(
-                "Unexpected result {}: exit status {}\n",
-                index - block.commands.len() + 1,
-                exit_status
-            ));
-            report.push_str(&String::from_utf8_lossy(rendered));
-            if !rendered.ends_with(b"\n") {
-                report.push('\n');
+    /// The shell read the next line and finished with it. `executed` holds the
+    /// exit status and output when a command ran; it is `None` for a blank
+    /// line, a comment, or input the shell refused to run.
+    fn line_completes(&mut self, executed: Option<(i32, Vec<u8>)>, status: i32) {
+        let mut source = std::mem::take(&mut self.open);
+        if let Some(line) = self.lines.get(self.consumed) {
+            source.push(line.clone());
+            self.consumed += 1;
+        }
+
+        match executed {
+            Some((status, rendered)) => self.results.push(BlockResult {
+                source,
+                status,
+                rendered,
+            }),
+            None if source.iter().any(|line| is_command_line(line)) => {
+                // A syntax error, for example. Blank lines and comments leave
+                // the status of the previous command, so only real input counts.
+                self.results.push(BlockResult {
+                    source,
+                    status,
+                    rendered: format!(
+                        "The shell did not run this input (exit {status}); a syntax error is the usual cause.\n"
+                    )
+                    .into_bytes(),
+                });
             }
+            None => {}
+        }
+    }
+
+    /// Every line has been read. The last command may still be open when the
+    /// paste ended inside a compound command.
+    fn finished(&self) -> bool {
+        self.consumed >= self.lines.len()
+    }
+}
+
+fn push_source(report: &mut String, index: usize, total: usize, source: &[String]) {
+    if source.len() == 1 {
+        report.push_str(&format!("Command {index}/{total}: {}\n", source[0].trim()));
+    } else {
+        report.push_str(&format!("Command {index}/{total}:\n"));
+        for line in source {
+            report.push_str(&format!("    {line}\n"));
+        }
+    }
+}
+
+fn render_command_block_report(block: &CommandBlockCapture) -> Vec<u8> {
+    // Whatever the shell had not finished when the report was made: the
+    // command it was reading or running, then lines it never reached.
+    let mut running = block.open.clone();
+    let mut not_started_from = block.consumed;
+    if let Some(line) = block.lines.get(block.consumed) {
+        running.push(line.clone());
+        not_started_from = block.consumed + 1;
+    }
+    if !running.iter().any(|line| is_command_line(line)) {
+        running.clear();
+    }
+    let not_started: Vec<&String> = block
+        .lines
+        .iter()
+        .skip(not_started_from)
+        .filter(|line| is_command_line(line))
+        .collect();
+
+    let total = block.results.len() + usize::from(!running.is_empty());
+    let mut report = String::from("Command block results:\n\n");
+    let mut passed = 0usize;
+    let mut failed = 0usize;
+
+    for (index, result) in block.results.iter().enumerate() {
+        push_source(&mut report, index + 1, total, &result.source);
+        report.push_str(&String::from_utf8_lossy(&result.rendered));
+        if !result.rendered.ends_with(b"\n") {
+            report.push('\n');
+        }
+
+        if result.status == 0 {
+            passed += 1;
+            report.push_str("Exit status: 0 (PASS)\n\n");
+        } else {
+            failed += 1;
+            report.push_str(&format!("Exit status: {} (FAIL)\n\n", result.status));
+        }
+    }
+
+    let incomplete = usize::from(!running.is_empty());
+    if incomplete == 1 {
+        push_source(&mut report, total, total, &running);
+        report.push_str("Exit status: INCOMPLETE (no completion marker received)\n\n");
+    }
+
+    if !not_started.is_empty() {
+        report.push_str(&format!("Not started ({} lines):\n", not_started.len()));
+        for line in &not_started {
+            report.push_str(&format!("    {}\n", line.trim()));
         }
         report.push('\n');
     }
 
     report.push_str(&format!(
-        "Command block: {} passed, {} failed, {} incomplete.\n",
-        passed, failed, incomplete
+        "Command block: {passed} passed, {failed} failed, {incomplete} incomplete"
     ));
+    if !not_started.is_empty() {
+        report.push_str(&format!(", {} not started", not_started.len()));
+    }
+    report.push_str(".\n");
 
     report.into_bytes()
 }
@@ -351,47 +470,85 @@ fn render_transcript(
 mod transcript_tests {
     use super::{
         CommandBlockCapture, Transcript, TranscriptSegment,
-        render_command_block_report, render_transcript,
+        render_command_block_report, render_transcript, split_pasted_lines,
         transcript_is_visibly_empty,
     };
 
     #[test]
-    fn command_block_report_marks_missing_results_incomplete() {
-        let block = CommandBlockCapture {
-            commands: vec![
-                "printf one".to_string(),
-                "true".to_string(),
-                "false".to_string(),
-            ],
-            results: vec![(0, b"one\n".to_vec())],
-        };
+    fn command_block_report_marks_the_unfinished_command_and_lists_unstarted_lines() {
+        let mut block = CommandBlockCapture::new(b"printf one\nexec sleep 30\n# note\ntrue\nfalse\n");
+        block.line_completes(Some((0, b"one\n".to_vec())), 0);
 
         let report = String::from_utf8(render_command_block_report(&block)).unwrap();
 
-        assert!(report.contains("Command 1/3: printf one"));
+        assert!(report.contains("Command 1/2: printf one"));
         assert!(report.contains("Exit status: 0 (PASS)"));
-        assert!(report.contains("Command 2/3: true"));
+        assert!(report.contains("Command 2/2: exec sleep 30"));
         assert!(report.contains("Exit status: INCOMPLETE"));
-        assert!(report.contains("Command 3/3: false"));
-        assert!(report.contains("Command block: 1 passed, 0 failed, 2 incomplete."));
+        assert!(report.contains("Not started (2 lines):\n    true\n    false\n"));
+        assert!(report.contains("Command block: 1 passed, 0 failed, 1 incomplete, 2 not started."));
     }
 
     #[test]
-    fn command_block_report_lists_unexpected_results_separately() {
-        let block = CommandBlockCapture {
-            commands: vec!["true".to_string()],
-            results: vec![
-                (0, b"first result\n".to_vec()),
-                (7, b"extra result\n".to_vec()),
-            ],
-        };
+    fn command_block_groups_lines_by_the_shells_prompts() {
+        let mut block = CommandBlockCapture::new(
+            b"if true; then\n  echo yes\nfi\n\n# note\ncat <<EOF\n\nbody\nEOF\ntrue\n",
+        );
+        // if / echo continue, fi completes the command.
+        block.line_continues();
+        block.line_continues();
+        block.line_completes(Some((0, b"yes\n".to_vec())), 0);
+        // blank line and comment: the shell ran nothing.
+        block.line_completes(None, 0);
+        block.line_completes(None, 0);
+        // heredoc: the command line, a blank line and the body continue.
+        block.line_continues();
+        block.line_continues();
+        block.line_continues();
+        assert!(!block.finished());
+        block.line_completes(Some((0, b"\nbody\n".to_vec())), 0);
+        block.line_completes(Some((0, Vec::new())), 0);
+
+        assert!(block.finished());
+        assert_eq!(block.results.len(), 3);
+        assert_eq!(block.results[0].source, vec!["if true; then", "  echo yes", "fi"]);
+        assert_eq!(block.results[1].source.len(), 4);
 
         let report = String::from_utf8(render_command_block_report(&block)).unwrap();
+        assert!(report.contains("Command 1/3:\n    if true; then\n      echo yes\n    fi\n"));
+        assert!(report.contains("Command block: 3 passed, 0 failed, 0 incomplete."));
+    }
 
-        assert!(report.contains("Command block: 1 passed, 0 failed, 0 incomplete."));
-        assert!(report.contains("Unexpected results: 1"));
-        assert!(report.contains("Unexpected result 1: exit status 7"));
-        assert!(report.contains("extra result"));
+    #[test]
+    fn command_block_reports_input_the_shell_refused_to_run() {
+        let mut block = CommandBlockCapture::new(b"fi\n");
+        block.line_completes(None, 2);
+
+        let report = String::from_utf8(render_command_block_report(&block)).unwrap();
+        assert!(report.contains("Command 1/1: fi"));
+        assert!(report.contains("The shell did not run this input (exit 2)"));
+        assert!(report.contains("Exit status: 2 (FAIL)"));
+        assert!(report.contains("Command block: 0 passed, 1 failed, 0 incomplete."));
+    }
+
+    #[test]
+    fn command_block_that_ends_inside_a_compound_command_is_reported_incomplete() {
+        let mut block = CommandBlockCapture::new(b"true\nif true; then\n");
+        block.line_completes(Some((0, Vec::new())), 0);
+        block.line_continues();
+
+        assert!(block.finished());
+        let report = String::from_utf8(render_command_block_report(&block)).unwrap();
+        assert!(report.contains("Command 2/2: if true; then\n"));
+        assert!(report.contains("Exit status: INCOMPLETE"));
+        assert!(report.contains("Command block: 1 passed, 0 failed, 1 incomplete."));
+    }
+
+    #[test]
+    fn pasted_text_is_split_into_lines_like_the_shell_reads_it() {
+        assert_eq!(split_pasted_lines("a\nb\r\nc\rd\n\n"), vec!["a", "b", "c", "d", ""]);
+        assert_eq!(split_pasted_lines("a\nb"), vec!["a", "b"]);
+        assert!(split_pasted_lines("").is_empty());
     }
 
     #[test]
@@ -537,6 +694,7 @@ impl MarkerScanner {
             end_prefix: b"\x1b]777;CVB;END;".to_vec(),
             pathop: b"\x1b]777;CVB;PATHOP\x07".to_vec(),
             skip: b"\x1b]777;CVB;SKIP\x07".to_vec(),
+            cont: b"\x1b]777;CVB;CONT\x07".to_vec(),
             command_prefix: b"\x1b]777;CVB;COMMAND;".to_vec(),
             pending: Vec::new(),
         }
@@ -564,6 +722,11 @@ impl MarkerScanner {
                     find_subslice(&self.pending, &self.skip),
                     self.skip.len(),
                     MarkerEvent::Skip,
+                ),
+                (
+                    find_subslice(&self.pending, &self.cont),
+                    self.cont.len(),
+                    MarkerEvent::Continue,
                 ),
             ]
             .into_iter()
@@ -665,6 +828,7 @@ impl MarkerScanner {
                     self.end_prefix.as_slice(),
                     self.pathop.as_slice(),
                     self.skip.as_slice(),
+                    self.cont.as_slice(),
                     self.command_prefix.as_slice(),
                 ]
                 .iter()
@@ -1275,7 +1439,7 @@ fn dispatch_paste_events(
                     write_to_master(master, &bytes)?;
                 }
             }
-            PasteEvent::CommandBlock { body, commands } => {
+            PasteEvent::CommandBlock { body } => {
                 let mut bytes =
                     gate_input(state, body, master, child, stdout, screen_terminal)?;
                 if bytes.is_empty() {
@@ -1286,10 +1450,7 @@ fn dispatch_paste_events(
                     bytes.push(b'\n');
                 }
                 write_to_master(master, &bytes)?;
-                *command_block = Some(CommandBlockCapture {
-                    commands,
-                    results: Vec::new(),
-                });
+                *command_block = Some(CommandBlockCapture::new(&bytes));
             }
             PasteEvent::Patch(text) => {
                 debug_log("patch_paste", &format!("bytes={} review={}", text.len(), state.review_on));
@@ -1869,6 +2030,23 @@ fn proxy(
                         debug_log("marker_skip", &format!("skip_requested={skip_requested}"));
                     }
 
+                    MarkerEvent::Continue => {
+                        if let Some(block) = command_block.as_mut() {
+                            block.line_continues();
+                            debug_log(
+                                "command_block_continue",
+                                &format!("consumed={} lines={}", block.consumed, block.lines.len()),
+                            );
+                            if block.finished() {
+                                // The paste ended inside a compound command.
+                                let rendered = render_command_block_report(block);
+                                let buffer = crate::clipboard::ClipboardBuffer::new(rendered);
+                                crate::clipboard::process(&buffer)?;
+                                command_block = None;
+                            }
+                        }
+                    }
+
                     MarkerEvent::Command(command) => {
                         if capture.capturing {
                             commands.push(command);
@@ -1894,7 +2072,7 @@ fn proxy(
                         let capturing_before = capture.capturing;
                         let skip_listed = std::mem::take(&mut skip_requested);
 
-                        if !capture.capturing {
+                        if !capturing_before {
                             debug_log(
                                 "marker_end_no_capture",
                                 &format!(
@@ -1902,34 +2080,46 @@ fn proxy(
                                     capture.capturing
                                 ),
                             );
+                            // A pasted line the shell finished without running
+                            // a command (blank, comment, syntax error) still
+                            // counts as read.
+                            if let Some(block) = command_block.as_mut() {
+                                block.line_completes(None, status);
+                                if block.finished() {
+                                    let rendered = render_command_block_report(block);
+                                    let buffer = crate::clipboard::ClipboardBuffer::new(rendered);
+                                    crate::clipboard::process(&buffer)?;
+                                    command_block = None;
+                                }
+                            }
                             continue;
                         }
 
                         let _captured = capture.end();
 
                         if let Some(block) = command_block.as_mut() {
-                            let index = block.results.len();
                             let rendered =
                                 render_transcript(&transcript, rows, cols, status, &commands);
-                            block.results.push((status, rendered));
+                            block.line_completes(Some((status, rendered)), status);
                             debug_log(
                                 "command_block_result",
                                 &format!(
-                                    "index={} expected={} status={status} skip_listed={skip_listed}",
-                                    index + 1,
-                                    block.commands.len()
+                                    "consumed={} lines={} results={} status={status} skip_listed={skip_listed}",
+                                    block.consumed,
+                                    block.lines.len(),
+                                    block.results.len()
                                 ),
                             );
 
-                            if block.results.len() >= block.commands.len() {
+                            if block.finished() {
                                 let rendered = render_command_block_report(block);
                                 let captured_bytes = rendered.len();
                                 let buffer = crate::clipboard::ClipboardBuffer::new(rendered);
                                 debug_log(
                                     "command_block_dispatch",
                                     &format!(
-                                        "expected={} completed={} captured_bytes={captured_bytes}",
-                                        block.commands.len(),
+                                        "lines={} results={} captured_bytes={captured_bytes}",
+                                        block.lines.len(),
                                         block.results.len()
                                     ),
                                 );
@@ -2016,8 +2206,9 @@ fn proxy(
         debug_log(
             "command_block_incomplete_dispatch",
             &format!(
-                "expected={} completed={}",
-                block.commands.len(),
+                "lines={} consumed={} completed={}",
+                block.lines.len(),
+                block.consumed,
                 block.results.len()
             ),
         );

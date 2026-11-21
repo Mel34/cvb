@@ -250,9 +250,7 @@ Visible terminal output is preserved and introduced by the label
 .BR "Terminal output:" .
 .PP
 Commands pasted at the shell prompt of a resident session (a bracketed paste) form a command block.
-CVB removes the paste markers and counts every non-blank line that does not start with
-.B #
-as one command. When the last command finishes it copies one report that starts with
+CVB removes the paste markers and lets the shell decide where each command ends: the primary prompt and the continuation prompt each print a marker, so every line the shell reads is accounted for. A command that spans lines (a compound command, a heredoc, a quoted string, a backslash continuation) is one command; blank lines and comments are not commands. When the last line has been read it copies one report that starts with
 .BR "Command block results:" .
 For each command the report gives
 .BR "Command i/N:" ,
@@ -262,11 +260,12 @@ or
 .BR "Exit status: N (FAIL)" ,
 and it ends with
 .BR "Command block: P passed, F failed, I incomplete." .
-A command that did not finish before the shell ended or was interrupted is marked
+A command that did not finish before the shell ended or was interrupted, or that was still open when the paste ended, is marked
 .BR "Exit status: INCOMPLETE" ;
-the report is copied at that point.
+the report is copied at that point and lines never reached are listed as not started.
+Input the shell refuses to run, such as a syntax error, is reported as failed.
 The lines run in order and a failing line does not stop the next one.
-CVB counts lines, not shell commands, so a command that spans lines (a compound command, a heredoc or a backslash continuation) leaves the block unfinished.
+A command that reads standard input consumes the following lines of the paste, so the block does not finish.
 Pastes that contain control characters other than tab and line endings, are not valid UTF-8, exceed 3 MiB or start while a program is running reach the shell unchanged.
 .PP
 Commands listed in the skip list are an exception: when they produce no visible output the clipboard is left unchanged.

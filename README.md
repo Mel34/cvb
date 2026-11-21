@@ -312,7 +312,7 @@ Visible terminal output is preserved and labeled `Terminal output:`.
 
 ### Command blocks
 
-Paste commands at the prompt of a resident session (a bracketed paste, as for patches) and CVB treats the paste as a command block. It removes the paste markers so Readline handles the lines as ordinary input, then accounts for each command separately: every non-blank line that does not start with `#` is one command. When the last command finishes, CVB copies one report:
+Paste commands at the prompt of a resident session (a bracketed paste, as for patches) and CVB treats the paste as a command block. It removes the paste markers so Readline handles the lines as ordinary input, then accounts for each command separately. CVB does not parse the text: Bash decides where each command ends, and CVB counts the lines Bash has read (the primary prompt prints an end marker, the continuation prompt `PS2` prints a continuation marker). When the last line has been read, CVB copies one report:
 
 ```text
 Command block results:
@@ -333,11 +333,12 @@ Exit status: 0 (PASS)
 Command block: 2 passed, 1 failed, 0 incomplete.
 ```
 
-Each command's output follows its header, so a silent command needs no `echo ...: PASS` line. The lines run in order and a failing line does not stop the next one; use `&&` to chain commands that depend on each other. Shell state (`cd`, variables) carries from one line to the next. If the shell ends or the user interrupts a running command before the block finishes, the report is copied anyway and unfinished commands are marked `Exit status: INCOMPLETE (no completion marker received)`.
+Each command's output follows its header, so a silent command needs no `echo ...: PASS` line. The lines run in order and a failing line does not stop the next one; use `&&` to chain commands that depend on each other. Shell state (`cd`, variables) carries from one line to the next. A command that spans lines (an `if` or `for` block, a `{ }` group, a heredoc, a quoted string, a trailing `\` continuation) is one command in the report and is shown with its lines indented; blank lines and comments are not commands. A line Bash refuses to run, such as a syntax error, is reported as `The shell did not run this input (exit N)` and counts as failed. If the shell ends or the user interrupts a running command before the block finishes, the report is copied anyway and the unfinished command is marked `Exit status: INCOMPLETE (no completion marker received)`; lines never reached are listed under `Not started`.
 
 Limitations:
 
-- CVB counts lines, not shell commands. A command that spans lines (an `if` or `for` block, a `{ }` group, a heredoc, a trailing `\` continuation) completes fewer times than there are lines, so the block does not finish and nothing is copied until later commands or the end of the session fill the count. Keep each command on one line.
+- A command that reads standard input (`read`, `cat` without a file, an interactive program) consumes the following lines of the paste, so the block does not finish; give such a command its own paste.
+- A paste that ends inside an unfinished compound command is reported at once with that command marked INCOMPLETE, and the shell keeps waiting for the rest (press Ctrl+C).
 - A paste that holds control characters other than tab and line endings, is not valid UTF-8, is larger than 3 MiB, or starts while a program is running reaches the shell unchanged, and each command is captured the usual way.
 - Typed commands are not blocks; each is captured when it completes.
 - `CVB_PATCH_PASTE=off` disables block handling together with patch paste.
