@@ -182,6 +182,19 @@ and
 The configuration is watched while CVB is running. Changes take effect without restarting the resident session.
 .PP
 CVB observes configured key combinations but does not consume the underlying keyboard events. The terminal or application may therefore also receive the key combination.
+.SH SEVERAL SESSIONS
+Every resident session reads the keyboard itself, so a key press reaches all of them, but only one answers it: the session whose terminal window had the focus most recently. When no terminal has the focus the terminal used last answers.
+CVB asks the terminal for focus reports (DECSET 1004) and handles them itself; they are not passed to the shell or to programs.
+Each session records its focus state in
+.IR $XDG_RUNTIME_DIR/cvb/focus/ .
+A session that cannot read or write that directory answers anyway.
+A new session counts as focused, so a terminal that sends no focus reports needs
+.BR CVB_FOCUS=off .
+.TP
+.B CVB_FOCUS
+Set to
+.B off
+(also 0, false, no) to let every session answer the hotkey.
 .SH FILE BRIDGING
 An existing filesystem path takes precedence over an external command.
 .PP

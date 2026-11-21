@@ -1752,7 +1752,19 @@ fn proxy(
     let mut patch_input = crate::patch::input::PatchInput::new(crate::patch::deliver::enabled());
     // The review gate (CVB_PATCH_REVIEW=on) and the failed-hunk picker.
     let mut patch_state = PatchState::new();
-    debug_log("proxy_start", &format!("pid={}", std::process::id()));
+    // Which session answers the screen-capture hotkey (see src/focus.rs).
+    let mut focus = crate::focus::FocusRegistry::new();
+    let mut focus_mode = crate::focus::ModeWatcher::default();
+    if focus.is_some() {
+        let mut out = stdout.lock();
+        out.write_all(crate::focus::ENABLE)
+            .and_then(|()| out.flush())
+            .map_err(|error| format!("CVB: stdout write failed: {error}"))?;
+    }
+    debug_log(
+        "proxy_start",
+        &format!("pid={} focus_selection={}", std::process::id(), focus.is_some()),
+    );
 
     let proxy_result = (|| -> Result<(), String> {
     loop {
@@ -1913,10 +1925,16 @@ fn proxy(
 
 
         if keyboard_events.contains(nix::poll::PollFlags::POLLIN) && keyboard.poll()? {
-            capture_screen(&mut screen_terminal)?;
+            // Every session sees the key press; only the one whose terminal
+            // was focused last answers it.
+            if focus.as_ref().is_none_or(|focus| focus.answers_hotkey()) {
+                capture_screen(&mut screen_terminal)?;
 
-            if let Some(sound) = sound {
-                sound.play("screen-capture");
+                if let Some(sound) = sound {
+                    sound.play("screen-capture");
+                }
+            } else {
+                debug_log("hotkey_ignored", "another session was focused last");
             }
         }
         if keyboard_events.intersects(
@@ -1947,15 +1965,31 @@ fn proxy(
             // A paste only counts as a patch when the shell is at a prompt: not
             // while a command (an editor, `cat`, ssh) is running.
             let idle = !capture.capturing;
+            // Focus reports are for CVB, not for the shell or the picker.
+            let typed = match focus.as_mut() {
+                Some(focus) => {
+                    let (typed, reports) = crate::focus::strip_focus_reports(&buffer[..count]);
+                    for report in reports {
+                        debug_log("focus_report", &format!("{report:?}"));
+                        focus.handle(report);
+                    }
+                    typed
+                }
+                None => buffer[..count].to_vec(),
+            };
             // A patch waiting for review, or a picker, sees the input first.
-            let incoming = gate_input(
-                &mut patch_state,
-                buffer[..count].to_vec(),
-                master,
-                child,
-                &stdout,
-                &mut screen_terminal,
-            )?;
+            let incoming = if typed.is_empty() {
+                Vec::new()
+            } else {
+                gate_input(
+                    &mut patch_state,
+                    typed,
+                    master,
+                    child,
+                    &stdout,
+                    &mut screen_terminal,
+                )?
+            };
             if !incoming.is_empty() {
                 let events = patch_input.feed(&incoming, idle, Instant::now());
                 dispatch_paste_events(
@@ -2003,6 +2037,13 @@ fn proxy(
             stdout
                 .write_all(output)
                 .map_err(|error| format!("CVB: stdout write failed: {error}"))?;
+
+            // A program that leaves the screen may switch focus reports off.
+            if focus.is_some() && focus_mode.mentions_mode(output) {
+                stdout
+                    .write_all(crate::focus::ENABLE)
+                    .map_err(|error| format!("CVB: stdout write failed: {error}"))?;
+            }
 
             let events = marker_scanner.process(output);
 
@@ -2199,6 +2240,11 @@ fn proxy(
     }
     Ok(())
     })();
+
+    if focus.is_some() {
+        let mut out = stdout.lock();
+        let _ = out.write_all(crate::focus::DISABLE).and_then(|()| out.flush());
+    }
 
     let finalization_result = if let Some(block) = command_block.as_ref() {
         let rendered = render_command_block_report(block);

@@ -296,6 +296,64 @@ number = len(files) + 1
                 (b"Terminal output:", b"PTY_SINGLE_OK"),
             )
 
+            # Focus selection (src/focus.rs): the terminal's focus reports are
+            # CVB's, never the shell's, and they are published for the other
+            # sessions to compare.
+            focus_file = runtime / "cvb" / "focus" / str(child_pid)
+
+            def focus_state():
+                fields = focus_file.read_text().split()
+                return int(fields[1]), int(fields[2])
+
+            def wait_for_focus(expected):
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    try:
+                        state = focus_state()
+                    except (OSError, ValueError, IndexError):
+                        state = None
+                    if state is not None and state[0] == expected:
+                        return state
+                    time.sleep(0.05)
+                return None
+
+            started = wait_for_focus(1)
+            check("a new session publishes itself as focused", started is not None, started)
+
+            os.write(master, b"\x1b[O")
+            lost = wait_for_focus(0)
+            check("a focus-out report is published", lost is not None, lost)
+
+            os.write(master, b"\x1b[I")
+            gained = wait_for_focus(1)
+            check(
+                "a focus-in report is published with a later time",
+                gained is not None and started is not None and gained[1] > started[1],
+                (started, gained),
+            )
+
+            run_command(
+                "focus reports typed into a command never reach the shell",
+                "printf 'PTY_FOCUS_%s\\n' \x1b[Oab\x1b[Ic\x1b[O",
+                clipboard_dir,
+                (b"PTY_FOCUS_abc",),
+            )
+            os.write(master, b"\x1b[I")
+
+            del buffer[:]
+            run_command(
+                "a program that turns focus reports off does not silence the session",
+                "printf '\\033[?1004l'",
+                clipboard_dir,
+                (b"completed successfully",),
+            )
+            drain_terminal()
+            check(
+                "focus reports are switched back on",
+                b"\x1b[?1004h" in bytes(buffer),
+                bytes(buffer)[-200:],
+            )
+
             run_command(
                 "captures multiline conditional",
                 """if true; then

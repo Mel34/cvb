@@ -93,6 +93,16 @@ Screen capture works for both ordinary shell sessions and full-screen interactiv
 
 The captured text represents the terminal's current visible screen rather than command history or terminal scrollback.
 
+### Several sessions
+
+Every resident session reads the keyboard itself, so one key press reaches all of them. Only one answers: the session whose terminal window had the focus most recently. If the focus is in another application, such as the browser with the LLM chat, the terminal you used last answers.
+
+CVB asks the terminal to report focus changes (DECSET 1004, supported by most modern terminals, foot among them) and handles those reports itself; they never reach the shell or a program. Each session records its focus state in `$XDG_RUNTIME_DIR/cvb/focus/`, and files of finished sessions are removed. A session that cannot read or write that directory answers anyway, so a capture is never lost.
+
+- A new session counts as focused, since you started it in the window you are looking at. A terminal that sends no focus reports therefore stays "focused" in the registry and wins over a terminal that does send them; with such a terminal set `CVB_FOCUS=off`.
+- `CVB_FOCUS=off` turns the selection off and every session answers, as in earlier versions.
+- Programs inside the session (an editor, for example) do not receive focus reports.
+
 ### Keybind configuration
 
 CVB reads screen-capture bindings from:

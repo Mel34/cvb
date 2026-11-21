@@ -8,6 +8,7 @@ mod cli;
 pub(crate) mod clipboard;
 mod context;
 mod control;
+mod focus;
 mod keybind;
 mod keyboard;
 // Patch parsing, review and failed-hunk recovery used by the PTY proxy.
