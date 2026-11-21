@@ -244,9 +244,30 @@ CVB uses
 for Wayland clipboard integration.
 .PP
 When a captured command produces no visible terminal output, CVB copies a message
-stating whether the command succeeded or failed, including its exit status.
+naming the command and stating whether it succeeded or failed, including its exit status.
+A command line that ran several commands is reported as a command block with the commands observed.
 Visible terminal output is preserved and introduced by the label
 .BR "Terminal output:" .
+.PP
+Commands pasted at the shell prompt of a resident session (a bracketed paste) form a command block.
+CVB removes the paste markers and counts every non-blank line that does not start with
+.B #
+as one command. When the last command finishes it copies one report that starts with
+.BR "Command block results:" .
+For each command the report gives
+.BR "Command i/N:" ,
+the command's own output and
+.B Exit status: 0 (PASS)
+or
+.BR "Exit status: N (FAIL)" ,
+and it ends with
+.BR "Command block: P passed, F failed, I incomplete." .
+A command that did not finish before the shell ended or was interrupted is marked
+.BR "Exit status: INCOMPLETE" ;
+the report is copied at that point.
+The lines run in order and a failing line does not stop the next one.
+CVB counts lines, not shell commands, so a command that spans lines (a compound command, a heredoc or a backslash continuation) leaves the block unfinished.
+Pastes that contain control characters other than tab and line endings, are not valid UTF-8, exceed 3 MiB or start while a program is running reach the shell unchanged.
 .PP
 Commands listed in the skip list are an exception: when they produce no visible output the clipboard is left unchanged.
 Output, including error messages, is captured as usual.
@@ -333,7 +354,7 @@ is followed by a line starting with
 .B Note:
 that names the files. The note only explains the failure; nothing is modified.
 .PP
-A paste is examined only while the shell waits for a command. Pastes that are not a single patch are passed to the shell unchanged; a patch without its end line is refused.
+A paste is examined only while the shell waits for a command. A paste that is not a single patch is handled as a command block (see CLIPBOARD) or, when it cannot be, passed to the shell unchanged; a patch without its end line is refused.
 .PP
 The environment variable
 .B CVB_PATCH_PASTE

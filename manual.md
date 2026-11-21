@@ -94,14 +94,19 @@ Hunks use the file's exact text for context and `-` lines. Indentation counts. A
 
 **Not patches.** For whole-file rewrites of large files, or when a patch is a poor fit, give the complete file in an ordinary fenced code block, plus the command that places it. Never use base64 replacement commands. Don't rewrite unrelated code or discard the user's existing changes.
 
-**Commands.** Put terminal commands in ordinary fenced code blocks, grouped sensibly, no huge pastes. Never add `exit` to commands you want executed. Don't append `| wl-copy`. Prefer `micro` to `nano`. Make commands that succeed silently print something meaningful. For example, for a Zig project:
+**Commands.** Put terminal commands in ordinary fenced code blocks, grouped sensibly, no huge pastes. The user pastes a block at the prompt like a patch, and CVB runs it line by line and copies one report (section 6, "Command blocks"). Never add `exit` to commands you want executed. Don't append `| wl-copy`. Prefer `micro` to `nano`.
+
+- Each non-blank line that does not start with `#` is one command with its own output and exit status, and CVB prints that status itself. Do not add `echo "...: PASS"` lines or other markers to show success or failure.
+- The lines run one after another and a failing line does not stop the next one. If a command depends on the one before it, join them with `&&` on one line.
+- Keep every command on one line. Do not paste commands that span lines (`if`/`for`/`while` blocks, `{ ... }` groups, heredocs, trailing `\` continuations): CVB counts lines, so such a block never completes and no report is copied. Write the construct on one line with `;`, or put the logic in a script file that you deliver as a patch.
 
 ```
-zig build && echo "zig build: PASS"
-git diff --check && echo "git diff --check: PASS"
+cargo build
+cargo test
+git diff --check
 ```
 
-Adapt this to other languages.
+If an earlier line fails, the report still shows the later ones, so say what to look at first.
 
 ## 5. Verification and checkpoints
 
@@ -116,6 +121,7 @@ Adapt this to other languages.
 - `cvb DIRECTORY` gives a TSV inventory (`path`, `type`, `size`), not file contents. VCS directories are excluded by the user's ignore list.
 - `cvb COMMAND ...` runs the command (when the name isn't an existing path) and captures its output. Commands the user types in the session are captured too, when they finish.
 - The user can also send a text capture of what is on their screen. Treat it as a snapshot of the screen, not a command history.
-- A silent command capture says either "The command completed successfully (exit 0) and produced no visible output." or "The command failed (exit N) and produced no visible output." The exit status is authoritative; do not infer success or failure from silence alone.
+- A silent command capture says "The command `CMD` completed successfully (exit 0) and produced no visible output." or "The command `CMD` failed (exit N) and produced no visible output." When one command line ran several commands, it says "The command block finished with exit N and produced no visible output." and lists the commands observed. The exit status is authoritative; do not infer success or failure from silence alone.
+- **Command blocks.** A block of commands the user pastes at the prompt (section 4) comes back as one report that starts with `Command block results:`. For each command it gives `Command i/N: <command>`, that command's own output (`Terminal output:` or the silent-capture sentence above) and `Exit status: 0 (PASS)` or `Exit status: N (FAIL)`, and it ends with `Command block: P passed, F failed, I incomplete.` `Exit status: INCOMPLETE (no completion marker received)` means the command did not finish, for example the user interrupted it or the shell ended; its output may be partial and the commands after it did not run. Results beyond the expected count are listed as `Unexpected results`. A passed line means that command's exit status was 0 and nothing more; read its output before concluding the change works. Shell state such as `cd` or variables carries over from one line to the next.
 - A capture can mix terminal output, bridged files and CVB status lines in order. Terminal output is introduced by the label Terminal output:. Bridged files are literal content. A file bridge can report an error instead of content, and a command attempt alone doesn't prove the file was captured. Keep labels and order when you quote evidence.
 - Captures over about 9,750 characters arrive in parts labeled Message part N of TOTAL. Intermediate parts say more are coming; briefly acknowledge receipt and wait. The final part says it is the final part and asks you to consider all parts together. Do not analyze or answer until that final part arrives.

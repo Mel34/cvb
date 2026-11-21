@@ -240,7 +240,7 @@ cvb pull callers:NAME     syntactic call sites (every supported language except 
 cvb pull +foo cascade:2   also the units the matches depend on
 ```
 
-Matching is case-sensitive; `lines:` cannot be combined with search terms, and only one `file:` scope is allowed. The operating manual (`manual.md`) describes the output and the limits in full.
+Matching is case-sensitive. `file:` may be repeated; `lines:` needs exactly one `file:` and, with search terms, only restricts where hits may be (units are still returned whole); `head:`/`tail:` cannot be combined with search terms. The operating manual (`manual.md`) describes the output and the limits in full.
 
 ## Pasting patches
 
@@ -257,7 +257,7 @@ A /home/you/project/src/new.rs
 - **What is supported.** `Update File`, `Add File`, `Delete File` and `Move to`; in a diff: modified, new (with the mode it states, such as `100755`), deleted and renamed files. `Add File` (or a new file in a diff) is refused when the path already exists. A move keeps the file's mode. Files must be UTF-8 text.
 - **Diffs.** The paths need the default `a/` and `b/` prefixes. Refused with a reason: binary patches, copies, symbolic links and submodules, mode changes, merge diffs and quoted file names. LLMs often miscount the line counts in the `@@` headers, so CVB does not trust them: it recounts every hunk from its lines, rewrites only the headers that were wrong and says so in the report (`Note: corrected the line counts of N hunk headers ...`). A diff has no end marker, so a paste cut inside a hunk is noticed only when the hunk has no lines at all; check the diff if it came through a lossy channel.
 - **Where it applies.** The patch root is the shell's current directory. Paths must be relative, without `..` or a `.git` component, and must not pass through a symlink. A patch that touches a file someone else changed while it was being applied is refused.
-- **Only at a prompt.** A paste is examined only while the shell is waiting for a command, not inside an editor, `ssh` or a running program. A paste that is not exactly one patch reaches the shell unchanged. A patch without its `*** End Patch` line, or a diff that ends right after a hunk header, is refused and never reaches the shell.
+- **Only at a prompt.** A paste is examined only while the shell is waiting for a command, not inside an editor, `ssh` or a running program. A paste that is not exactly one patch is treated as commands (see [Command blocks](#command-blocks)) or, when it holds control characters, is not valid UTF-8 or is too large, reaches the shell unchanged. A patch without its `*** End Patch` line, or a diff that ends right after a hunk header, is refused and never reaches the shell.
 - **Pasted twice?** When a patch fails because its changes are already in the files, the failure text says so (`Note: every hunk of this patch appears to be already present ...`). The note is only an explanation; the outcome is still FAILED with nothing modified.
 - **Refusals** read `CVB patch REJECTED: reason`.
 
@@ -299,14 +299,48 @@ Explicit paths such as `./foo`, `../foo`, and `/tmp/foo` are path targets.
 
 CVB uses `wl-copy` for clipboard integration.
 
-When a captured command produces no visible terminal output, CVB copies a message reporting success or failure, including the exit status. For example:
+When a captured command produces no visible terminal output, CVB copies a message naming the command and reporting success or failure, including the exit status. For example:
 
 ```text
-The command completed successfully (exit 0) and produced no visible output.
-The command failed (exit 1) and produced no visible output.
+The command `make` completed successfully (exit 0) and produced no visible output.
+The command `false` failed (exit 1) and produced no visible output.
 ```
 
+When one command line ran several commands, the message reads `The command block finished with exit N and produced no visible output.` followed by the commands observed.
+
 Visible terminal output is preserved and labeled `Terminal output:`.
+
+### Command blocks
+
+Paste commands at the prompt of a resident session (a bracketed paste, as for patches) and CVB treats the paste as a command block. It removes the paste markers so Readline handles the lines as ordinary input, then accounts for each command separately: every non-blank line that does not start with `#` is one command. When the last command finishes, CVB copies one report:
+
+```text
+Command block results:
+
+Command 1/3: cargo build
+Terminal output:
+   Compiling cvb v0.7.0
+Exit status: 0 (PASS)
+
+Command 2/3: cargo test
+...
+Exit status: 101 (FAIL)
+
+Command 3/3: git diff --check
+The command `git diff --check` completed successfully (exit 0) and produced no visible output.
+Exit status: 0 (PASS)
+
+Command block: 2 passed, 1 failed, 0 incomplete.
+```
+
+Each command's output follows its header, so a silent command needs no `echo ...: PASS` line. The lines run in order and a failing line does not stop the next one; use `&&` to chain commands that depend on each other. Shell state (`cd`, variables) carries from one line to the next. If the shell ends or the user interrupts a running command before the block finishes, the report is copied anyway and unfinished commands are marked `Exit status: INCOMPLETE (no completion marker received)`.
+
+Limitations:
+
+- CVB counts lines, not shell commands. A command that spans lines (an `if` or `for` block, a `{ }` group, a heredoc, a trailing `\` continuation) completes fewer times than there are lines, so the block does not finish and nothing is copied until later commands or the end of the session fill the count. Keep each command on one line.
+- A paste that holds control characters other than tab and line endings, is not valid UTF-8, is larger than 3 MiB, or starts while a program is running reaches the shell unchanged, and each command is captured the usual way.
+- Typed commands are not blocks; each is captured when it completes.
+- `CVB_PATCH_PASTE=off` disables block handling together with patch paste.
 
 ### Skip list
 
