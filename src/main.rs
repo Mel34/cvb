@@ -63,6 +63,7 @@ Usage:
     cvb pull file:PATH lines:N|START-END... <search-term>...
     cvb pull callers:NAME [file:PATH]...
     cvb context
+    cvb repaste
     cvb --help
     cvb --version
 
@@ -73,6 +74,7 @@ Modes:
     cvb pull file:PATH ...    Restrict a search to one file
     cvb pull callers:NAME     Find syntactic Rust call-site candidates
     cvb context               Print the LLM operating manual
+    cvb repaste               Copy the session's last clipboard content again
 
 Options:
     -h, --help       Show this help message
@@ -92,6 +94,7 @@ A capture session ends with:
                 std::process::exit(2);
             }
         },
+        cli::Command::Repaste => run_repaste(),
         cli::Command::Pull(args) => {
             if args.is_empty() {
                 eprintln!("Usage: cvb pull [file:PATH]... [cascade:N] <search-term>...");
@@ -130,6 +133,48 @@ A capture session ends with:
                     eprintln!("CVB: unable to execute {}: {error}", args[0]);
                     std::process::exit(1);
                 }
+            }
+        }
+    }
+}
+
+/// `cvb repaste`: asks the running session to copy its last clipboard content
+/// again, through the pager when it is too large for one copy. The session
+/// replaces this command's own capture with that content.
+fn run_repaste() -> ! {
+    // The control channel is descriptor 3 inside a session only.
+    if std::env::var("CVB_CONTROL_FD").as_deref() != Ok("3")
+        || unsafe { libc::fcntl(3, libc::F_GETFD) } == -1
+    {
+        eprintln!("CVB: repaste works inside a cvb session");
+        std::process::exit(1);
+    }
+
+    let fd = unsafe { OwnedFd::from_raw_fd(3) };
+    let mut control = control::ControlChannel::new(fd);
+    let id = std::process::id() as u64;
+
+    if let Err(error) = control.send(&control::ControlMessage::RepasteRequest { id }) {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
+
+    loop {
+        match control.receive_one() {
+            Ok(control::ControlMessage::TargetResponse {
+                id: response_id,
+                status,
+                message,
+            }) if response_id == id => {
+                if !message.is_empty() {
+                    eprintln!("{message}");
+                }
+                std::process::exit(status);
+            }
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
             }
         }
     }

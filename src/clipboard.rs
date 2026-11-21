@@ -166,7 +166,27 @@ pub(crate) fn chunk_messages(text: &str, limit: usize) -> Result<Vec<String>, St
     }
 }
 
+/// The last content this session handed to the clipboard, whole, so that
+/// `cvb repaste` can offer it again after the pager has been dismissed.
+static LAST_COPY: std::sync::Mutex<Option<Vec<u8>>> = std::sync::Mutex::new(None);
+
+fn remember(buffer: &ClipboardBuffer) {
+    if let Ok(mut last) = LAST_COPY.lock() {
+        *last = Some(buffer.as_bytes().to_vec());
+    }
+}
+
+/// The last content handed to the clipboard, if any.
+pub(crate) fn last_copy() -> Option<ClipboardBuffer> {
+    LAST_COPY
+        .lock()
+        .ok()
+        .and_then(|last| last.clone())
+        .map(ClipboardBuffer::new)
+}
+
 pub(crate) fn process(buffer: &ClipboardBuffer) -> Result<(), String> {
+    remember(buffer);
     process_with(
         buffer,
         configured_copy_limit(),
@@ -178,6 +198,7 @@ pub(crate) fn process(buffer: &ClipboardBuffer) -> Result<(), String> {
 pub(crate) fn process_with_outcome(
     buffer: &ClipboardBuffer,
 ) -> Result<ChunkSequenceOutcome, String> {
+    remember(buffer);
     process_with_outcome_using(
         buffer,
         configured_copy_limit(),

@@ -29,6 +29,8 @@ cvb - terminal-to-LLM exchange utility
 .br
 .B cvb context
 .br
+.B cvb repaste
+.br
 .B cvb
 .I path
 .br
@@ -77,6 +79,11 @@ lists syntactic call sites in Rust, Bash, Python, Zig, C, C++, JavaScript, TypeS
 .TP
 .B context
 Print the launch context text (the manual), byte-identical to the launch clipboard.
+.TP
+.B repaste
+Inside a session, copy the last content CVB put on the clipboard again, through the chunk pager when it is too large for one copy.
+The command is not captured itself, so it can be repeated.
+It reports an error outside a session.
 .TP
 .B --help, -h
 Display command-line help.

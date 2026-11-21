@@ -1185,6 +1185,11 @@ fn run_pty(rcfile: &Path) -> Result<i32, String> {
                 std::process::exit(127);
             }
 
+            // Marks the shell as a session child whose descriptor 3 is the
+            // control channel (`cvb repaste` talks to the proxy through it).
+            // Safe: the forked child is single-threaded here.
+            unsafe { std::env::set_var("CVB_CONTROL_FD", "3") };
+
             // Tell the Bash integration where the skip list lives. Left unset
             // when no config directory can be determined.
             match &skip_file {
@@ -1746,6 +1751,8 @@ fn proxy(
     // Set by the SKIP marker: the finished command line consisted only of
     // commands from the skip list. Consumed by the next END marker.
     let mut skip_requested = false;
+    // Set while `cvb repaste` runs: its capture is replaced by the last copy.
+    let mut repaste_requested = false;
     let mut command_block: Option<CommandBlockCapture> = None;
     // Recognizes a patch pasted at an idle prompt (see src/patch/). Everything
     // else typed or pasted goes to the shell unchanged.
@@ -2112,6 +2119,7 @@ fn proxy(
                     MarkerEvent::End(status) => {
                         let capturing_before = capture.capturing;
                         let skip_listed = std::mem::take(&mut skip_requested);
+                        let repaste = std::mem::take(&mut repaste_requested);
 
                         if !capturing_before {
                             debug_log(
@@ -2137,6 +2145,18 @@ fn proxy(
                         }
 
                         let _captured = capture.end();
+
+                        // `cvb repaste` offers the last copy again instead of
+                        // capturing its own (empty) output.
+                        if repaste && command_block.is_none() {
+                            if let Some(last) = crate::clipboard::last_copy() {
+                                debug_log("repaste", &format!("bytes={}", last.len()));
+                                crate::clipboard::process(&last)?;
+                            }
+                            transcript = Transcript::default();
+                            commands.clear();
+                            continue;
+                        }
 
                         if let Some(block) = command_block.as_mut() {
                             let rendered =
@@ -2223,7 +2243,7 @@ fn proxy(
                 | nix::poll::PollFlags::POLLERR,
         ) {
             for message in control.receive()? {
-                handle_control_message(message, control, &mut transcript)?;
+                handle_control_message(message, control, &mut transcript, &mut repaste_requested)?;
             }
 
             if control_events.contains(nix::poll::PollFlags::POLLERR) {
@@ -2277,9 +2297,27 @@ fn handle_control_message(
     message: ControlMessage,
     control: &ControlChannel,
     transcript: &mut Transcript,
+    repaste_requested: &mut bool,
 ) -> Result<(), String> {
     match message {
         ControlMessage::Exit => {}
+
+        ControlMessage::RepasteRequest { id } => {
+            let (status, message) = if crate::clipboard::last_copy().is_some() {
+                *repaste_requested = true;
+                (0, String::new())
+            } else {
+                (1, "CVB: nothing has been copied yet in this session".to_string())
+            };
+
+            debug_log("repaste_request", &format!("id={id} status={status}"));
+
+            control.send(&ControlMessage::TargetResponse {
+                id,
+                status,
+                message,
+            })?;
+        }
 
         ControlMessage::TargetRequest { id, cwd, args } => {
             let arg_count = args.len();

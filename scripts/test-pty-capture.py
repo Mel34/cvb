@@ -1143,6 +1143,30 @@ fi""",
                 (b"PTY_FILE_BRIDGE_OK",),
             )
 
+            # `cvb repaste` copies the last clipboard content again; its own
+            # (empty) output is not captured in its place.
+            first = run_command(
+                "repaste setup: a capture to repeat",
+                "printf 'PTY_REPASTE_SOURCE\\n'",
+                clipboard_dir,
+                (b"PTY_REPASTE_SOURCE",),
+            )
+            again = run_command(
+                "repaste copies the last content again",
+                "cvb repaste",
+                clipboard_dir,
+                (b"PTY_REPASTE_SOURCE",),
+                forbidden=(b"cvb repaste",),
+            )
+            check("repaste repeats the exact bytes", again == first, again)
+            third = run_command(
+                "repaste is repeatable",
+                "cvb repaste",
+                clipboard_dir,
+                (b"PTY_REPASTE_SOURCE",),
+            )
+            check("repeated repaste keeps the same bytes", third == first, third)
+
             # Preserve the normal shell-exit regression before starting a
             # second session dedicated to interrupted command-block teardown.
             os.write(master, b"exit\n")

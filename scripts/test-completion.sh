@@ -71,12 +71,14 @@ cd "$repo" || exit 1
 COMP_WORDBREAKS=$' \t\n"\'><=;|&(:'
 
 check 'first word offers subcommands, options and files' 'cvb ' \
-    "$(lines --help --version -h -V context pull README.md docs new.rs src target | sort)"
+    "$(lines --help --version -h -V context pull repaste README.md docs new.rs src target | sort)"
 check 'subcommand prefix' 'cvb pu' "$(lines pull)"
 check 'option prefix' 'cvb --v' "$(lines --version)"
 check 'path argument' 'cvb sr' "$(lines src)"
 check 'later path arguments' 'cvb README.md sr' "$(lines src)"
 check 'context takes no arguments' 'cvb context ' ''
+check 'repaste takes no arguments' 'cvb repaste ' ''
+check 'repaste is completed' 'cvb rep' "$(lines repaste)"
 check 'pull without arguments' 'cvb pull ' "$(lines callers: cascade: file: head: lines: tail:)"
 check 'directive prefix' 'cvb pull fi' "$(lines file:)"
 check_nospace 'a lone directive keeps the cursor attached' 'cvb pull fi' '-o nospace'

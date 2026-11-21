@@ -8,6 +8,7 @@ const MAX_FRAME_SIZE: usize = 4 * 1024 * 1024;
 const EXIT: u8 = 0x03;
 const TARGET_REQUEST: u8 = 0x04;
 const TARGET_RESPONSE: u8 = 0x05;
+const REPASTE_REQUEST: u8 = 0x06;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ControlMessage {
@@ -21,6 +22,11 @@ pub enum ControlMessage {
         id: u64,
         status: i32,
         message: String,
+    },
+    /// Asks the session to copy its last clipboard content again. Answered
+    /// with a `TargetResponse` carrying the same id.
+    RepasteRequest {
+        id: u64,
     },
 }
 
@@ -176,6 +182,11 @@ fn encode(message: &ControlMessage) -> Result<Vec<u8>, String> {
             }
         }
 
+        ControlMessage::RepasteRequest { id } => {
+            payload.push(REPASTE_REQUEST);
+            payload.extend_from_slice(&id.to_be_bytes());
+        }
+
         ControlMessage::TargetResponse {
             id,
             status,
@@ -312,6 +323,20 @@ fn decode(payload: &[u8]) -> Result<ControlMessage, String> {
             Ok(ControlMessage::TargetRequest { id, cwd, args })
         }
 
+        REPASTE_REQUEST => {
+            if payload.len() != 9 {
+                return Err("CVB: malformed REPASTE_REQUEST message".to_string());
+            }
+
+            let id = u64::from_be_bytes(
+                payload[1..9]
+                    .try_into()
+                    .map_err(|_| "CVB: malformed REPASTE_REQUEST message".to_string())?,
+            );
+
+            Ok(ControlMessage::RepasteRequest { id })
+        }
+
         TARGET_RESPONSE => {
             if payload.len() < 17 {
                 return Err("CVB: malformed TARGET_RESPONSE message".to_string());
@@ -384,6 +409,20 @@ mod tests {
         let payload = encode(&message).unwrap();
 
         assert_eq!(decode(&payload).unwrap(), message);
+    }
+
+    #[test]
+    fn encodes_and_decodes_repaste_request() {
+        let message = ControlMessage::RepasteRequest { id: 7 };
+
+        let payload = encode(&message).unwrap();
+
+        assert_eq!(decode(&payload).unwrap(), message);
+    }
+
+    #[test]
+    fn rejects_malformed_repaste_request() {
+        assert!(decode(&[REPASTE_REQUEST, 0, 0]).is_err());
     }
 
     #[test]

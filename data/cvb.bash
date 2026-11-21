@@ -137,7 +137,7 @@ _cvb_complete() {
     (( count > 0 )) && cur=${words[count-1]}
 
     if (( count <= 2 )); then
-        COMPREPLY=($(compgen -W 'pull context --help --version -h -V' -- "$cur"))
+        COMPREPLY=($(compgen -W 'pull context repaste --help --version -h -V' -- "$cur"))
         _cvb_complete_paths "$cur"
         COMPREPLY+=("${COMPREPLY_PATHS[@]}")
         compopt -o filenames 2>/dev/null
@@ -152,7 +152,7 @@ _cvb_complete() {
                 compopt -o nospace 2>/dev/null
             fi
             ;;
-        context | --help | -h | --version | -V) ;;
+        context | repaste | --help | -h | --version | -V) ;;
         *)
             _cvb_complete_paths "$cur"
             COMPREPLY=("${COMPREPLY_PATHS[@]}")

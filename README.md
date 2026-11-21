@@ -389,13 +389,14 @@ cvb pull file:PATH lines:N|START-END... [head:N|tail:N]
 cvb pull file:PATH lines:N|START-END... <search-term>...
 cvb pull callers:NAME [file:PATH]...
 cvb context
+cvb repaste
 cvb --help
 cvb --version
 cvb <path>
 cvb <command> [args...]
 ```
 
-`cvb` with no arguments starts a resident session (see above); `cvb context` prints the operating manual that a session puts on the clipboard when it starts.
+`cvb` with no arguments starts a resident session (see above); `cvb context` prints the operating manual that a session puts on the clipboard when it starts. `cvb repaste`, inside a session, copies the last content CVB put on the clipboard again, through the chunk pager when it is too large for one copy; use it after the pager was dismissed or the clipboard was overwritten. It is not captured itself, so it can be repeated, and it works only in the current session (outside one it reports `CVB: repaste works inside a cvb session`).
 
 There are intentionally no separate `file` or `directory` subcommands.
 
