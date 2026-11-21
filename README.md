@@ -248,9 +248,10 @@ cvb pull file:PATH lines:10-40
 cvb pull file:PATH lines:10-300 foo  hits inside the range, whole units returned
 cvb pull callers:NAME     syntactic call sites (every supported language except Markdown)
 cvb pull +foo cascade:2   also the units the matches depend on
+cvb pull list: foo        matching units as names and line ranges, no bodies
 ```
 
-Matching is case-sensitive. `file:` may be repeated; `lines:` needs exactly one `file:` and, with search terms, only restricts where hits may be (units are still returned whole); `head:`/`tail:` cannot be combined with search terms. The operating manual (`manual.md`) describes the output and the limits in full.
+Matching is case-sensitive. `file:` may be repeated; `lines:` needs exactly one `file:` and, with search terms, only restricts where hits may be (units are still returned whole); `head:`/`tail:` cannot be combined with search terms. `list:` needs search terms and prints one line per matching unit (kind, path, line range, first line, hit lines) instead of the bodies; use it to see what matches before asking for bodies. When ten or more units match, a normal pull adds a `Note:` line saying how many units and lines that is and how to narrow it. The operating manual (`manual.md`) describes the output and the limits in full.
 
 ## Pasting patches
 
@@ -384,6 +385,7 @@ Sourcing `data/cvb.bash` also registers Bash tab completion for `cvb`, in the pa
 ```text
 cvb
 cvb pull [file:PATH]... [cascade:N] <search-term>...
+cvb pull [file:PATH]... list: <search-term>...
 cvb pull file:PATH [head:N|tail:N]
 cvb pull file:PATH lines:N|START-END... [head:N|tail:N]
 cvb pull file:PATH lines:N|START-END... <search-term>...

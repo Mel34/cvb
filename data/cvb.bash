@@ -189,14 +189,14 @@ _cvb_complete_pull() {
             COMPREPLY=($(compgen -W 'cascade:1 cascade:2 cascade:3 cascade:4 cascade:5' -- "$cur"))
             return
             ;;
-        lines:* | head:* | tail:* | callers:*)
+        lines:* | head:* | tail:* | callers:* | list:*)
             return
             ;;
     esac
 
     local word
     local files=0 terms=0
-    local have_lines=0 have_head=0 have_tail=0 have_callers=0 have_cascade=0
+    local have_lines=0 have_head=0 have_tail=0 have_callers=0 have_cascade=0 have_list=0
 
     for word in "$@"; do
         case $word in
@@ -206,6 +206,7 @@ _cvb_complete_pull() {
             tail:*) have_tail=1 ;;
             callers:*) have_callers=1 ;;
             cascade:*) have_cascade=1 ;;
+            list:) have_list=1 ;;
             *) terms=$((terms + 1)) ;;
         esac
     done
@@ -229,9 +230,13 @@ _cvb_complete_pull() {
     if (( !have_callers && !have_lines && !trim && !have_cascade )); then
         allowed+=(cascade:)
     fi
+    # list: stands alone as a word, so completing it keeps the space after it.
+    if (( !have_callers && !have_lines && !trim && !have_cascade && !have_list )); then
+        allowed+=(list:)
+    fi
 
     COMPREPLY=($(compgen -W "${allowed[*]}" -- "$cur"))
-    if (( ${#COMPREPLY[@]} == 1 )); then
+    if (( ${#COMPREPLY[@]} == 1 )) && [[ ${COMPREPLY[0]} != list: ]]; then
         compopt -o nospace 2>/dev/null
     fi
 }

@@ -74,6 +74,11 @@ output; they cannot be combined with search terms, callers:, cascade: or each ot
 (N or START-END, several allowed, exactly one file:) prints those lines of the file. With search terms it instead restricts the search: a hit must lie in one of the ranges, and the unit around it is returned whole, so it may extend beyond the range. + and - terms are still checked over the whole unit.
 .BI callers: NAME
 lists syntactic call sites in Rust, Bash, Python, Zig, C, C++, JavaScript, TypeScript, Go, Java and Lua (candidates, not proof; a call through a receiver, such as a.f(), is reported as a method-call candidate).
+.B list:
+(needs search terms; not with cascade:, callers:, lines: or head:/tail:) prints one line per matching unit with its kind, path, line range, first line and hit lines, without the bodies.
+When ten or more units match, a normal search adds a
+.B Note:
+line with the number of units and lines and the ways to narrow the search.
 .BI cascade: N
 (0 to 5) adds the units that the matches depend on: for Rust by calls and signature types, for the other languages by calls matched by name.
 .TP

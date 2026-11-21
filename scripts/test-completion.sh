@@ -79,7 +79,7 @@ check 'later path arguments' 'cvb README.md sr' "$(lines src)"
 check 'context takes no arguments' 'cvb context ' ''
 check 'repaste takes no arguments' 'cvb repaste ' ''
 check 'repaste is completed' 'cvb rep' "$(lines repaste)"
-check 'pull without arguments' 'cvb pull ' "$(lines callers: cascade: file: head: lines: tail:)"
+check 'pull without arguments' 'cvb pull ' "$(lines callers: cascade: file: head: lines: list: tail:)"
 check 'directive prefix' 'cvb pull fi' "$(lines file:)"
 check_nospace 'a lone directive keeps the cursor attached' 'cvb pull fi' '-o nospace'
 
@@ -98,13 +98,15 @@ check 'whole words when : is not a word break' 'cvb pull file:src/m' "$(lines fi
 COMP_WORDBREAKS=$' \t\n"\'><=;|&(:'
 
 check 'one file leaves every directive' 'cvb pull file:src/main.rs ' \
-    "$(lines callers: cascade: file: head: lines: tail:)"
-check 'two files need a term' 'cvb pull file:a file:b ' "$(lines callers: cascade: file:)"
+    "$(lines callers: cascade: file: head: lines: list: tail:)"
+check 'two files need a term' 'cvb pull file:a file:b ' "$(lines callers: cascade: file: list:)"
 check 'lines: needs exactly one file' 'cvb pull file:a lines:1-5 ' "$(lines head: lines: tail:)"
+check 'list: is offered once' 'cvb pull list: foo ' "$(lines cascade: file: lines:)"
+check_nospace 'list: keeps the space after it' 'cvb pull foo li' ''
 check 'lines: before the file' 'cvb pull lines:1-5 ' "$(lines file: head: lines: tail:)"
 check 'head: excludes tail: and terms' 'cvb pull file:a head:5 ' "$(lines lines:)"
-check 'a search term leaves file:, lines: and cascade:' 'cvb pull foo ' "$(lines cascade: file: lines:)"
-check 'a +term counts as a term' 'cvb pull +foo -bar ' "$(lines cascade: file: lines:)"
+check 'a search term leaves file:, lines:, cascade: and list:' 'cvb pull foo ' "$(lines cascade: file: lines: list:)"
+check 'a +term counts as a term' 'cvb pull +foo -bar ' "$(lines cascade: file: lines: list:)"
 check 'callers: only takes file:' 'cvb pull callers:run ' "$(lines file:)"
 check 'callers: with a file' 'cvb pull callers:run file:src/main.rs ' "$(lines file:)"
 check 'cascade: depths' 'cvb pull cascade:' "$(lines 1 2 3 4 5)"

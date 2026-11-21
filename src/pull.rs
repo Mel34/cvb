@@ -103,6 +103,17 @@ fn parse_trim_count(name: &str, value: &str) -> Result<usize, String> {
     }
 }
 
+/// Splits the bare `list:` directive out of the arguments.
+fn extract_list(args: &[String]) -> (bool, Vec<String>) {
+    let list = args.iter().any(|arg| arg == "list:");
+    let rest = args.iter().filter(|arg| *arg != "list:").cloned().collect();
+    (list, rest)
+}
+
+/// From this many matching units on, a plain pull adds a line that says how to
+/// narrow the search.
+const MANY_UNITS: usize = 10;
+
 /// Splits `head:N` / `tail:N` out of the arguments.
 fn extract_trim(args: &[String]) -> Result<(Option<Trim>, Vec<String>), String> {
     let mut head = None;
@@ -959,6 +970,8 @@ pub fn run_capture(args: &[String], dir: Option<&Path>) -> (i32, String, String)
         }
     };
 
+    let (list_mode, args_without_cascade) = extract_list(&args_without_cascade);
+
     let (trim, args_without_cascade) = match extract_trim(&args_without_cascade) {
         Ok(result) => result,
         Err(error) => {
@@ -975,6 +988,30 @@ pub fn run_capture(args: &[String], dir: Option<&Path>) -> (i32, String, String)
             .any(|arg| arg.starts_with("callers:"))
         {
             Some("CVB pull: head:/tail: cannot be combined with callers:.")
+        } else {
+            None
+        };
+        if let Some(message) = conflict {
+            stderr.push_str(&format!("{message}\n"));
+            return (2, stdout, stderr);
+        }
+    }
+
+    if list_mode {
+        let conflict = if cascade_depth.is_some() {
+            Some("CVB pull: list: cannot be combined with cascade:.")
+        } else if trim.is_some() {
+            Some("CVB pull: list: cannot be combined with head:/tail:.")
+        } else if args_without_cascade
+            .iter()
+            .any(|arg| arg.starts_with("callers:") || arg.starts_with("lines:"))
+        {
+            Some("CVB pull: list: cannot be combined with callers: or lines:.")
+        } else if args_without_cascade
+            .iter()
+            .all(|arg| arg.starts_with("file:"))
+        {
+            Some("CVB pull: list: needs search terms.")
         } else {
             None
         };
@@ -1434,6 +1471,73 @@ pub fn run_capture(args: &[String], dir: Option<&Path>) -> (i32, String, String)
             }
     }
 
+    if list_mode {
+        let files_hit = matching_units
+            .iter()
+            .map(|(unit, _)| unit.key.path.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        stdout.push_str(&format!(
+            "List: {} unit{} in {} file{}; bodies not shown. Pull one with file:PATH lines:START-END or its terms.\n",
+            matching_units.len(),
+            if matching_units.len() == 1 { "" } else { "s" },
+            files_hit,
+            if files_hit == 1 { "" } else { "s" },
+        ));
+        for (unit, term_hits) in &matching_units {
+            let Some(source) = file_cache.get(&unit.key.path) else {
+                continue;
+            };
+            let lines: Vec<&str> = source.lines().collect();
+            let (path, start, end) = (&unit.key.path, unit.key.start, unit.key.end);
+            let first = lines
+                .get(start.saturating_sub(1))
+                .map(|line| line.trim())
+                .unwrap_or("");
+            if unit.label == "Line" {
+                stdout.push_str(&format!("  {path}:{start}: {}\n", cut_signature(first)));
+            } else {
+                let count = end.saturating_sub(start) + 1;
+                stdout.push_str(&format!(
+                    "  {}: {path}:{start}-{end} ({count} lines) {}\n",
+                    unit.label,
+                    cut_signature(first)
+                ));
+            }
+            let hits: Vec<String> = term_hits
+                .iter()
+                .map(|(term, lines)| {
+                    let list = lines.iter().map(usize::to_string).collect::<Vec<_>>().join(",");
+                    format!("{term}: {list}")
+                })
+                .collect();
+            if !hits.is_empty() {
+                stdout.push_str(&format!("    {}\n", hits.join("; ")));
+            }
+        }
+        append_patch_reminder(&mut stdout);
+        return (0, stdout, stderr);
+    }
+
+    if matching_units.len() >= MANY_UNITS {
+        let files_hit = matching_units
+            .iter()
+            .map(|(unit, _)| unit.key.path.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        let total_lines: usize = matching_units
+            .iter()
+            .map(|(unit, _)| unit.key.end.saturating_sub(unit.key.start) + 1)
+            .sum();
+        stdout.push_str(&format!(
+            "Note: {} units match in {} file{} ({} lines in all). Narrow with file:PATH, +TERM or -TERM, or add list: to see only names and line ranges.\n",
+            matching_units.len(),
+            files_hit,
+            if files_hit == 1 { "" } else { "s" },
+            total_lines,
+        ));
+    }
+
     for (unit, term_hits) in &matching_units {
         if let Some(warning) = &unit.warning {
             stdout.push_str(&format!("CVB pull: warning: {warning}\n"));
@@ -1484,17 +1588,30 @@ pub fn run_capture(args: &[String], dir: Option<&Path>) -> (i32, String, String)
     (0, stdout, stderr)
 }
 
+/// A unit's first line, cut for a listing.
+fn cut_signature(text: &str) -> String {
+    const MAX: usize = 100;
+    if text.chars().count() <= MAX {
+        text.to_string()
+    } else {
+        let cut: String = text.chars().take(MAX).collect();
+        format!("{cut}...")
+    }
+}
+
 fn format_usage() -> &'static str {
     "Usage: cvb pull [file:PATH]... [cascade:N] <search-term>...\n\
            cvb pull file:PATH [head:N|tail:N]\n\
            cvb pull file:PATH lines:LINE|START-END... [head:N|tail:N]\n\
            cvb pull file:PATH lines:LINE|START-END... <search-term>...\n\
-           cvb pull [file:PATH]... callers:IDENT\n\n\
+           cvb pull [file:PATH]... callers:IDENT\n\
+           cvb pull [file:PATH]... list: <search-term>...\n\n\
      Operators:\n\
          foo bar          OR: match either term\n\
          +foo             AND: require term anywhere in the matching unit\n\
          -foo             NOT: exclude any unit containing term\n\
          cascade:N        Expand dependencies up to depth N (0..=5)\n\
+         list:            Print matching units as names and line ranges, no bodies\n\
          \"foo bar\"        Match exact phrase\n\
          \"--dry-run\"      Match literal term starting with - or +\n\n\
      Examples:\n\
@@ -1505,7 +1622,8 @@ fn format_usage() -> &'static str {
          cvb pull file:src/pull.rs lines:10-25\n\
          cvb pull file:a.rs file:b.rs term\n\
          cvb pull file:src/pull.rs tail:40\n\
-         cvb pull file:src/pull.rs lines:100-300 foo\n"
+         cvb pull file:src/pull.rs lines:100-300 foo\n\
+         cvb pull list: CRLF BOM\n"
 }
 
 fn bash_unit_range(source: &str, hit_line: usize) -> Result<((usize, usize), &'static str), ()> {
@@ -2553,6 +2671,61 @@ fn target() {
         std::fs::write(dir.join("target/out.rs"), "fn c() {}\n").unwrap();
         std::fs::write(dir.join("debug.log"), "x\n").unwrap();
         dir
+    }
+
+    #[test]
+    fn list_prints_names_and_line_ranges_without_bodies() {
+        let dir = scratch_repo("list");
+        std::fs::write(
+            dir.join("tool.py"),
+            "import os\n\ndef compute():\n    secret_body_line = 8\n    return 8\n\ndef other():\n    return compute()\n",
+        )
+        .unwrap();
+        let (code, out, err) = run_capture(&["list:".into(), "compute".into()], Some(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(code, 0, "{err}");
+        assert!(out.contains("List: 2 units in 1 file; bodies not shown."), "{out}");
+        assert!(out.contains("  Python function: tool.py:3-5 (3 lines) def compute():"), "{out}");
+        assert!(out.contains("  Python function: tool.py:7-8 (2 lines) def other():"), "{out}");
+        assert!(out.contains("compute: 3"), "{out}");
+        assert!(!out.contains("secret_body_line"), "{out}");
+        assert!(!out.contains("return 8"), "{out}");
+    }
+
+    #[test]
+    fn list_needs_terms_and_refuses_incompatible_directives() {
+        let dir = scratch_repo("listerr");
+        for (args, text) in [
+            (vec!["list:", "file:tool.py"], "needs search terms"),
+            (vec!["list:"], "needs search terms"),
+            (vec!["list:", "x", "cascade:1"], "cascade:"),
+            (vec!["list:", "x", "head:3", "file:a"], "head:/tail:"),
+            (vec!["list:", "x", "callers:y"], "callers: or lines:"),
+        ] {
+            let args: Vec<String> = args.into_iter().map(String::from).collect();
+            let (code, _, err) = run_capture(&args, Some(&dir));
+            assert_eq!(code, 2, "{args:?}: {err}");
+            assert!(err.contains(text), "{args:?}: {err}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn many_matching_units_get_a_note_that_says_how_to_narrow() {
+        let dir = scratch_repo("many");
+        let mut source = String::new();
+        for n in 0..12 {
+            source.push_str(&format!("def f{n}():\n    return needle_{n} + needle\n\n"));
+        }
+        std::fs::write(dir.join("many.py"), &source).unwrap();
+        let (code, out, err) = run_capture(&["needle".into()], Some(&dir));
+        assert_eq!(code, 0, "{err}");
+        assert!(out.contains("Note: 12 units match in 1 file (24 lines in all). Narrow with file:PATH, +TERM or -TERM, or add list:"), "{out}");
+        // A few matches stay quiet.
+        std::fs::write(dir.join("few.py"), "def only():\n    return few_one\n").unwrap();
+        let (_, quiet, _) = run_capture(&["few_one".into()], Some(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!quiet.contains("Note:"), "{quiet}");
     }
 
     #[test]
