@@ -19,7 +19,7 @@ use crate::commit::apply::sha256_hex;
 use crate::patch::hunks::{FilePatch, Hunk, LineKind, matches, read};
 use crate::patch::near::{Candidate, NotShown, Pair, candidates_counted};
 use crate::patch::parse::Format;
-use crate::patch::reanchor::{Choice, reanchor};
+use crate::patch::reanchor::{Choice, corrected_hunk, reanchor};
 use crate::patch::review::{CONFIRM_KEY, clip};
 
 /// Lines of the patch's own text shown for a hunk, and of each candidate.
@@ -528,6 +528,15 @@ fn candidate_view(number: usize, candidate: &Candidate, hunk: &Hunk, file: &[&st
             }
         }
     }
+    out.push_str("  Corrected hunk if chosen:\n");
+    let corrected = corrected_hunk(hunk, candidate, file);
+    for (shown, (kind, text)) in corrected.iter().enumerate() {
+        if shown == MAX_CANDIDATE_LINES {
+            out.push_str(&format!("      ... {} more lines\n", corrected.len() - shown));
+            break;
+        }
+        out.push_str(&format!("    {}{}\n", kind.prefix(), cut(text)));
+    }
     out
 }
 
@@ -600,6 +609,10 @@ fn candidate_review_view(
         .skip(end)
     {
         out.push_str(&format!("  . after L{}: {}\n", line + 1, content));
+    }
+    out.push_str("  corrected hunk if chosen (exactly what would be applied):\n");
+    for (kind, text) in corrected_hunk(hunk, candidate, file) {
+        out.push_str(&format!("  | {}{}\n", kind.prefix(), text));
     }
     out
 }
@@ -979,6 +992,63 @@ mod tests {
         assert_eq!(p.hunk_count(), 1);
         let Step::Confirm { patch, .. } = p.feed(b"1") else { panic!() };
         assert!(patch.contains(" a\n-b\n+B\n c\n"), "{patch}");
+    }
+
+    #[test]
+    fn each_candidate_shows_the_corrected_hunk_it_would_apply() {
+        // Context line `let a` is misquoted; the added line lands after `let b`.
+        let text = envelope("*** Update File: f\n@@\n fn main() {\n     let a = 11;\n-    let b = 2;\n+    let b = 5;\n     let c = 3;\n");
+        let mut p = picker(&text);
+        let first = p.first_view();
+        assert!(first.contains("Corrected hunk if chosen:"), "{first}");
+        for line in [
+            "     fn main() {",
+            "         let a = 1;",
+            "    -    let b = 2;",
+            "    +    let b = 5;",
+            "         let c = 3;",
+        ] {
+            assert!(first.contains(line), "missing {line:?} in\n{first}");
+        }
+        let bundle = p.review_bundle();
+        assert!(bundle.contains("corrected hunk if chosen (exactly what would be applied):"), "{bundle}");
+        assert!(bundle.contains("  |      let a = 1;\n"), "{bundle}");
+        assert!(bundle.contains("  | -    let b = 2;\n  | +    let b = 5;\n"), "{bundle}");
+        // The shown hunk is the one that is applied.
+        let Step::Confirm { patch, .. } = p.feed(b"1") else { panic!() };
+        for line in ["-    let b = 2;", "+    let b = 5;", "     let a = 1;"] {
+            assert!(patch.contains(line), "{patch}");
+        }
+    }
+
+    #[test]
+    fn the_corrected_hunk_shows_lines_the_file_already_has() {
+        // The patch adds a test that the file already contains: the chosen
+        // window already holds the added text, which the hunk makes visible.
+        let file = "fn main() {\n    let a = 1;\n    check(a);\n    let b = 2;\n}\n";
+        let text = envelope("*** Update File: f\n@@\n fn main() {\n     let a = 1;\n+    check(a);\n     let b = 22;\n");
+        let originals = HashMap::from([("f".to_string(), file.to_string())]);
+        let p = Picker::new(&text, Format::ApplyPatch, originals).expect("picker");
+        let view = p.first_view();
+        // The added line is followed by the identical line the file already has.
+        assert!(view.contains("    +    check(a);\n         check(a);\n"), "{view}");
+    }
+
+    #[test]
+    fn a_long_corrected_hunk_is_cut_on_screen_but_whole_in_the_bundle() {
+        let file: String = (1..=40).map(|n| format!("    line_{n:02}();\n")).collect();
+        let mut body = String::from("*** Update File: f\n@@\n     line_01();\n     line_02();\n     line_03();\n");
+        for n in 0..30 {
+            body.push_str(&format!("+    added_{n:02}();\n"));
+        }
+        body.push_str("     line_0X();\n");
+        let originals = HashMap::from([("f".to_string(), file)]);
+        let p = Picker::new(&envelope(&body), Format::ApplyPatch, originals).expect("picker");
+        let view = p.first_view();
+        assert!(view.contains("more lines"), "{view}");
+        assert!(!view.contains("added_29"), "{view}");
+        let bundle = p.review_bundle();
+        assert!(bundle.contains("| +    added_29();"), "{bundle}");
     }
 
     #[test]

@@ -397,11 +397,11 @@ a recognized patch is shown (its text, a summary of the files, and any correctio
 .B Ctrl+B
 twice applies it; any other key cancels it and is passed on to the shell. A patch pasted while another waits replaces it.
 .PP
-When a patch fails because hunks do not match the files, CVB reports the failure (nothing is modified) and offers up to five candidate locations for each failing hunk. Places where only context lines differ come first; places where a line to be removed differs or is missing are offered only when there is nothing better, and the screen says how many were left out. Use the left and right arrow keys (or up and down) to browse candidates and
+When a patch fails because hunks do not match the files, CVB reports the failure (nothing is modified) and offers up to five candidate locations for each failing hunk. Places where only context lines differ come first; places where a line to be removed differs or is missing are offered only when there is nothing better, and the screen says how many were left out. Each candidate also shows the corrected hunk that choosing it would apply, so lines the patch would duplicate are visible before the choice. Use the left and right arrow keys (or up and down) to browse candidates and
 .B Enter
 to select the highlighted candidate. Number keys select a candidate directly.
 .PP
-CVB copies a review bundle to the clipboard: for each failing hunk, the patch as supplied and every candidate with its differences, its score, the enclosing scope and the surrounding file lines. The user may paste this bundle into an assistant for help evaluating which location is semantically correct. Candidate scores are suggestions, not proof; CVB does not silently decide ambiguous relocations.
+CVB copies a review bundle to the clipboard: for each failing hunk, the patch as supplied and every candidate with its differences, its score, the enclosing scope, the surrounding file lines and the corrected hunk that choosing it would apply. The user may paste this bundle into an assistant for help evaluating which location is semantically correct. Candidate scores are suggestions, not proof; CVB does not silently decide ambiguous relocations.
 .PP
 After the last choice the corrected patch is shown. A warning appears when a line to be removed differs from the one the patch named (the real file line would be removed), and another when a line to be removed is not in the file (that removal is dropped and nothing is deleted for it). Pressing
 .B s

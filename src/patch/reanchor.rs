@@ -70,6 +70,17 @@ fn rebuild(hunk: &Hunk, candidate: &Candidate, file: &[&str]) -> Body {
     body
 }
 
+/// The hunk as it would be applied at `candidate`: the lines of the corrected
+/// patch for this hunk, marked ` `, `-` and `+`. It is produced by the same
+/// `rebuild` that `reanchor` uses, so what is shown is what would be applied.
+pub(crate) fn corrected_hunk(
+    hunk: &Hunk,
+    candidate: &Candidate,
+    file: &[&str],
+) -> Vec<(LineKind, String)> {
+    rebuild(hunk, candidate, file)
+}
+
 fn render(body: &Body) -> Vec<String> {
     body.iter().map(|(kind, text)| format!("{}{text}", kind.prefix())).collect()
 }
