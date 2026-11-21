@@ -590,6 +590,36 @@ def main():
                   and not (s.project / "bin/tool.sh").exists(),
                   capture)
 
+            # ------------------------------------------- markdown fence
+            s.write("fenced.txt", "one\nold\n")
+            capture = s.paste_patch(
+                "```diff\n*** Begin Patch\n*** Update File: fenced.txt\n@@\n-old\n+new\n*** End Patch\n```\n",
+                wrap=False,
+            ).decode()
+            s.settle()
+            check("a patch in a markdown fence applies and the shell never sees the fence",
+                  capture.startswith("CVB patch APPLIED files=1")
+                  and s.read("fenced.txt") == "one\nnew\n"
+                  and b"command not found" not in bytes(s.buffer),
+                  capture)
+
+            # ------------------------------------- wrong-directory hint
+            os.makedirs(s.project / "sub", exist_ok=True)
+            s.send(b"cd sub\n")
+            s.settle()
+            capture = s.paste_patch(
+                "*** Update File: fenced.txt\n@@\n-new\n+newer\n"
+            ).decode()
+            check("a patch written for the parent directory is refused with a hint",
+                  capture.startswith("CVB patch REJECTED:")
+                  and "Update File target does not exist: fenced.txt" in capture
+                  and "Note: fenced.txt exists in" in capture
+                  and "a parent of this directory" in capture
+                  and s.read("fenced.txt") == "one\nnew\n",
+                  capture)
+            s.send(b"cd ..\n")
+            s.settle()
+
             # ----------------------------------- half-typed line is preserved
             s.settle()
             s.send(b"echo HALF_TYPED_LINE")

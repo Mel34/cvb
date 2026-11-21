@@ -137,6 +137,36 @@ fn require_absent(
     }
 }
 
+/// For a patch path that does not exist under `root`: a line saying where the
+/// file does exist, when it is somewhere obvious. Either in a parent directory
+/// (the patch was written for the project root and the shell is in a
+/// subdirectory, or the path starts with the project folder's name) or here
+/// without the path's first component (the patch names a folder that is not
+/// part of this tree). Nothing is guessed beyond that and nothing is applied.
+pub(crate) fn missing_hint(root: &Path, path: &str) -> Option<String> {
+    let is_file_at = |base: &Path, relative: &str| {
+        matches!(walk(base, relative), Ok(Walk::Exists(meta)) if meta.is_file())
+    };
+    for ancestor in root.ancestors().skip(1).take(8) {
+        if is_file_at(ancestor, path) {
+            return Some(format!(
+                "Note: {path} exists in {}, a parent of this directory ({}). \
+                 Change to that directory and paste the patch again.",
+                ancestor.display(),
+                root.display()
+            ));
+        }
+    }
+    let (first, rest) = path.split_once('/')?;
+    if is_file_at(root, rest) {
+        return Some(format!(
+            "Note: {rest} exists in this directory. The patch path starts with {first}/, \
+             which is not a folder here; it was probably written for another directory."
+        ));
+    }
+    None
+}
+
 /// Checks every operation of `parsed` against the tree under `root`, in patch
 /// order, and reports the first problem. `root` should be an absolute path; the
 /// optional `state_dir` is CVB's state directory (also absolute).
@@ -224,6 +254,30 @@ mod tests {
             check(&root, "*** Add File: dangling\n+x\n"),
             Err(GuardError::Symlink { .. })
         ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_missing_file_gets_a_hint_when_it_exists_in_a_parent() {
+        let root = tree("hint-parent");
+        let sub = root.join("src");
+        // The shell is in src/ but the patch names src/a.rs: it exists one level up.
+        let hint = missing_hint(&sub, "src/a.rs").expect("hint");
+        assert!(hint.contains("src/a.rs exists in"), "{hint}");
+        assert!(hint.contains(&root.display().to_string()), "{hint}");
+        assert!(hint.contains("parent of this directory"), "{hint}");
+        // Nothing found for a file that exists nowhere.
+        assert_eq!(missing_hint(&sub, "src/nowhere.rs"), None);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_missing_file_gets_a_hint_when_the_first_component_is_foreign() {
+        let root = tree("hint-prefix");
+        let hint = missing_hint(&root, "project/src/a.rs").expect("hint");
+        assert!(hint.contains("src/a.rs exists in this directory"), "{hint}");
+        assert!(hint.contains("starts with project/"), "{hint}");
+        assert_eq!(missing_hint(&root, "src/nowhere.rs"), None);
         let _ = fs::remove_dir_all(root);
     }
 

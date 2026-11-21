@@ -100,6 +100,11 @@ pub(crate) struct PasteRecognizer {
     scan_from: usize,
     /// What the held paste turned out to be (valid from `Buffer` on).
     kind: Kind,
+    /// Bytes at the start of the held paste that are a markdown code fence
+    /// around a patch (a fence line and what follows it up to the patch). Zero
+    /// when there is none. The bytes stay in `buf`, so a paste that is forwarded
+    /// instead of applied is forwarded unchanged.
+    fence_skip: usize,
 }
 
 /// The syntax of a held paste.
@@ -117,6 +122,76 @@ enum DiffSniff {
     No,
     /// Not enough bytes yet.
     More,
+}
+
+/// A markdown code fence.
+const FENCE: &[u8] = b"```";
+
+/// What a leading code fence says about the paste.
+enum FenceSniff {
+    /// A fence line followed by a patch; the patch starts this many bytes into
+    /// the text that was examined.
+    Patch(usize),
+    No,
+    /// Not enough bytes yet.
+    More,
+}
+
+/// Does `rest` (starting with a fence) hold a fence line and then a patch?
+/// The fence line is three backticks and an optional language word, nothing else.
+fn sniff_fence(rest: &[u8], ended: bool) -> FenceSniff {
+    let Some(newline) = rest.iter().position(|b| *b == b'\n') else {
+        return if ended { FenceSniff::No } else { FenceSniff::More };
+    };
+    let line = trim_cr(&rest[..newline]);
+    let mut word = &line[FENCE.len()..];
+    while let Some((last, before)) = word.split_last() {
+        if matches!(*last, b' ' | b'\t') {
+            word = before;
+        } else {
+            break;
+        }
+    }
+    let plain = word
+        .iter()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(*b, b'_' | b'-' | b'+' | b'.'));
+    if !plain || word.len() > 20 {
+        return FenceSniff::No;
+    }
+    let after = &rest[newline + 1..];
+    let blank = after
+        .iter()
+        .take_while(|b| matches!(**b, b' ' | b'\t' | b'\r' | b'\n'))
+        .count();
+    let inner = &after[blank..];
+    let offset = newline + 1;
+    if inner.starts_with(BEGIN) {
+        return FenceSniff::Patch(offset);
+    }
+    match sniff_diff(inner, ended) {
+        DiffSniff::Yes => FenceSniff::Patch(offset),
+        DiffSniff::More => FenceSniff::More,
+        DiffSniff::No if !ended && BEGIN.starts_with(inner) => FenceSniff::More,
+        DiffSniff::No => FenceSniff::No,
+    }
+}
+
+/// The paste body without its opening fence (the first `skip` bytes) and
+/// without a closing fence line after the patch.
+fn strip_fence(mut body: Vec<u8>, skip: usize) -> Vec<u8> {
+    body.drain(..skip.min(body.len()));
+    let kept = body
+        .iter()
+        .rposition(|b| !matches!(*b, b' ' | b'\t' | b'\r' | b'\n'))
+        .map_or(0, |at| at + 1);
+    let last_line_start = body[..kept]
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map_or(0, |at| at + 1);
+    if &body[last_line_start..kept] == FENCE && last_line_start > 0 {
+        body.truncate(last_line_start);
+    }
+    body
 }
 
 /// Does `rest` (the paste without leading blank space) start a unified diff?
@@ -163,6 +238,7 @@ impl PasteRecognizer {
             buf: Vec::new(),
             scan_from: 0,
             kind: Kind::Envelope,
+            fence_skip: 0,
         }
     }
 
@@ -230,6 +306,7 @@ impl PasteRecognizer {
             }
             self.buf = rest;
             self.scan_from = 0;
+            self.fence_skip = 0;
             if idle {
                 self.state = State::Sniff;
             } else {
@@ -273,12 +350,32 @@ impl PasteRecognizer {
         }
         let end = self.find_end();
         let content_len = end.unwrap_or(self.buf.len());
-        let content = &self.buf[..content_len];
+        let content = &self.buf[self.fence_skip.min(content_len)..content_len];
         let skip = content
             .iter()
             .take_while(|b| matches!(**b, b' ' | b'\t' | b'\r' | b'\n'))
             .count();
         let rest = &content[skip..];
+
+        // A patch copied from a chat answer often keeps its markdown fence.
+        if self.fence_skip == 0
+            && end.is_none()
+            && !rest.is_empty()
+            && rest.len() < FENCE.len()
+            && FENCE.starts_with(rest)
+        {
+            return false; // the start of a fence may be split across reads
+        }
+        if self.fence_skip == 0 && rest.starts_with(FENCE) {
+            match sniff_fence(rest, end.is_some()) {
+                FenceSniff::Patch(inner) => {
+                    self.fence_skip = skip + inner;
+                    return true;
+                }
+                FenceSniff::More => return false,
+                FenceSniff::No => {}
+            }
+        }
 
         if !(rest.starts_with(BEGIN) || BEGIN.starts_with(rest)) {
             // Not an envelope: maybe a unified diff.
@@ -341,7 +438,11 @@ impl PasteRecognizer {
         };
         let rest = self.buf.split_off(at + PASTE_END.len());
         self.buf.truncate(at);
-        let body = std::mem::take(&mut self.buf);
+        let mut body = std::mem::take(&mut self.buf);
+        if self.fence_skip > 0 {
+            body = strip_fence(body, self.fence_skip);
+            self.fence_skip = 0;
+        }
         self.buf = rest;
         self.scan_from = 0;
         self.state = State::Normal;
@@ -1080,5 +1181,86 @@ mod tests {
         assert_eq!(events[1], PasteEvent::Forward(b"ls\r".to_vec()));
         assert_eq!(events[2], expected_patch()[0]);
         assert_eq!(r.pending(), Pending::Nothing);
+    }
+
+    const DIFF_BODY: &str = "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n";
+
+    #[test]
+    fn a_patch_in_a_markdown_fence_is_recognised_without_the_fence() {
+        for opening in ["```", "```diff", "```patch", "```text", "``` "] {
+            let body = format!("{opening}\n{PATCH}\n```\n");
+            for sizes in [&[4096][..], &[1], &[3, 5, 7]] {
+                let (events, r) = run(&wrapped(&body), sizes, true);
+                assert_eq!(
+                    events,
+                    vec![PasteEvent::Patch(format!("{PATCH}\n"))],
+                    "{opening:?} {sizes:?}"
+                );
+                assert_eq!(r.pending(), Pending::Nothing);
+            }
+        }
+    }
+
+    #[test]
+    fn a_diff_in_a_markdown_fence_is_recognised_without_the_fence() {
+        let body = format!("```diff\n{DIFF_BODY}```\n");
+        let (events, _) = run(&wrapped(&body), &[2], true);
+        assert_eq!(events, vec![PasteEvent::Patch(DIFF_BODY.to_string())]);
+    }
+
+    #[test]
+    fn a_fence_without_a_closing_line_still_works() {
+        let body = format!("\n```\n{PATCH}\n");
+        let (events, _) = run(&wrapped(&body), &[4096], true);
+        assert_eq!(events, vec![PasteEvent::Patch(format!("{PATCH}\n"))]);
+    }
+
+    #[test]
+    fn a_fence_around_something_else_is_an_ordinary_paste() {
+        for body in [
+            "```\nls -la\n```\n",
+            "```diff\nnot a patch\n```\n",
+            "```a very long language name that is not one\n*** Begin Patch\n```\n",
+            "```\n",
+        ] {
+            let (events, _) = run(&wrapped(body), &[3], true);
+            assert_eq!(forwarded(&events), body.as_bytes(), "{body:?}");
+            assert!(!events.iter().any(|e| matches!(e, PasteEvent::Patch(_))), "{body:?}");
+        }
+    }
+
+    #[test]
+    fn explanation_text_after_a_fenced_patch_keeps_the_paste_from_being_applied() {
+        let body = format!("```\n{PATCH}\n```\nThis changes a.txt.\n");
+        let (events, _) = run(&wrapped(&body), &[4096], true);
+        assert!(!events.iter().any(|e| matches!(e, PasteEvent::Patch(_))), "{events:?}");
+    }
+
+    #[test]
+    fn a_fenced_patch_that_times_out_is_forwarded_with_its_fence() {
+        let mut r = PasteRecognizer::new();
+        let input = format!("```\n{PATCH}\n");
+        let mut events = r.feed(PASTE_START, true);
+        events.extend(r.feed(input.as_bytes(), true));
+        assert!(events.is_empty());
+        let flushed = r.on_timeout();
+        let mut expected = PASTE_START.to_vec();
+        expected.extend_from_slice(input.as_bytes());
+        assert_eq!(flushed, vec![PasteEvent::Forward(expected)]);
+    }
+
+    #[test]
+    fn a_fence_is_not_stripped_from_the_next_paste() {
+        let fenced = format!("```\n{PATCH}\n```\n");
+        let mut input = wrapped(&fenced);
+        input.extend_from_slice(&wrapped(&format!("{PATCH}\n")));
+        let (events, _) = run(&input, &[4096], true);
+        assert_eq!(
+            events,
+            vec![
+                PasteEvent::Patch(format!("{PATCH}\n")),
+                PasteEvent::Patch(format!("{PATCH}\n")),
+            ]
+        );
     }
 }

@@ -23,7 +23,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::patch::guard::check_tree;
+use crate::patch::guard::{GuardError, check_tree, missing_hint};
 use crate::patch::picker::Picker;
 use crate::patch::parse::{Change, Format, ParsedPatch, parse_any};
 use crate::commit::apply::{ABSENT_DIGEST, ApplyError, apply_plan_with_modes, sha256_hex};
@@ -197,7 +197,14 @@ fn run_patch_with(
     };
     let state_base = fs::canonicalize(env.state_base).unwrap_or_else(|_| env.state_base.to_path_buf());
     if let Err(error) = check_tree(&parsed, &state.canonical_root, Some(&state_base)) {
-        return rejected(error.to_string());
+        let mut reason = error.to_string();
+        if let GuardError::Missing { path, .. } = &error
+            && let Some(hint) = missing_hint(&state.canonical_root, path)
+        {
+            reason.push('\n');
+            reason.push_str(&hint);
+        }
+        return rejected(reason);
     }
 
     let originals = match read_originals(&parsed, &state.canonical_root) {
@@ -1351,6 +1358,30 @@ printf '%s\n' "${changed[@]}"
         }
         assert_eq!(f.snapshot(), before);
         assert_eq!(f.log("stdin"), "", "apply_patch must not have been started");
+    }
+
+    #[test]
+    fn a_missing_target_that_exists_elsewhere_gets_a_hint_in_the_rejection() {
+        let f = Fixture::new("wrongdir");
+        f.write("exists.txt", "x\n");
+        let before = f.snapshot();
+        for body in [
+            "*** Update File: project/exists.txt\n@@\n-x\n+y\n",
+            "*** Delete File: project/exists.txt\n",
+        ] {
+            let report = f.run(body);
+            let Report::Rejected(reason) = &report else { panic!("{body:?}: {report:?}") };
+            assert!(reason.contains("target does not exist: project/exists.txt"), "{reason}");
+            assert!(
+                reason.contains("\nNote: exists.txt exists in this directory. The patch path starts with project/"),
+                "{reason}"
+            );
+        }
+        // A path that exists nowhere gets no note.
+        let report = f.run("*** Update File: nowhere.txt\n@@\n-x\n+y\n");
+        let Report::Rejected(reason) = &report else { panic!("{report:?}") };
+        assert!(!reason.contains("Note:"), "{reason}");
+        assert_eq!(f.snapshot(), before);
     }
 
     #[test]

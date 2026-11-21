@@ -270,7 +270,8 @@ A /home/you/project/src/new.rs
 - **Where it applies.** The patch root is the shell's current directory. Paths must be relative, without `..` or a `.git` component, and must not pass through a symlink. A patch that touches a file someone else changed while it was being applied is refused.
 - **Only at a prompt.** A paste is examined only while the shell is waiting for a command, not inside an editor, `ssh` or a running program. A paste that is not exactly one patch is treated as commands (see [Command blocks](#command-blocks)) or, when it holds control characters, is not valid UTF-8 or is too large, reaches the shell unchanged. A patch without its `*** End Patch` line, or a diff that ends right after a hunk header, is refused and never reaches the shell.
 - **Pasted twice?** When a patch fails because its changes are already in the files, the failure text says so (`Note: every hunk of this patch appears to be already present ...`). The note is only an explanation; the outcome is still FAILED with nothing modified.
-- **Refusals** read `CVB patch REJECTED: reason`.
+- **Refusals** read `CVB patch REJECTED: reason`. When a file the patch updates or deletes does not exist but does exist in a parent directory (the shell is in a subdirectory of the project) or without the first folder of the patch path (the patch was written for another directory), the refusal adds a `Note:` line saying where the file is. Nothing is applied or guessed.
+- **Fenced patches.** A patch or diff pasted inside a markdown code fence (a line of three backticks, optionally with a language word, before it and a closing fence after it) is applied as if the fence were not there. A fence around anything else, or text after the closing fence, leaves the paste an ordinary command block.
 
 This needs a terminal that sends bracketed paste (most do; Bash enables it by default). Set `CVB_PATCH_PASTE=off` to turn the feature off.
 

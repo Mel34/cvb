@@ -371,6 +371,10 @@ and
 or
 .B CVB patch REJECTED: reason\c
 \&. Nothing is added to the shell history.
+A patch or diff inside a markdown code fence (a line of three backticks, optionally with a language word, before it and a closing fence after it) is applied as if the fence were not there.
+When a file to update or delete does not exist but does exist in a parent directory, or without the first folder of the patch path, the refusal adds a
+.B Note:
+line saying where the file is.
 .PP
 When a patch fails because its changes are already present in the files (for example, it was pasted twice), the output of
 .B apply_patch
