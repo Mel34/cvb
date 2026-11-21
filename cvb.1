@@ -406,6 +406,23 @@ or an unknown key cancels the picker; unrecognized input is passed on to the she
 twice applies the corrected patch. If a file the patch changes has different contents from when the candidates were shown (compared by content; touching a file does not count), CVB changes nothing, reports
 .BR "CVB patch REJECTED: FILE changed since the candidates were shown" ,
 and closes the picker; the patch must be pasted again. There is no overall inactivity timeout; CVB briefly waits 30 milliseconds to distinguish a split Escape sequence from a standalone Escape.
+.SH TAB COMPLETION
+Sourcing
+.I cvb.bash
+also registers Bash completion for
+.BR cvb ,
+in the parent shell and in the resident session.
+Tab completes subcommands, options and paths.
+After
+.B cvb pull
+it offers only the directives that are still valid for the arguments already typed,
+completes
+.B file:
+with the files of the Git repository (tracked or untracked, not ignored)
+one path segment at a time, and offers
+.B cascade:1
+to
+.BR cascade:5 .
 .SH TARGET RESOLUTION
 Existing filesystem paths take precedence over external commands.
 .PP

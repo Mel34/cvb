@@ -145,6 +145,10 @@ PS1='\[\e[31m\]●\[\e[0m\] '"$CVB_SAVED_PS1"
 # trailing backslash, an open quote).
 PS2='\[\e]777;CVB;CONT\a\]'"${PS2-> }"
 
+# Tab completion for cvb. The functions come from the parent shell with the
+# other shell state; only the registration is missing in this shell.
+declare -F _cvb_complete >/dev/null 2>&1 && complete -F _cvb_complete cvb
+
 # Paste-to-apply: after CVB prints the result of a pasted patch it sends this
 # private key sequence, which redraws the prompt and anything half-typed without
 # running a command or touching history. Bound in every editing mode.

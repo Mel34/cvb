@@ -375,6 +375,10 @@ The file is read on every command, so edits take effect immediately in running s
 
 Screen captures copy the textual contents of the currently visible terminal screen.
 
+## Tab completion
+
+Sourcing `data/cvb.bash` also registers Bash tab completion for `cvb`, in the parent shell and in the resident session. Tab completes subcommands, options and paths. For `cvb pull` it suggests the directives that still make sense after the arguments already typed (for example `head:` is not offered once a search term is present), completes `file:` with the files of the Git repository one path segment at a time (tracked or untracked, not ignored; directories end in `/`), and offers `cascade:1` to `cascade:5`. Hidden files are offered only when the prefix starts with a dot. Completion needs no extra configuration.
+
 ## CLI
 
 ```text
