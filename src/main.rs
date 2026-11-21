@@ -72,8 +72,9 @@ Modes:
     cvb                      Start a terminal capture session
     cvb <PATH>...            Capture files or directory inventories
     cvb pull                  Search tracked and non-ignored untracked source files
-    cvb pull file:PATH ...    Restrict a search to one file
-    cvb pull callers:NAME     Find syntactic Rust call-site candidates
+    cvb pull file:PATH ...    Restrict a search to the named files, or print one file
+    cvb pull callers:NAME     Find syntactic call-site candidates (not proof)
+    cvb pull list: TERM       List matching units without their bodies
     cvb context               Print the LLM operating manual
     cvb repaste               Copy the session's last clipboard content again
 
