@@ -246,6 +246,13 @@ number = len(files) + 1
         )
         fake_copy.chmod(0o755)
 
+        # The session shell has no `cvb` of its own: the real function comes
+        # from data/cvb.bash in the user's parent shell, which this harness
+        # does not source. A shim on PATH stands in for the installed binary.
+        cvb_shim = fake_bin / "cvb"
+        cvb_shim.write_text(f"#!/bin/sh\nexec {binary} \"$@\"\n")
+        cvb_shim.chmod(0o755)
+
         control_source = ROOT / "data" / "cvb.bash"
         env = os.environ.copy()
         env.update({
